@@ -1,6 +1,6 @@
 name = "xboard-subscription"
 main = "src/index.ts"
-compatibility_date = "2026-06-26"
+compatibility_date = "2026-06-26"`naccount_id = "cd9de1eff822540d1c9a37bf9ae28931"
 
 [[d1_databases]]
 binding = "XBOARD_DB"

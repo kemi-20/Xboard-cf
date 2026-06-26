@@ -54,3 +54,25 @@ Wrangler status:
 
 - `npx wrangler whoami` reported unauthenticated in this environment.
 - Full source deploy command after login: run `npm run deploy` inside each `workers/<name>` folder.
+
+## GitHub automatic deployment
+
+Cloudflare Workers Builds repository connection was created for `kemi-20/Xboard-cf`:
+
+- Provider: GitHub
+- Provider account: `kemi-20` (`72487102`)
+- Repository id: `1281079598`
+- Repository connection UUID: `5fcd808d-ee3b-48c1-9fea-44f472228f44`
+- Branch: `master`
+
+Creating Workers Builds trigger configurations through the Cloudflare API returned:
+
+```text
+12044: This account does not have access to Workers Previews
+```
+
+Because the account rejected Workers Builds trigger setup, repository-side automatic deploys are implemented with GitHub Actions in `.github/workflows/deploy-workers.yml`. Add the repository secret `CLOUDFLARE_API_TOKEN`; subsequent pushes to `master` deploy all five Worker roots automatically.
+
+## Admin path
+
+The default admin path is `/admin`. Seed data sets both `frontend_admin_path` and `secure_path` to `admin`.
