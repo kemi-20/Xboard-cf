@@ -1,0 +1,28 @@
+name = "xboard-jobs"
+main = "src/index.ts"
+compatibility_date = "2026-06-26"
+
+[[d1_databases]]
+binding = "XBOARD_DB"
+database_name = "xboard-db"
+database_id = "D1_DATABASE_ID"
+
+[[kv_namespaces]]
+binding = "XBOARD_KV"
+id = "KV_NAMESPACE_ID"
+
+[[queues.consumers]]
+queue = "traffic-events"
+
+[[queues.consumers]]
+queue = "mail-events"
+
+[[queues.consumers]]
+queue = "telegram-events"
+
+[[queues.consumers]]
+queue = "stat-events"
+
+[[queues.consumers]]
+queue = "node-sync-events"
+
