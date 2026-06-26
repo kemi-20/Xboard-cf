@@ -1,10 +1,39 @@
-# XBoard Cloudflare-Native
+# XBoard CF
 
-This repository is a Cloudflare-native rewrite scaffold for XBoard. It targets Cloudflare Workers, D1, KV, Queues, and Durable Objects instead of the original Laravel/PHP runtime.
+XBoard CF is a Cloudflare-native rewrite of XBoard for Workers, D1, KV, Queues, and Static Assets. It keeps the XBoard-style admin panel and compatible API surfaces, while removing the Laravel/PHP runtime requirement.
 
-## Default super administrator
+## What This Project Provides
 
-The default seed creates:
+- Admin Web UI at `/admin`
+- Admin API and user API in `xboard-edge`
+- Subscription API in `xboard-subscription`
+- Node/server reporting API in `xboard-server`
+- Queue consumer in `xboard-jobs`
+- Scheduled maintenance worker in `xboard-cron`
+- D1 database schema and seed files
+- KV-backed cache/session/version state
+
+The site root `/` intentionally returns only:
+
+```text
+200
+```
+
+The admin panel is served from:
+
+```text
+/admin
+```
+
+Admin inner pages use hash routes, for example:
+
+```text
+/admin#/server/machine
+```
+
+## Default Administrator
+
+The default super administrator is:
 
 ```text
 Email: admin@admin.com
@@ -13,16 +42,28 @@ Password: adminadmin
 
 Change this password immediately after first login.
 
-## Cloudflare resources
+## Cloudflare Resources
+
+Create these resources before deployment:
 
 ```text
-D1: xboard-db
-KV: xboard-kv
+D1 database: xboard-db
+KV namespace: xboard-kv
 Queues: traffic-events, mail-events, telegram-events, stat-events, node-sync-events
 Durable Object: NodeHub
 ```
 
-Every Worker is independently deployable from its own root folder:
+Bindings used by the Workers:
+
+```text
+D1 binding: XBOARD_DB
+KV binding: XBOARD_KV
+Static Assets binding for xboard-edge: ASSETS
+```
+
+## Worker Folders
+
+Each Worker is independently deployable from its own root folder:
 
 ```text
 workers/xboard-edge
@@ -32,24 +73,26 @@ workers/xboard-jobs
 workers/xboard-cron
 ```
 
-The admin panel is always exposed at `/admin`. Admin pages are hash routes under that path, for example:
-
-```text
-/admin
-/admin#/server/machine
-```
-
-The site root `/` intentionally returns only a plain `200` response.
+Cloudflare Workers Builds can be connected directly to this GitHub repository. Use branch `master`, and set each Worker root directory to its corresponding folder.
 
 ## Initialize D1
+
+Run the schema and seed:
 
 ```bash
 wrangler d1 execute xboard-db --file schema/d1.sql
 wrangler d1 execute xboard-db --file schema/seed.sql
+```
+
+To update or recreate the default administrator:
+
+```bash
 npm run seed:admin
 ```
 
-## Deploy one Worker
+## Deploy A Worker Manually
+
+Example for `xboard-edge`:
 
 ```bash
 cd workers/xboard-edge
@@ -59,38 +102,19 @@ npm test
 npm run deploy
 ```
 
-Repeat for each Worker folder. Replace placeholder D1/KV IDs in every `wrangler.toml` after Cloudflare resource creation.
+Repeat for each Worker folder if you are not using Cloudflare Workers Builds.
 
-## Automatic deploys from Cloudflare Workers Builds
+## Payment Status
 
-The five Workers are connected to this GitHub repository through Cloudflare Workers Builds. Each trigger watches `master` and deploys from its own root directory:
+Real payment, commission payout, gift-card redemption, and order payment flows are intentionally disabled for now. Compatibility tables and placeholder API responses exist so the admin UI can load without crashing.
 
-```text
-xboard-edge          -> workers/xboard-edge
-xboard-subscription  -> workers/xboard-subscription
-xboard-server        -> workers/xboard-server
-xboard-jobs          -> workers/xboard-jobs
-xboard-cron          -> workers/xboard-cron
-```
+## Upstream Attribution
 
-Cloudflare runs this build/deploy flow for each Worker:
-
-```bash
-npm ci && npm run typecheck && npm test
-npx wrangler deploy
-```
-
-## Payment status
-
-Payment, commission, gift-card, and real order payment flows are intentionally disabled for now. Compatibility tables and API placeholders are present so the admin UI does not crash.
-
-## Upstream references and attribution
-
-This rewrite uses these upstream projects as compatibility references:
+This project references the original XBoard ecosystem:
 
 - https://github.com/cedar2025/Xboard
 - https://github.com/cedar2025/xboard-admin-dist
 - https://github.com/cedar2025/xboard-user
 - https://github.com/cedar2025/Xboard-Node
 
-The original XBoard project is MIT licensed. Keep upstream notices when copying assets or implementation details from those repositories.
+The original XBoard project is MIT licensed. Keep upstream attribution when copying assets or implementation details.
