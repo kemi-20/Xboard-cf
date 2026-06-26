@@ -26,5 +26,6 @@ export function token(bytes = 32): string {
 export function getBearer(request: Request): string | null {
   const h = request.headers.get("authorization") || "";
   if (h.toLowerCase().startsWith("bearer ")) return h.slice(7).trim();
+  if (h.trim()) return h.trim();
   return request.headers.get("x-token") || request.headers.get("token");
 }
