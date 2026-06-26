@@ -15,6 +15,7 @@ export interface D1Database {
   batch<T = unknown>(statements: D1PreparedStatement[]): Promise<D1Result<T>[]>;
 }
 export interface Queue<T = unknown> { send(message: T): Promise<void>; sendBatch(messages: { body: T }[]): Promise<void>; }
+export interface Fetcher { fetch(input: RequestInfo, init?: RequestInit): Promise<Response>; }
 export interface Message<T = unknown> { body: T; ack(): void; retry(): void; }
 export interface MessageBatch<T = unknown> { messages: Message<T>[]; queue: string; }
 export interface DurableObjectState { storage: Map<string, unknown>; }

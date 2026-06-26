@@ -1,0 +1,18 @@
+{
+  "index.html": {
+    "file": "assets/index-CEIYH7i8.js",
+    "name": "index",
+    "src": "index.html",
+    "isEntry": true,
+    "css": [
+      "assets/index-DiYa-_z_.css"
+    ],
+    "assets": [
+      "assets/codicon-ngg6Pgfi.ttf"
+    ]
+  },
+  "node_modules/monaco-editor/esm/vs/base/browser/ui/codicons/codicon/codicon.ttf": {
+    "file": "assets/codicon-ngg6Pgfi.ttf",
+    "src": "node_modules/monaco-editor/esm/vs/base/browser/ui/codicons/codicon/codicon.ttf"
+  }
+}
