@@ -6,7 +6,14 @@ export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; TRAFFIC_EV
 async function auth(request: Request, env: Env) {
   const token = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") || request.headers.get("x-node-token") || new URL(request.url).searchParams.get("token");
   if (!token) return null;
-  return await env.XBOARD_DB.prepare("SELECT * FROM v2_server WHERE json_extract(protocol_settings, '$.token') = ? OR id = ?").bind(token, token).first<any>();
+  const globalToken = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = 'server_token'").first<{ value: string }>();
+  const nodeId = new URL(request.url).searchParams.get("node_id") || request.headers.get("x-node-id") || new URL(request.url).searchParams.get("id");
+  if (globalToken?.value && token === globalToken.value && nodeId) {
+    return await env.XBOARD_DB.prepare("SELECT * FROM v2_server WHERE id = ?").bind(nodeId).first<any>();
+  }
+  const machine = await env.XBOARD_DB.prepare("SELECT * FROM v2_server_machine WHERE token = ? AND COALESCE(is_active, enabled, 1) = 1").bind(token).first<any>();
+  if (machine) return { machine, id: new URL(request.url).searchParams.get("node_id") || 0, machine_id: machine.id };
+  return null;
 }
 export class NodeHub {
   constructor(private state: DurableObjectState, private env: Env) {}
@@ -30,20 +37,39 @@ export default {
     }
     const server = await auth(request, env);
     if (!server) return fail("Invalid node token", 401);
-    await env.XBOARD_KV.put(`node:last_check:${server.id}`, String(now()), { expirationTtl: 3600 });
-    if (url.pathname.includes("config")) return ok(server);
+    const serverId = Number(server.id || url.searchParams.get("node_id") || 0);
+    const node = serverId ? await env.XBOARD_DB.prepare("SELECT * FROM v2_server WHERE id = ?").bind(serverId).first<any>() : server;
+    if (!node) return fail("Invalid node id", 404);
+    await env.XBOARD_KV.put(`node:last_check:${node.id}`, String(now()), { expirationTtl: 3600 });
+    if (url.pathname.includes("config")) {
+      const protocol = (() => { try { return JSON.parse(node.protocol_settings || "{}"); } catch { return {}; } })();
+      return ok({ ...node, protocol_settings: protocol, group_ids: JSON.parse(node.group_ids || "[]"), route_ids: JSON.parse(node.route_ids || "[]"), push_interval: 60, pull_interval: 60 });
+    }
     if (url.pathname.includes("user")) {
-      const users = await env.XBOARD_DB.prepare("SELECT id, uuid, email, transfer_enable, u, d, expired_at, speed_limit, device_limit FROM v2_user WHERE banned = 0").all();
-      return ok(users.results || []);
+      const groupIds = (() => { try { return JSON.parse(node.group_ids || "[]").map(Number); } catch { return []; } })();
+      const users = await env.XBOARD_DB.prepare("SELECT * FROM v2_user WHERE banned = 0 AND (expired_at IS NULL OR expired_at > ?) AND (transfer_enable = 0 OR (u + d) < transfer_enable)").bind(now()).all<any>();
+      return ok((users.results || []).filter(user => groupIds.length === 0 || groupIds.includes(Number(user.group_id))));
     }
     if (url.pathname.includes("traffic")) {
       const input = await body<any>(request);
-      const event = { event_id: crypto.randomUUID(), type: "traffic", server_id: server.id, server_type: server.type, payload: input, created_at: now() };
+      const rows = Array.isArray(input) ? input : Array.isArray(input?.data) ? input.data : Array.isArray(input?.res) ? input.res.map((r: any[]) => ({ user_id: r[0], u: r[1], d: r[2] })) : [input];
+      const event = { event_id: crypto.randomUUID(), type: "traffic", server_id: node.id, server_type: node.type, rate: Number(node.rate || 1), payload: rows, created_at: now() };
       await env.TRAFFIC_EVENTS.send(event);
-      await env.XBOARD_KV.put(`node:last_push:${server.id}`, String(now()), { expirationTtl: 3600 });
+      await env.XBOARD_KV.put(`node:last_push:${node.id}`, String(now()), { expirationTtl: 3600 });
       return ok(true);
     }
-    if (url.pathname.includes("machine")) return ok({ node: server, load: await env.XBOARD_KV.get(`node:load:${server.id}`) });
-    return ok({ server });
+    if (url.pathname.includes("alive")) {
+      const input = await body<any>(request);
+      await env.XBOARD_KV.put(`node:online:${node.id}`, JSON.stringify(input), { expirationTtl: 300 });
+      return ok(true);
+    }
+    if (url.pathname.includes("status")) {
+      const input = await body<any>(request);
+      await env.XBOARD_KV.put(`node:load:${node.id}`, JSON.stringify(input), { expirationTtl: 3600 });
+      return ok(true);
+    }
+    if (url.pathname.includes("alivelist")) return ok([]);
+    if (url.pathname.includes("machine")) return ok({ node, load: await env.XBOARD_KV.get(`node:load:${node.id}`) });
+    return ok({ server: node });
   }
 };

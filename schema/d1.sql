@@ -24,6 +24,14 @@ CREATE TABLE IF NOT EXISTS v2_user (
   plan_id INTEGER DEFAULT NULL,
   group_id INTEGER DEFAULT NULL,
   device_limit INTEGER DEFAULT NULL,
+  speed_limit INTEGER DEFAULT NULL,
+  discount INTEGER DEFAULT NULL,
+  commission_rate INTEGER DEFAULT NULL,
+  remind_expire INTEGER NOT NULL DEFAULT 1,
+  remind_traffic INTEGER NOT NULL DEFAULT 1,
+  reset_count INTEGER NOT NULL DEFAULT 0,
+  last_reset_at INTEGER DEFAULT NULL,
+  next_reset_at INTEGER DEFAULT NULL,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -48,6 +56,8 @@ CREATE TABLE IF NOT EXISTS v2_plan (
   name TEXT NOT NULL,
   speed_limit INTEGER,
   device_limit INTEGER,
+  capacity_limit INTEGER,
+  reset_traffic_method INTEGER DEFAULT 0,
   prices TEXT,
   content TEXT,
   tags TEXT,
@@ -80,8 +90,11 @@ CREATE TABLE IF NOT EXISTS v2_server_machine (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
   address TEXT,
+  notes TEXT,
   token TEXT NOT NULL UNIQUE,
   enabled INTEGER DEFAULT 1,
+  is_active INTEGER DEFAULT 1,
+  last_seen_at INTEGER,
   load_status TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
@@ -118,6 +131,8 @@ CREATE TABLE IF NOT EXISTS v2_server (
   last_check_at INTEGER,
   last_push_at INTEGER,
   online_user INTEGER NOT NULL DEFAULT 0,
+  u INTEGER NOT NULL DEFAULT 0,
+  d INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
