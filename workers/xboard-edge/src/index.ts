@@ -120,6 +120,7 @@ export default {
     if (url.pathname.startsWith("/api/v2/passport")) return adminApi(request, env, url.pathname.replace("/api/v2", "/api/v2/admin"));
     if (url.pathname.startsWith("/api/v2/admin")) return adminApi(request, env, url.pathname);
     if (url.pathname.startsWith("/api/v1") || url.pathname.startsWith("/api/v2/user")) return userApi(request, env, url.pathname);
-    return json({ name: "XBoard CF Edge", admin: "/admin" });
+    if (url.pathname === "/") return new Response("200", { status: 200, headers: { "content-type": "text/plain; charset=utf-8" } });
+    return json({ status: 200 });
   }
 };
