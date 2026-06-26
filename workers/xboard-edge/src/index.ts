@@ -33,6 +33,75 @@ const pagedFetchTables: Record<string, string> = {
   "/gift-card/usages": "v2_gift_card_usage"
 };
 
+async function runSqlIgnore(env: Env, sql: string, binds: any[] = []) {
+  try {
+    await env.XBOARD_DB.prepare(sql).bind(...binds).run();
+  } catch {
+    // Used by first-run schema compatibility. Existing columns/rows are fine.
+  }
+}
+
+async function ensureBootstrap(env: Env) {
+  const marker = await env.XBOARD_KV.get("bootstrap:edge:v3");
+  if (marker) return;
+  const alters = [
+    "ALTER TABLE v2_user ADD COLUMN speed_limit INTEGER DEFAULT NULL",
+    "ALTER TABLE v2_user ADD COLUMN discount INTEGER DEFAULT NULL",
+    "ALTER TABLE v2_user ADD COLUMN commission_rate INTEGER DEFAULT NULL",
+    "ALTER TABLE v2_user ADD COLUMN remind_expire INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE v2_user ADD COLUMN remind_traffic INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE v2_user ADD COLUMN reset_count INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE v2_user ADD COLUMN last_reset_at INTEGER DEFAULT NULL",
+    "ALTER TABLE v2_user ADD COLUMN next_reset_at INTEGER DEFAULT NULL",
+    "ALTER TABLE v2_plan ADD COLUMN capacity_limit INTEGER DEFAULT NULL",
+    "ALTER TABLE v2_plan ADD COLUMN reset_traffic_method INTEGER DEFAULT 0",
+    "ALTER TABLE v2_server_machine ADD COLUMN notes TEXT",
+    "ALTER TABLE v2_server_machine ADD COLUMN is_active INTEGER DEFAULT 1",
+    "ALTER TABLE v2_server_machine ADD COLUMN last_seen_at INTEGER",
+    "ALTER TABLE v2_server ADD COLUMN u INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE v2_server ADD COLUMN d INTEGER NOT NULL DEFAULT 0"
+  ];
+  for (const sql of alters) await runSqlIgnore(env, sql);
+  const ts = now();
+  const settingsDefaults: Record<string, any> = {
+    app_name: "XBoard CF", app_description: "XBoard Cloudflare-native panel", app_url: "", logo: "", subscribe_url: "",
+    subscribe_path: "s", frontend_admin_path: "admin", secure_path: "admin", frontend_theme: "Xboard",
+    frontend_theme_sidebar: "light", frontend_theme_header: "dark", frontend_theme_color: "default",
+    currency: "CNY", currency_symbol: "¥", try_out_plan_id: 1, try_out_hour: 24,
+    plan_change_enable: 1, reset_traffic_method: 0, surplus_enable: 1, default_remind_expire: 1, default_remind_traffic: 1,
+    server_token: "xboard-cf-server-token-change-me", server_pull_interval: 60, server_push_interval: 60, server_ws_enable: 1,
+    server_ws_url: "", device_limit_mode: 0, payment_enabled: 0, invite_force: 0, invite_commission: 10,
+    invite_gen_limit: 5, invite_never_expire: 0, commission_first_time_enable: 1, commission_auto_check_enable: 1,
+    commission_withdraw_limit: 100, commission_withdraw_method: ["USDT", "支付宝"], email_verify: 0, safe_mode_enable: 0,
+    email_whitelist_enable: 0, email_whitelist_suffix: ["gmail.com", "qq.com", "163.com"], email_gmail_limit_enable: 0,
+    captcha_enable: 0, captcha_type: "recaptcha", recaptcha_key: "", recaptcha_site_key: "", recaptcha_v3_secret_key: "",
+    recaptcha_v3_site_key: "", recaptcha_v3_score_threshold: 0.5, turnstile_secret_key: "", turnstile_site_key: "",
+    register_limit_by_ip_enable: 0, register_limit_count: 3, register_limit_expire: 60, password_limit_enable: 1,
+    password_limit_count: 5, password_limit_expire: 60, email_host: "", email_port: "", email_username: "",
+    email_password: "", email_encryption: "", email_from_address: "", remind_mail_enable: 0,
+    telegram_bot_enable: 0, telegram_bot_token: "", telegram_webhook_url: "", telegram_discuss_link: "",
+    windows_version: "", windows_download_url: "", macos_version: "", macos_download_url: "", android_version: "", android_download_url: ""
+  };
+  for (const [name, value] of Object.entries(settingsDefaults)) {
+    await runSqlIgnore(env, "INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = CASE WHEN v2_settings.value IS NULL OR v2_settings.value = '' THEN excluded.value ELSE v2_settings.value END, updated_at = excluded.updated_at",
+      [name, typeof value === "object" ? JSON.stringify(value) : String(value), ts, ts]);
+  }
+  await runSqlIgnore(env, "INSERT INTO v2_server_group(id, name, created_at, updated_at) VALUES (1, 'Default', ?, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at", [ts, ts]);
+  await runSqlIgnore(env, "INSERT INTO v2_plan(id, group_id, transfer_enable, name, speed_limit, device_limit, capacity_limit, reset_traffic_method, prices, content, tags, show, sell, renew, sort, created_at, updated_at) VALUES (1, 1, 1099511627776, 'Default Trial', NULL, NULL, NULL, 0, '{\"monthly\":0}', 'Default seeded plan for first-run compatibility.', '[]', 1, 1, 1, 1, ?, ?) ON CONFLICT(id) DO UPDATE SET group_id = excluded.group_id, transfer_enable = excluded.transfer_enable, name = excluded.name, show = excluded.show, sell = excluded.sell, renew = excluded.renew, updated_at = excluded.updated_at", [ts, ts]);
+  await runSqlIgnore(env, "UPDATE v2_user SET plan_id = COALESCE(plan_id, 1), group_id = COALESCE(group_id, 1), transfer_enable = CASE WHEN transfer_enable = 0 THEN 1099511627776 ELSE transfer_enable END, remind_expire = 1, remind_traffic = 1, updated_at = ? WHERE email = 'admin@admin.com'", [ts]);
+  await runSqlIgnore(env, "INSERT INTO v2_notice(id, title, content, show, sort, created_at, updated_at) VALUES (1, 'Welcome to XBoard CF', 'The Cloudflare-native XBoard panel is ready.', 1, 1, ?, ?) ON CONFLICT(id) DO UPDATE SET title = excluded.title, content = excluded.content, show = excluded.show, updated_at = excluded.updated_at", [ts, ts]);
+  await runSqlIgnore(env, "INSERT INTO v2_knowledge(id, category, title, body, show, sort, created_at, updated_at) VALUES (1, 'Getting Started', 'First-run checklist', 'Update the default administrator password, configure app_url, and add real nodes before production use.', 1, 1, ?, ?) ON CONFLICT(id) DO UPDATE SET category = excluded.category, title = excluded.title, body = excluded.body, show = excluded.show, updated_at = excluded.updated_at", [ts, ts]);
+  for (const [name, subject, content] of [
+    ["notify", "Notification from {{app.name}}", "{{content}}"],
+    ["verify", "Email verification code", "Your verification code is {{code}}."],
+    ["remind_expire", "Service expiry reminder", "Your service is about to expire."],
+    ["remind_traffic", "Traffic usage reminder", "Your traffic usage is high."]
+  ]) {
+    await runSqlIgnore(env, "INSERT INTO v2_mail_templates(name, subject, content, enabled, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?) ON CONFLICT(name) DO UPDATE SET subject = excluded.subject, content = excluded.content, enabled = excluded.enabled, updated_at = excluded.updated_at", [name, subject, content, ts, ts]);
+  }
+  await env.XBOARD_KV.put("bootstrap:edge:v3", String(ts));
+}
+
 async function firstNumber(env: Env, sql: string, fallback = 0) {
   try {
     const row = await env.XBOARD_DB.prepare(sql).first<Record<string, number>>();
@@ -41,6 +110,147 @@ async function firstNumber(env: Env, sql: string, fallback = 0) {
   } catch {
     return fallback;
   }
+}
+
+function pickSetting(all: Record<string, any>, key: string, fallback: any = "") {
+  return all[key] ?? fallback;
+}
+
+async function adminConfig(env: Env, request: Request) {
+  const all = await settings(env.XBOARD_DB);
+  const config: Record<string, any> = {
+    invite: {
+      invite_force: !!pickSetting(all, "invite_force", 0),
+      invite_commission: pickSetting(all, "invite_commission", 10),
+      invite_gen_limit: pickSetting(all, "invite_gen_limit", 5),
+      invite_never_expire: !!pickSetting(all, "invite_never_expire", 0),
+      commission_first_time_enable: !!pickSetting(all, "commission_first_time_enable", 1),
+      commission_auto_check_enable: !!pickSetting(all, "commission_auto_check_enable", 1),
+      commission_withdraw_limit: pickSetting(all, "commission_withdraw_limit", 100),
+      commission_withdraw_method: pickSetting(all, "commission_withdraw_method", ["USDT", "支付宝"]),
+      withdraw_close_enable: !!pickSetting(all, "withdraw_close_enable", 0),
+      commission_distribution_enable: !!pickSetting(all, "commission_distribution_enable", 0),
+      commission_distribution_l1: pickSetting(all, "commission_distribution_l1", ""),
+      commission_distribution_l2: pickSetting(all, "commission_distribution_l2", ""),
+      commission_distribution_l3: pickSetting(all, "commission_distribution_l3", "")
+    },
+    site: {
+      logo: pickSetting(all, "logo", ""),
+      force_https: Number(pickSetting(all, "force_https", 0)),
+      stop_register: Number(pickSetting(all, "stop_register", 0)),
+      app_name: pickSetting(all, "app_name", "XBoard"),
+      app_description: pickSetting(all, "app_description", "XBoard is best!"),
+      app_url: pickSetting(all, "app_url", ""),
+      subscribe_url: pickSetting(all, "subscribe_url", ""),
+      try_out_plan_id: Number(pickSetting(all, "try_out_plan_id", 0)),
+      try_out_hour: Number(pickSetting(all, "try_out_hour", 1)),
+      tos_url: pickSetting(all, "tos_url", ""),
+      currency: pickSetting(all, "currency", "CNY"),
+      currency_symbol: pickSetting(all, "currency_symbol", "¥"),
+      ticket_must_wait_reply: !!pickSetting(all, "ticket_must_wait_reply", 0)
+    },
+    subscribe: {
+      plan_change_enable: !!pickSetting(all, "plan_change_enable", 1),
+      reset_traffic_method: Number(pickSetting(all, "reset_traffic_method", 0)),
+      surplus_enable: !!pickSetting(all, "surplus_enable", 1),
+      new_order_event_id: Number(pickSetting(all, "new_order_event_id", 0)),
+      renew_order_event_id: Number(pickSetting(all, "renew_order_event_id", 0)),
+      change_order_event_id: Number(pickSetting(all, "change_order_event_id", 0)),
+      show_info_to_server_enable: !!pickSetting(all, "show_info_to_server_enable", 0),
+      show_protocol_to_server_enable: !!pickSetting(all, "show_protocol_to_server_enable", 0),
+      default_remind_expire: !!pickSetting(all, "default_remind_expire", 1),
+      default_remind_traffic: !!pickSetting(all, "default_remind_traffic", 1),
+      subscribe_path: pickSetting(all, "subscribe_path", "s")
+    },
+    frontend: {
+      frontend_theme: pickSetting(all, "frontend_theme", "Xboard"),
+      frontend_theme_sidebar: pickSetting(all, "frontend_theme_sidebar", "light"),
+      frontend_theme_header: pickSetting(all, "frontend_theme_header", "dark"),
+      frontend_theme_color: pickSetting(all, "frontend_theme_color", "default"),
+      frontend_background_url: pickSetting(all, "frontend_background_url", "")
+    },
+    server: {
+      server_token: pickSetting(all, "server_token", ""),
+      server_pull_interval: pickSetting(all, "server_pull_interval", 60),
+      server_push_interval: pickSetting(all, "server_push_interval", 60),
+      device_limit_mode: Number(pickSetting(all, "device_limit_mode", 0)),
+      server_ws_enable: !!pickSetting(all, "server_ws_enable", 1),
+      server_ws_url: pickSetting(all, "server_ws_url", "")
+    },
+    email: {
+      email_host: pickSetting(all, "email_host", ""),
+      email_port: pickSetting(all, "email_port", ""),
+      email_username: pickSetting(all, "email_username", ""),
+      email_password: pickSetting(all, "email_password", ""),
+      email_encryption: pickSetting(all, "email_encryption", ""),
+      email_from_address: pickSetting(all, "email_from_address", ""),
+      remind_mail_enable: !!pickSetting(all, "remind_mail_enable", 0)
+    },
+    telegram: {
+      telegram_bot_enable: !!pickSetting(all, "telegram_bot_enable", 0),
+      telegram_bot_token: pickSetting(all, "telegram_bot_token", ""),
+      telegram_webhook_url: pickSetting(all, "telegram_webhook_url", ""),
+      telegram_discuss_link: pickSetting(all, "telegram_discuss_link", "")
+    },
+    app: {
+      windows_version: pickSetting(all, "windows_version", ""),
+      windows_download_url: pickSetting(all, "windows_download_url", ""),
+      macos_version: pickSetting(all, "macos_version", ""),
+      macos_download_url: pickSetting(all, "macos_download_url", ""),
+      android_version: pickSetting(all, "android_version", ""),
+      android_download_url: pickSetting(all, "android_download_url", "")
+    },
+    safe: {
+      email_verify: !!pickSetting(all, "email_verify", 0),
+      safe_mode_enable: !!pickSetting(all, "safe_mode_enable", 0),
+      secure_path: pickSetting(all, "secure_path", "admin"),
+      email_whitelist_enable: !!pickSetting(all, "email_whitelist_enable", 0),
+      email_whitelist_suffix: pickSetting(all, "email_whitelist_suffix", ["gmail.com", "qq.com", "163.com"]),
+      email_gmail_limit_enable: !!pickSetting(all, "email_gmail_limit_enable", 0),
+      captcha_enable: !!pickSetting(all, "captcha_enable", 0),
+      captcha_type: pickSetting(all, "captcha_type", "recaptcha"),
+      recaptcha_key: pickSetting(all, "recaptcha_key", ""),
+      recaptcha_site_key: pickSetting(all, "recaptcha_site_key", ""),
+      recaptcha_v3_secret_key: pickSetting(all, "recaptcha_v3_secret_key", ""),
+      recaptcha_v3_site_key: pickSetting(all, "recaptcha_v3_site_key", ""),
+      recaptcha_v3_score_threshold: pickSetting(all, "recaptcha_v3_score_threshold", 0.5),
+      turnstile_secret_key: pickSetting(all, "turnstile_secret_key", ""),
+      turnstile_site_key: pickSetting(all, "turnstile_site_key", ""),
+      register_limit_by_ip_enable: !!pickSetting(all, "register_limit_by_ip_enable", 0),
+      register_limit_count: pickSetting(all, "register_limit_count", 3),
+      register_limit_expire: pickSetting(all, "register_limit_expire", 60),
+      password_limit_enable: !!pickSetting(all, "password_limit_enable", 1),
+      password_limit_count: pickSetting(all, "password_limit_count", 5),
+      password_limit_expire: pickSetting(all, "password_limit_expire", 60),
+      recaptcha_enable: !!pickSetting(all, "captcha_enable", 0)
+    },
+    subscribe_template: {
+      subscribe_template_singbox: "{}",
+      subscribe_template_clash: "",
+      subscribe_template_clashmeta: "",
+      subscribe_template_stash: "",
+      subscribe_template_surge: "",
+      subscribe_template_surfboard: ""
+    }
+  };
+  const key = new URL(request.url).searchParams.get("key");
+  return key && config[key] ? { [key]: config[key] } : config;
+}
+
+function parseJsonArray(value: unknown): any[] {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== "string" || value.trim() === "") return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function subscribeUrl(request: Request, userToken: string) {
+  const url = new URL(request.url);
+  return `${url.origin}/s/${userToken}`;
 }
 
 function dayStart(ts = now()) {
@@ -130,16 +340,122 @@ async function trafficRank(env: Env, url: URL) {
   }
 }
 
+async function planById(env: Env, id: unknown) {
+  if (!id) return null;
+  return await env.XBOARD_DB.prepare("SELECT id, name FROM v2_plan WHERE id = ?").bind(id).first();
+}
+
+async function groupById(env: Env, id: unknown) {
+  if (!id) return null;
+  return await env.XBOARD_DB.prepare("SELECT id, name FROM v2_server_group WHERE id = ?").bind(id).first();
+}
+
+async function adminUserList(env: Env, request: Request) {
+  const input = request.method === "POST" ? await body<Record<string, any>>(request.clone()) : {};
+  const url = new URL(request.url);
+  const page = Number(input.page || input.current || url.searchParams.get("page") || 1);
+  const pageSize = Number(input.page_size || input.pageSize || input.limit || url.searchParams.get("page_size") || 20);
+  const result = await list(env.XBOARD_DB, "v2_user", page, pageSize);
+  const data = [];
+  for (const row of result.data as any[]) {
+    const plan = await planById(env, row.plan_id);
+    const group = await groupById(env, row.group_id);
+    data.push({
+      ...row,
+      balance: Number(row.balance || 0) / 100,
+      commission_balance: Number(row.commission_balance || 0) / 100,
+      total_used: Number(row.u || 0) + Number(row.d || 0),
+      used_traffic: Number(row.u || 0) + Number(row.d || 0),
+      subscribe_url: subscribeUrl(request, row.token),
+      plan,
+      group,
+      invite_user: null,
+      online_count: 0
+    });
+  }
+  return { ...result, data };
+}
+
+async function adminPlanRows(env: Env) {
+  const plans = await rows(env.XBOARD_DB, "v2_plan", 1000) as any[];
+  const out = [];
+  for (const plan of plans) {
+    out.push({
+      ...plan,
+      group: await groupById(env, plan.group_id),
+      users_count: await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE plan_id = ${Number(plan.id)}`),
+      active_users_count: await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE plan_id = ${Number(plan.id)} AND (expired_at IS NULL OR expired_at > ${now()})`),
+      prices: typeof plan.prices === "string" ? (() => { try { return JSON.parse(plan.prices || "{}"); } catch { return {}; } })() : plan.prices,
+      tags: parseJsonArray(plan.tags)
+    });
+  }
+  return out;
+}
+
+async function adminServerRows(env: Env) {
+  const servers = await rows(env.XBOARD_DB, "v2_server", 1000) as any[];
+  const out = [];
+  for (const server of servers) {
+    const groupIds = parseJsonArray(server.group_ids);
+    const groups = [];
+    for (const id of groupIds) {
+      const group = await groupById(env, id);
+      if (group) groups.push(group);
+    }
+    out.push({
+      ...server,
+      group_ids: groupIds,
+      route_ids: parseJsonArray(server.route_ids),
+      tags: parseJsonArray(server.tags),
+      groups,
+      parent: server.parent_id ? servers.find(s => Number(s.id) === Number(server.parent_id)) || null : null,
+      online: Number(server.online_user || 0)
+    });
+  }
+  return out;
+}
+
+async function adminMachineRows(env: Env) {
+  const machines = await rows(env.XBOARD_DB, "v2_server_machine", 1000) as any[];
+  const out = [];
+  for (const machine of machines) {
+    out.push({
+      ...machine,
+      notes: machine.notes || "",
+      is_active: machine.is_active ?? machine.enabled ?? 1,
+      last_seen_at: machine.last_seen_at || null,
+      servers_count: await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_server WHERE machine_id = ${Number(machine.id)}`)
+    });
+  }
+  return out;
+}
+
+async function audit(env: Env, adminId: number, request: Request, path: string) {
+  if (request.method !== "POST" && request.method !== "DELETE") return;
+  try {
+    await env.XBOARD_DB.prepare("INSERT INTO v2_admin_audit_log(admin_id, action, target, metadata, ip, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .bind(adminId, request.method, path, "{}", request.headers.get("cf-connecting-ip") || "", now()).run();
+  } catch {
+    // Audit logging must never break admin operations.
+  }
+}
+
 async function login(request: Request, env: Env, admin = false) {
   const input = await body<any>(request);
   const email = String(input.email || input.username || "");
   const password = String(input.password || "");
   const user = await env.XBOARD_DB.prepare("SELECT * FROM v2_user WHERE email = ?").bind(email).first<any>();
   if (!user || (admin && Number(user.is_admin) !== 1)) return fail("账号或密码错误", 401, 401);
+  if (Number(user.banned || 0) === 1) return fail("账号已被封禁", 403, 403);
   if (!(await verifyPassword(password, user.password))) return fail("账号或密码错误", 401, 401);
   const accessToken = await createSession(env.XBOARD_DB, env.XBOARD_KV, user, admin);
   await env.XBOARD_DB.prepare("UPDATE v2_user SET last_login_at = ?, updated_at = ? WHERE id = ?").bind(now(), now(), user.id).run();
   return ok({ token: accessToken, is_admin: !!user.is_admin, email: user.email, auth_data: accessToken });
+}
+
+async function tableColumns(env: Env, table: string) {
+  const result = await env.XBOARD_DB.prepare(`PRAGMA table_info(${table.replace(/[^a-zA-Z0-9_]/g, "")})`).all<{ name: string }>();
+  return new Set((result.results || []).map(row => row.name));
 }
 
 async function createOrUpdate(table: string, request: Request, env: Env, id?: string) {
@@ -151,7 +467,11 @@ async function createOrUpdate(table: string, request: Request, env: Env, id?: st
     input.token ||= token(16);
     input.transfer_enable ||= 0;
   }
-  const allowed = Object.entries(input).filter(([k]) => /^[a-zA-Z0-9_]+$/.test(k));
+  if (table === "v2_plan" && input.transfer_enable_gb && !input.transfer_enable) {
+    input.transfer_enable = Math.round(Number(input.transfer_enable_gb) * 1073741824);
+  }
+  const columns = await tableColumns(env, table);
+  const allowed = Object.entries(input).filter(([k]) => /^[a-zA-Z0-9_]+$/.test(k) && columns.has(k) && !["id", "created_at", "updated_at"].includes(k));
   if (id) {
     const set = allowed.map(([k]) => `${k} = ?`).join(", ");
     if (set) await env.XBOARD_DB.prepare(`UPDATE ${table} SET ${set}, updated_at = ? WHERE id = ?`).bind(...allowed.map(([, v]) => typeof v === "object" ? JSON.stringify(v) : v), ts, id).run();
@@ -160,7 +480,13 @@ async function createOrUpdate(table: string, request: Request, env: Env, id?: st
     const marks = cols.map(() => "?").join(", ");
     await env.XBOARD_DB.prepare(`INSERT INTO ${table}(${cols.join(",")}) VALUES (${marks})`).bind(...allowed.map(([, v]) => typeof v === "object" ? JSON.stringify(v) : v), ts, ts).run();
   }
-  if (["v2_settings", "v2_server", "v2_plan", "v2_user"].includes(table)) await bump(env.XBOARD_KV, table === "v2_settings" ? "settings_version" : table === "v2_server" ? "servers_version" : "settings_version");
+  if (table === "v2_settings") await bump(env.XBOARD_KV, "settings_version");
+  if (table === "v2_server" || table === "v2_plan") await bump(env.XBOARD_KV, "servers_version");
+  if (table === "v2_user" && id) {
+    await bump(env.XBOARD_KV, `user_version:${id}`);
+    const user = await env.XBOARD_DB.prepare("SELECT token FROM v2_user WHERE id = ?").bind(id).first<{ token: string }>();
+    if (user?.token) await bump(env.XBOARD_KV, `user_version:${user.token}`);
+  }
   return ok(true);
 }
 
@@ -168,7 +494,8 @@ async function adminApi(request: Request, env: Env, path: string) {
   if (path.includes("/passport/auth/login")) return login(request, env, true);
   const admin = await currentUser(request, env.XBOARD_DB, env.XBOARD_KV, true);
   if (!admin) return fail("未授权", 401, 401);
-  if (path.includes("/config/fetch")) return ok(await settings(env.XBOARD_DB));
+  await audit(env, Number((admin as any).id || 0), request, path);
+  if (path.includes("/config/fetch")) return ok(await adminConfig(env, request));
   if (path.includes("/config/save")) {
     const input = await body<Record<string, any>>(request);
     const ts = now();
@@ -198,11 +525,48 @@ async function adminApi(request: Request, env: Env, path: string) {
   if (path.includes("/system/getSystemStatus")) return ok({ ok: true, time: now() });
   if (path.includes("/system/getQueueStats") || path.includes("/system/getQueueWorkload") || path.includes("/system/getQueueMasters")) return ok([]);
   if (path.includes("/system/getHorizonFailedJobs")) return ok({ data: [], total: 0, current_page: 1, per_page: 20 });
+  if (path.includes("/server/machine/nodes")) {
+    const machineId = Number(new URL(request.url).searchParams.get("machine_id") || 0);
+    const data = machineId ? (await rows(env.XBOARD_DB, "v2_server", 1000) as any[]).filter(row => Number(row.machine_id || 0) === machineId) : [];
+    return ok(data);
+  }
+  if (path.includes("/server/machine/history")) return ok([]);
+  if (path.includes("/server/machine/getToken")) return ok({ token: "" });
+  if (path.includes("/server/machine/installCommand")) return ok({ command: "" });
+  if (path.includes("/server/machine/resetToken")) return ok({ token: token(24) });
+  if (path.includes("/server/manage/generateEchKey")) return ok({ key: "", config: "" });
+  if (path.includes("/user/resetSecret")) {
+    const input = await body<Record<string, any>>(request.clone());
+    const newToken = token(16);
+    const newUuid = uuid();
+    await env.XBOARD_DB.prepare("UPDATE v2_user SET token = ?, uuid = ?, updated_at = ? WHERE id = ?").bind(newToken, newUuid, now(), input.id).run();
+    await bump(env.XBOARD_KV, `user_version:${input.id}`);
+    return ok(true);
+  }
+  if (path.includes("/user/ban")) return ok(true);
+  if (path.includes("/user/destroy")) {
+    const input = await body<Record<string, any>>(request.clone());
+    if (input.id) await env.XBOARD_DB.prepare("DELETE FROM v2_user WHERE id = ?").bind(input.id).run();
+    return ok(true);
+  }
+  if (path.includes("/user/update")) return createOrUpdate("v2_user", request, env, String((await body<Record<string, any>>(request.clone())).id || ""));
+  if (path.includes("/user/generate")) return ok([]);
+  if (path.includes("/user/sendMail")) return ok(true);
+  if (path.includes("/user/dumpCSV")) return ok([]);
+  if (path.includes("/traffic-reset/logs")) return ok({ data: [], total: 0, current_page: 1, per_page: 20 });
+  if (path.includes("/traffic-reset/reset-user")) return ok(true);
+  if (path.includes("/traffic-reset/user/")) return ok([]);
   for (const [suffix, table] of Object.entries(directFetchTables)) {
-    if (path.includes(suffix)) return ok(await rows(env.XBOARD_DB, table, 1000));
+    if (path.includes(suffix)) {
+      if (suffix === "/server/manage/getNodes") return ok(await adminServerRows(env));
+      if (suffix === "/server/machine/fetch") return ok(await adminMachineRows(env));
+      if (suffix === "/plan/fetch") return ok(await adminPlanRows(env));
+      return ok(await rows(env.XBOARD_DB, table, 1000));
+    }
   }
   for (const [suffix, table] of Object.entries(pagedFetchTables)) {
     if (path.includes(suffix)) {
+      if (suffix === "/user/fetch") return ok(await adminUserList(env, request));
       const input = request.method === "POST" ? await body<Record<string, any>>(request.clone()) : {};
       const url = new URL(request.url);
       const page = Number(input.page || input.current || url.searchParams.get("page") || 1);
@@ -241,11 +605,43 @@ async function userApi(request: Request, env: Env, path: string) {
   const user = await currentUser(request, env.XBOARD_DB, env.XBOARD_KV, false);
   if (!user) return fail("未授权", 401, 401);
   if (path.includes("/user/info")) return ok(user);
-  if (path.includes("/plan/fetch")) return ok(await list(env.XBOARD_DB, "v2_plan", 1, 100));
-  if (path.includes("/server/fetch")) return ok(await list(env.XBOARD_DB, "v2_server", 1, 500));
-  if (path.includes("/notice/fetch")) return ok(await list(env.XBOARD_DB, "v2_notice", 1, 50));
-  if (path.includes("/knowledge/fetch")) return ok(await list(env.XBOARD_DB, "v2_knowledge", 1, 50));
-  if (path.includes("/ticket/fetch")) return ok(await list(env.XBOARD_DB, "v2_ticket", 1, 50));
+  if (path.includes("/user/checkLogin")) return ok(true);
+  if (path.includes("/user/getSubscribe")) return ok({ subscribe_url: subscribeUrl(request, (user as any).token), token: (user as any).token });
+  if (path.includes("/user/getStat")) return ok({ u: (user as any).u || 0, d: (user as any).d || 0, transfer_enable: (user as any).transfer_enable || 0 });
+  if (path.includes("/user/resetSecurity")) {
+    const newToken = token(16);
+    const newUuid = uuid();
+    await env.XBOARD_DB.prepare("UPDATE v2_user SET token = ?, uuid = ?, updated_at = ? WHERE id = ?").bind(newToken, newUuid, now(), (user as any).id).run();
+    await bump(env.XBOARD_KV, `user_version:${(user as any).id}`);
+    return ok(true);
+  }
+  if (path.includes("/user/changePassword")) {
+    const input = await body<Record<string, any>>(request);
+    const password = await hashPassword(String(input.new_password || input.password || ""));
+    await env.XBOARD_DB.prepare("UPDATE v2_user SET password = ?, updated_at = ? WHERE id = ?").bind(password, now(), (user as any).id).run();
+    return ok(true);
+  }
+  if (path.includes("/user/update")) return createOrUpdate("v2_user", request, env, String((user as any).id));
+  if (path.includes("/plan/fetch")) return ok(await adminPlanRows(env));
+  if (path.includes("/server/fetch")) return ok(await adminServerRows(env));
+  if (path.includes("/notice/fetch")) return ok((await rows(env.XBOARD_DB, "v2_notice", 50) as any[]).filter(row => Number(row.show ?? 1) === 1));
+  if (path.includes("/knowledge/fetch")) return ok((await rows(env.XBOARD_DB, "v2_knowledge", 50) as any[]).filter(row => Number(row.show ?? 1) === 1));
+  if (path.includes("/ticket/fetch")) {
+    const data = await env.XBOARD_DB.prepare("SELECT * FROM v2_ticket WHERE user_id = ? ORDER BY id DESC LIMIT 50").bind((user as any).id).all();
+    return ok(data.results || []);
+  }
+  if (path.includes("/ticket/save")) {
+    const input = await body<Record<string, any>>(request);
+    await env.XBOARD_DB.prepare("INSERT INTO v2_ticket(user_id, subject, level, status, created_at, updated_at) VALUES (?, ?, ?, 0, ?, ?)")
+      .bind((user as any).id, String(input.subject || "Ticket"), Number(input.level || 0), now(), now()).run();
+    return ok(true);
+  }
+  if (path.includes("/ticket/close")) {
+    const input = await body<Record<string, any>>(request);
+    await env.XBOARD_DB.prepare("UPDATE v2_ticket SET status = 1, updated_at = ? WHERE id = ? AND user_id = ?").bind(now(), input.id, (user as any).id).run();
+    return ok(true);
+  }
+  if (path.includes("/ticket/reply") || path.includes("/ticket/withdraw")) return ok(true);
   return ok({ message: "compatible placeholder", path });
 }
 
@@ -283,6 +679,9 @@ async function adminUi(request: Request, env: Env) {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    if (!url.pathname.startsWith("/assets/") && !url.pathname.startsWith("/locales/") && !url.pathname.startsWith("/images/")) {
+      await ensureBootstrap(env);
+    }
     if (url.pathname === "/health") return ok({ service: "xboard-edge", time: now() });
     if (url.pathname === "/admin" || url.pathname.startsWith("/admin/")) return adminUi(request, env);
     if (["/settings.js", "/settings.local.js", "/manifest.json"].includes(url.pathname) || url.pathname.startsWith("/assets/") || url.pathname.startsWith("/locales/") || url.pathname.startsWith("/images/")) {

@@ -14,12 +14,17 @@ async function traffic(env: Env, event: any) {
   const rows = Array.isArray(event.payload) ? event.payload : Array.isArray(event.payload?.data) ? event.payload.data : [event.payload];
   for (const row of rows) {
     const uid = Number(row.user_id || row.uid || row.id);
-    const u = Number(row.u || row.upload || 0);
-    const d = Number(row.d || row.download || 0);
+    const rate = Number(event.rate || 1);
+    const u = Math.round(Number(row.u || row.upload || 0) * rate);
+    const d = Math.round(Number(row.d || row.download || 0) * rate);
     if (!uid) continue;
     await env.XBOARD_DB.prepare("UPDATE v2_user SET u = u + ?, d = d + ?, updated_at = ? WHERE id = ?").bind(u, d, now(), uid).run();
     await env.XBOARD_DB.prepare("INSERT INTO v2_stat_user(user_id, server_id, server_type, u, d, record_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(user_id, server_id, server_type, record_at) DO UPDATE SET u = u + excluded.u, d = d + excluded.d, updated_at = excluded.updated_at")
       .bind(uid, event.server_id || 0, event.server_type || "unknown", u, d, Math.floor(now() / 86400) * 86400, now(), now()).run();
+    if (event.server_id && event.server_type) {
+      await env.XBOARD_DB.prepare("INSERT INTO v2_stat_server(server_id, server_type, u, d, record_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(server_id, server_type, record_at) DO UPDATE SET u = u + excluded.u, d = d + excluded.d, updated_at = excluded.updated_at")
+        .bind(event.server_id, event.server_type, u, d, Math.floor(now() / 86400) * 86400, now(), now()).run();
+    }
   }
 }
 async function handle(env: Env, event: any) {
