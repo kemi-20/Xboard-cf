@@ -106,7 +106,27 @@ function assetRequest(request: Request, pathname: string) {
 }
 
 async function adminUi(request: Request, env: Env) {
-  return env.ASSETS.fetch(assetRequest(request, "/index.html"));
+  return new Response(`<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/images/favicon.svg" />
+    <link rel="icon" type="image/png" href="/images/favicon.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Admin</title>
+    <meta name="description" content="Admin Dashboard UI built with Shadcn and Vite." />
+    <script src="/settings.js"></script>
+    <script src="/settings.local.js"></script>
+    <script src="/locales/en-US.js"></script>
+    <script src="/locales/zh-CN.js"></script>
+    <script src="/locales/ru-RU.js"></script>
+    <script type="module" crossorigin src="/assets/index-CEIYH7i8.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-DiYa-_z_.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>`, { headers: { "content-type": "text/html; charset=utf-8" } });
 }
 
 export default {
