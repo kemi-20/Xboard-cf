@@ -1,5 +1,15 @@
 {
-  "dependencies": {
-    "chokidar": "^4.0.3"
+  "name": "xboard-cf",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "node scripts/run-all-workers.mjs typecheck",
+    "test": "node scripts/run-all-workers.mjs test",
+    "deploy": "node scripts/run-all-workers.mjs deploy",
+    "seed:admin": "tsx scripts/seed-admin.ts",
+    "smoke:test": "tsx scripts/smoke-test.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.5"
   }
 }

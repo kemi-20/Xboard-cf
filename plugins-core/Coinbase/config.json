@@ -1,8 +1,0 @@
-{
-    "name": "Coinbase",
-    "code": "coinbase",
-    "type": "payment",
-    "version": "1.0.0",
-    "description": "Coinbase payment plugin",
-    "author": "XBoard Team"
-} 

@@ -1,8 +1,0 @@
-{
-    "name": "MGate",
-    "code": "mgate",
-    "type": "payment",
-    "version": "1.0.0",
-    "description": "MGate payment plugin",
-    "author": "XBoard Team"
-} 

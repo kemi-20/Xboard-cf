@@ -1,0 +1,25 @@
+name = "xboard-server"
+main = "src/index.ts"
+compatibility_date = "2026-06-26"
+
+[[d1_databases]]
+binding = "XBOARD_DB"
+database_name = "xboard-db"
+database_id = "03fee899-da56-4af3-b0ab-b36c5bec3dee"
+
+[[kv_namespaces]]
+binding = "XBOARD_KV"
+id = "044104eb282443f9894ab1611791f09b"
+
+[[queues.producers]]
+binding = "TRAFFIC_EVENTS"
+queue = "traffic-events"
+
+[[durable_objects.bindings]]
+name = "NODE_HUB"
+class_name = "NodeHub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["NodeHub"]
+

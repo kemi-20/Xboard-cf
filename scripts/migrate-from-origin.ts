@@ -1,0 +1,1 @@
+console.log("Migration helper placeholder. Export MySQL data to JSON/CSV, then insert into D1 preserving original table names.");
