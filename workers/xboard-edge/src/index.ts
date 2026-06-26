@@ -1,7 +1,7 @@
 import type { D1Database, Fetcher, KVNamespace } from "./types";
 import { body, fail, json, now, ok, token, uuid } from "./compat";
 import { createSession, currentUser, hashPassword, verifyPassword } from "./auth";
-import { list, settings } from "./db";
+import { list, rows, settings } from "./db";
 import { bump } from "./kv";
 
 export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; ASSETS: Fetcher; }
@@ -10,6 +10,27 @@ const adminTables: Record<string, string> = {
   user: "v2_user", plan: "v2_plan", server: "v2_server", group: "v2_server_group", route: "v2_server_route",
   machine: "v2_server_machine", notice: "v2_notice", knowledge: "v2_knowledge", ticket: "v2_ticket",
   mail_template: "v2_mail_templates", audit: "v2_admin_audit_log"
+};
+
+const directFetchTables: Record<string, string> = {
+  "/server/manage/getNodes": "v2_server",
+  "/server/machine/fetch": "v2_server_machine",
+  "/server/group/fetch": "v2_server_group",
+  "/server/route/fetch": "v2_server_route",
+  "/notice/fetch": "v2_notice",
+  "/knowledge/fetch": "v2_knowledge",
+  "/plan/fetch": "v2_plan",
+  "/payment/fetch": "v2_payment"
+};
+
+const pagedFetchTables: Record<string, string> = {
+  "/user/fetch": "v2_user",
+  "/ticket/fetch": "v2_ticket",
+  "/order/fetch": "v2_order",
+  "/coupon/fetch": "v2_coupon",
+  "/gift-card/templates": "v2_gift_card_template",
+  "/gift-card/codes": "v2_gift_card_code",
+  "/gift-card/usages": "v2_gift_card_usage"
 };
 
 async function firstNumber(env: Env, sql: string, fallback = 0) {
@@ -161,21 +182,47 @@ async function adminApi(request: Request, env: Env, path: string) {
   if (path.includes("/stat/getStats")) return ok(await adminStats(env));
   if (path.includes("/stat/getOrder")) return ok(orderStats(new URL(request.url)));
   if (path.includes("/stat/getTrafficRank")) return ok(await trafficRank(env, new URL(request.url)));
+  if (path.includes("/theme/getThemes")) return ok({ themes: {}, active: "default" });
+  if (path.includes("/theme/getThemeConfig")) return ok({});
+  if (path.match(/\/theme\/(saveThemeConfig|upload|delete)/)) return ok(true);
   if (path.includes("/plugin/getPlugins")) return ok([]);
   if (path.includes("/plugin/types")) return ok([]);
   if (path.includes("/plugin/config")) return ok({});
   if (path.match(/\/plugin\/(upload|delete|install|uninstall|enable|disable|upgrade)/)) return ok(true);
-  if (path.match(/payment|order|coupon|commission|gift-card/)) return ok({ enabled: false, message: "Payment features are disabled in this build.", data: [], total: 0 });
+  if (path.includes("/payment/getPaymentMethods")) return ok([]);
+  if (path.includes("/payment/getPaymentForm")) return ok({ enabled: false, message: "Payment features are disabled in this build." });
+  if (path.match(/\/payment\/(save|drop|show|sort)/)) return ok(true);
+  if (path.includes("/mail/template/list")) return ok(await rows(env.XBOARD_DB, "v2_mail_templates", 100));
+  if (path.includes("/mail/template/get")) return ok({ name: new URL(request.url).searchParams.get("name") || "", subject: "", content: "", enabled: 1 });
+  if (path.match(/\/mail\/template\/(save|reset|test)/)) return ok(true);
+  if (path.includes("/system/getSystemStatus")) return ok({ ok: true, time: now() });
+  if (path.includes("/system/getQueueStats") || path.includes("/system/getQueueWorkload") || path.includes("/system/getQueueMasters")) return ok([]);
+  if (path.includes("/system/getHorizonFailedJobs")) return ok({ data: [], total: 0, current_page: 1, per_page: 20 });
+  for (const [suffix, table] of Object.entries(directFetchTables)) {
+    if (path.includes(suffix)) return ok(await rows(env.XBOARD_DB, table, 1000));
+  }
+  for (const [suffix, table] of Object.entries(pagedFetchTables)) {
+    if (path.includes(suffix)) {
+      const input = request.method === "POST" ? await body<Record<string, any>>(request.clone()) : {};
+      const url = new URL(request.url);
+      const page = Number(input.page || input.current || url.searchParams.get("page") || 1);
+      const pageSize = Number(input.page_size || input.pageSize || input.limit || url.searchParams.get("page_size") || 20);
+      return ok(await list(env.XBOARD_DB, table, page, pageSize));
+    }
+  }
+  if (path.match(/order|coupon|commission|gift-card/)) return ok({ data: [], total: 0, current_page: 1, per_page: 20 });
   const entry = Object.entries(adminTables).find(([key]) => path.includes(`/${key}`) || path.includes(`/${key.replace("_", "-")}`));
   if (entry) {
     const [, table] = entry;
     const url = new URL(request.url);
-    if (request.method === "GET" && (path.endsWith("/fetch") || path.endsWith("/list") || !path.match(/\/\d+$/))) return ok(await list(env.XBOARD_DB, table, Number(url.searchParams.get("page") || 1), Number(url.searchParams.get("page_size") || 20)));
-    const id = path.match(/\/(\d+)(?:\/|$)/)?.[1] || url.searchParams.get("id") || undefined;
-    if (request.method === "DELETE" && id) {
+    if (path.endsWith("/fetch") || path.endsWith("/list") || (request.method === "GET" && !path.match(/\/\d+$/))) return ok(await rows(env.XBOARD_DB, table, 1000));
+    const input = request.method === "POST" ? await body<Record<string, any>>(request.clone()) : {};
+    const id = path.match(/\/(\d+)(?:\/|$)/)?.[1] || url.searchParams.get("id") || String(input.id || "") || undefined;
+    if ((request.method === "DELETE" || path.endsWith("/drop")) && id) {
       await env.XBOARD_DB.prepare(`DELETE FROM ${table} WHERE id = ?`).bind(id).run();
       return ok(true);
     }
+    if (path.endsWith("/show") && id) return ok(await env.XBOARD_DB.prepare(`SELECT * FROM ${table} WHERE id = ?`).bind(id).first());
     return createOrUpdate(table, request, env, id);
   }
   return ok({ message: "compatible placeholder", path });
