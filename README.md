@@ -8,7 +8,7 @@ The default seed creates:
 
 ```text
 Email: admin@admin.com
-Password: admin
+Password: adminadmin
 ```
 
 Change this password immediately after first login.
@@ -32,11 +32,14 @@ workers/xboard-jobs
 workers/xboard-cron
 ```
 
-The admin panel is always exposed at:
+The admin panel is always exposed at `/admin`. Admin pages are hash routes under that path, for example:
 
 ```text
 /admin
+/admin#/server/machine
 ```
+
+The site root `/` intentionally returns only a plain `200` response.
 
 ## Initialize D1
 

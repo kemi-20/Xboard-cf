@@ -8,6 +8,13 @@ INSERT OR IGNORE INTO v2_settings(name, value, created_at, updated_at) VALUES
 ('payment_enabled', '0', unixepoch(), unixepoch());
 
 INSERT OR IGNORE INTO v2_user(email, password, password_algo, password_salt, uuid, token, transfer_enable, is_admin, is_staff, created_at, updated_at)
-VALUES ('admin@admin.com', 'pbkdf2$sha256$100000$xboard-cloudflare-admin$8d8b20ea4c5f0851f5f468f5e5b907ae67061c3337dbc738fcbcd83f4388d96d', 'pbkdf2', 'xboard-cloudflare-admin', '00000000-0000-4000-8000-000000000001', 'admin-default-token-change-me', 1099511627776, 1, 1, unixepoch(), unixepoch());
+VALUES ('admin@admin.com', 'pbkdf2$sha256$100000$xboard-cloudflare-admin$8abd89496c7d7b0cfdc7b786fd49da099859e1167bbcf9f945c38415d6d56268', 'pbkdf2', 'xboard-cloudflare-admin', '00000000-0000-4000-8000-000000000001', 'admin-default-token-change-me', 1099511627776, 1, 1, unixepoch(), unixepoch())
+ON CONFLICT(email) DO UPDATE SET
+  password = excluded.password,
+  password_algo = excluded.password_algo,
+  password_salt = excluded.password_salt,
+  is_admin = 1,
+  is_staff = 1,
+  updated_at = unixepoch();
 
 INSERT OR IGNORE INTO v2_server_group(id, name, created_at, updated_at) VALUES (1, 'Default', unixepoch(), unixepoch());
