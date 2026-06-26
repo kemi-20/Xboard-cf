@@ -12,3 +12,6 @@ database_id = "D1_DATABASE_ID"
 binding = "XBOARD_KV"
 id = "KV_NAMESPACE_ID"
 
+[assets]
+directory = "./public"
+binding = "ASSETS"

@@ -1,0 +1,1 @@
+window.settings = window.settings || {};

@@ -1,10 +1,10 @@
-import type { D1Database, KVNamespace } from "./types";
+import type { D1Database, Fetcher, KVNamespace } from "./types";
 import { body, fail, json, now, ok, token, uuid } from "./compat";
 import { createSession, currentUser, hashPassword, verifyPassword } from "./auth";
 import { list, settings } from "./db";
 import { bump } from "./kv";
 
-export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; }
+export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; ASSETS: Fetcher; }
 
 const adminTables: Record<string, string> = {
   user: "v2_user", plan: "v2_plan", server: "v2_server", group: "v2_server_group", route: "v2_server_route",
@@ -98,15 +98,26 @@ async function userApi(request: Request, env: Env, path: string) {
   return ok({ message: "compatible placeholder", path });
 }
 
-function adminShell() {
-  return new Response(`<!doctype html><meta charset="utf-8"><title>XBoard CF</title><div id="app" style="font-family:system-ui;padding:32px"><h1>XBoard CF Admin</h1><p>Default super administrator: admin@admin.com / admin</p><p>Use /api/v2/admin/passport/auth/login for API login.</p></div>`, { headers: { "content-type": "text/html; charset=utf-8" } });
+function assetRequest(request: Request, pathname: string) {
+  const url = new URL(request.url);
+  url.pathname = pathname;
+  url.search = "";
+  return new Request(url.toString(), request);
+}
+
+async function adminUi(request: Request, env: Env) {
+  return env.ASSETS.fetch(assetRequest(request, "/index.html"));
 }
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/health") return ok({ service: "xboard-edge", time: now() });
-    if (url.pathname.startsWith("/admin") || url.pathname.startsWith("/assets/admin")) return adminShell();
+    if (url.pathname === "/admin" || url.pathname.startsWith("/admin/")) return adminUi(request, env);
+    if (["/settings.js", "/settings.local.js", "/manifest.json"].includes(url.pathname) || url.pathname.startsWith("/assets/") || url.pathname.startsWith("/locales/") || url.pathname.startsWith("/images/")) {
+      return env.ASSETS.fetch(request);
+    }
+    if (url.pathname.startsWith("/api/v2/passport")) return adminApi(request, env, url.pathname.replace("/api/v2", "/api/v2/admin"));
     if (url.pathname.startsWith("/api/v2/admin")) return adminApi(request, env, url.pathname);
     if (url.pathname.startsWith("/api/v1") || url.pathname.startsWith("/api/v2/user")) return userApi(request, env, url.pathname);
     return json({ name: "XBoard CF Edge", admin: "/admin" });
