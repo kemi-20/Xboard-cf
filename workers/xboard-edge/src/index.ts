@@ -12,6 +12,103 @@ const adminTables: Record<string, string> = {
   mail_template: "v2_mail_templates", audit: "v2_admin_audit_log"
 };
 
+async function firstNumber(env: Env, sql: string, fallback = 0) {
+  try {
+    const row = await env.XBOARD_DB.prepare(sql).first<Record<string, number>>();
+    const value = row ? Object.values(row)[0] : fallback;
+    return Number(value || fallback);
+  } catch {
+    return fallback;
+  }
+}
+
+function dayStart(ts = now()) {
+  const date = new Date(ts * 1000);
+  return Math.floor(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()) / 1000);
+}
+
+function monthStart(ts = now()) {
+  const date = new Date(ts * 1000);
+  return Math.floor(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1) / 1000);
+}
+
+async function adminStats(env: Env) {
+  const today = dayStart();
+  const month = monthStart();
+  const lastMonthDate = new Date(month * 1000);
+  lastMonthDate.setUTCMonth(lastMonthDate.getUTCMonth() - 1);
+  const lastMonth = Math.floor(lastMonthDate.getTime() / 1000);
+  const totalUsers = await firstNumber(env, "SELECT COUNT(*) AS c FROM v2_user");
+  const activeUsers = await firstNumber(env, "SELECT COUNT(*) AS c FROM v2_user WHERE banned = 0");
+  const currentMonthNewUsers = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE created_at >= ${month}`);
+  const lastMonthNewUsers = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE created_at >= ${lastMonth} AND created_at < ${month}`);
+  const monthUpload = await firstNumber(env, `SELECT COALESCE(SUM(u), 0) AS c FROM v2_stat_user WHERE record_at >= ${month}`);
+  const monthDownload = await firstNumber(env, `SELECT COALESCE(SUM(d), 0) AS c FROM v2_stat_user WHERE record_at >= ${month}`);
+  const todayUpload = await firstNumber(env, `SELECT COALESCE(SUM(u), 0) AS c FROM v2_stat_user WHERE record_at >= ${today}`);
+  const todayDownload = await firstNumber(env, `SELECT COALESCE(SUM(d), 0) AS c FROM v2_stat_user WHERE record_at >= ${today}`);
+  const userGrowth = lastMonthNewUsers > 0 ? Math.round(((currentMonthNewUsers - lastMonthNewUsers) / lastMonthNewUsers) * 100) : currentMonthNewUsers > 0 ? 100 : 0;
+  return {
+    todayIncome: 0,
+    currentMonthIncome: 0,
+    dayIncomeGrowth: 0,
+    monthIncomeGrowth: 0,
+    ticketPendingTotal: await firstNumber(env, "SELECT COUNT(*) AS c FROM v2_ticket WHERE status = 0"),
+    commissionPendingTotal: 0,
+    currentMonthNewUsers,
+    userGrowth,
+    totalUsers,
+    activeUsers,
+    monthTraffic: { upload: monthUpload, download: monthDownload },
+    todayTraffic: { upload: todayUpload, download: todayDownload }
+  };
+}
+
+function dateString(ts: number) {
+  return new Date(ts * 1000).toISOString().slice(0, 10);
+}
+
+function orderStats(url: URL) {
+  const end = url.searchParams.get("end_date") || dateString(now());
+  const start = url.searchParams.get("start_date") || end;
+  return {
+    summary: {
+      start_date: start,
+      end_date: end,
+      paid_total: 0,
+      paid_count: 0,
+      avg_paid_amount: 0,
+      commission_total: 0,
+      commission_count: 0,
+      commission_rate: 0
+    },
+    list: [{ date: start, paid_total: 0, paid_count: 0, commission_total: 0, commission_count: 0 }]
+  };
+}
+
+async function trafficRank(env: Env, url: URL) {
+  const type = url.searchParams.get("type") || "user";
+  const start = Number(url.searchParams.get("start_time") || 0);
+  const end = Number(url.searchParams.get("end_time") || now());
+  if (type === "node") {
+    try {
+      const rows = await env.XBOARD_DB.prepare(
+        "SELECT s.name AS name, COALESCE(SUM(ss.u + ss.d), 0) AS value FROM v2_stat_server ss LEFT JOIN v2_server s ON s.id = ss.server_id WHERE ss.record_at >= ? AND ss.record_at <= ? GROUP BY ss.server_id ORDER BY value DESC LIMIT 10"
+      ).bind(start, end).all<{ name: string; value: number }>();
+      return (rows.results || []).map(row => ({ name: row.name || "Node", value: Number(row.value || 0), change: 0 }));
+    } catch {
+      return [];
+    }
+  }
+  try {
+    const rows = await env.XBOARD_DB.prepare(
+      "SELECT u.email AS name, COALESCE(SUM(su.u + su.d), 0) AS value FROM v2_stat_user su LEFT JOIN v2_user u ON u.id = su.user_id WHERE su.record_at >= ? AND su.record_at <= ? GROUP BY su.user_id ORDER BY value DESC LIMIT 10"
+    ).bind(start, end).all<{ name: string; value: number }>();
+    return (rows.results || []).map(row => ({ name: row.name || "User", value: Number(row.value || 0), change: 0 }));
+  } catch {
+    return [];
+  }
+}
+
 async function login(request: Request, env: Env, admin = false) {
   const input = await body<any>(request);
   const email = String(input.email || input.username || "");
@@ -61,6 +158,9 @@ async function adminApi(request: Request, env: Env, path: string) {
     await bump(env.XBOARD_KV, "settings_version");
     return ok(true);
   }
+  if (path.includes("/stat/getStats")) return ok(await adminStats(env));
+  if (path.includes("/stat/getOrder")) return ok(orderStats(new URL(request.url)));
+  if (path.includes("/stat/getTrafficRank")) return ok(await trafficRank(env, new URL(request.url)));
   if (path.match(/payment|order|coupon|commission|gift-card/)) return ok({ enabled: false, message: "Payment features are disabled in this build.", data: [], total: 0 });
   const entry = Object.entries(adminTables).find(([key]) => path.includes(`/${key}`) || path.includes(`/${key.replace("_", "-")}`));
   if (entry) {
