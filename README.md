@@ -32,6 +32,12 @@ workers/xboard-jobs
 workers/xboard-cron
 ```
 
+The admin panel is always exposed at:
+
+```text
+/admin
+```
+
 ## Initialize D1
 
 ```bash
@@ -51,6 +57,19 @@ npm run deploy
 ```
 
 Repeat for each Worker folder. Replace placeholder D1/KV IDs in every `wrangler.toml` after Cloudflare resource creation.
+
+## Automatic deploys from GitHub
+
+This repository includes `.github/workflows/deploy-workers.yml`. After adding a GitHub repository secret named `CLOUDFLARE_API_TOKEN`, every push to `master` deploys all five Workers from their own root directories.
+
+The Cloudflare account id is already present in each `wrangler.toml`; the workflow runs:
+
+```bash
+npm ci
+npm run typecheck
+npm test
+npx wrangler deploy
+```
 
 ## Payment status
 

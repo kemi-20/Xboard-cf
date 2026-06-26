@@ -3,6 +3,7 @@ INSERT OR IGNORE INTO v2_settings(name, value, created_at, updated_at) VALUES
 ('app_url', '', unixepoch(), unixepoch()),
 ('subscribe_path', 's', unixepoch(), unixepoch()),
 ('frontend_admin_path', 'admin', unixepoch(), unixepoch()),
+('secure_path', 'admin', unixepoch(), unixepoch()),
 ('server_ws_enable', '1', unixepoch(), unixepoch()),
 ('payment_enabled', '0', unixepoch(), unixepoch());
 
