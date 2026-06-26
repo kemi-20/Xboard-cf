@@ -161,6 +161,10 @@ async function adminApi(request: Request, env: Env, path: string) {
   if (path.includes("/stat/getStats")) return ok(await adminStats(env));
   if (path.includes("/stat/getOrder")) return ok(orderStats(new URL(request.url)));
   if (path.includes("/stat/getTrafficRank")) return ok(await trafficRank(env, new URL(request.url)));
+  if (path.includes("/plugin/getPlugins")) return ok([]);
+  if (path.includes("/plugin/types")) return ok([]);
+  if (path.includes("/plugin/config")) return ok({});
+  if (path.match(/\/plugin\/(upload|delete|install|uninstall|enable|disable|upgrade)/)) return ok(true);
   if (path.match(/payment|order|coupon|commission|gift-card/)) return ok({ enabled: false, message: "Payment features are disabled in this build.", data: [], total: 0 });
   const entry = Object.entries(adminTables).find(([key]) => path.includes(`/${key}`) || path.includes(`/${key.replace("_", "-")}`));
   if (entry) {
