@@ -658,7 +658,36 @@ async function saveServer(request: Request, env: Env) {
     await bump(env.XBOARD_KV, "servers_version");
     return ok(true);
   } catch (error: any) {
-    return fail(`保存服务器失败: ${error?.message || "D1 写入失败"}`, 500, 500);
+    try {
+      const minimal = {
+        type: data.type,
+        name: data.name,
+        group_ids: data.group_ids,
+        route_ids: data.route_ids,
+        host: data.host,
+        port: data.port,
+        server_port: data.server_port,
+        rate: data.rate,
+        tags: data.tags,
+        protocol_settings: data.protocol_settings,
+        show: data.show,
+        enabled: data.enabled,
+        sort: data.sort
+      };
+      const fallbackColumns = await tableColumns(env, "v2_server");
+      const fallbackAllowed = Object.entries(minimal).filter(([key]) => fallbackColumns.has(key));
+      if (id) {
+        const set = fallbackAllowed.map(([key]) => `${key} = ?`).join(", ");
+        await env.XBOARD_DB.prepare(`UPDATE v2_server SET ${set}, updated_at = ? WHERE id = ?`).bind(...fallbackAllowed.map(([, value]) => value), ts, id).run();
+      } else {
+        const cols = [...fallbackAllowed.map(([key]) => key), "created_at", "updated_at"];
+        await env.XBOARD_DB.prepare(`INSERT INTO v2_server(${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`).bind(...fallbackAllowed.map(([, value]) => value), ts, ts).run();
+      }
+      await bump(env.XBOARD_KV, "servers_version");
+      return ok(true);
+    } catch (fallbackError: any) {
+      return fail(`保存服务器失败: ${fallbackError?.message || error?.message || "D1 写入失败"}`, 500, 500);
+    }
   }
 }
 
@@ -986,6 +1015,10 @@ async function adminUi(request: Request, env: Env) {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname.startsWith("/admin/api/")) {
+      url.pathname = url.pathname.slice("/admin".length);
+      request = new Request(url.toString(), request);
+    }
     if (!url.pathname.startsWith("/assets/") && !url.pathname.startsWith("/locales/") && !url.pathname.startsWith("/images/")) {
       await ensureBootstrap(env);
     }
