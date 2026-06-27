@@ -833,7 +833,7 @@ async function adminApi(request: Request, env: Env, path: string) {
   if (path.match(/\/mail\/template\/(save|reset|test)/)) return ok(true);
   if (path.includes("/system/getSystemStatus")) return ok({ ok: true, time: now() });
   if (path.includes("/system/getQueueStats") || path.includes("/system/getQueueWorkload") || path.includes("/system/getQueueMasters")) return ok([]);
-  if (path.includes("/system/getHorizonFailedJobs")) return ok({ data: [], total: 0, current_page: 1, per_page: 20 });
+  if (path.includes("/system/getHorizonFailedJobs")) return json({ data: [], total: 0, current_page: 1, per_page: 20 });
   if (path.includes("/server/manage/save")) return saveServer(request, env);
   if (path.includes("/server/manage/update")) return updateServer(request, env);
   if (path.includes("/server/manage/sort")) return sortServers(request, env);
@@ -889,7 +889,7 @@ async function adminApi(request: Request, env: Env, path: string) {
   if (path.includes("/user/generate")) return ok([]);
   if (path.includes("/user/sendMail")) return ok(true);
   if (path.includes("/user/dumpCSV")) return ok([]);
-  if (path.includes("/traffic-reset/logs")) return ok({ data: [], total: 0, current_page: 1, per_page: 20 });
+  if (path.includes("/traffic-reset/logs")) return json({ data: [], total: 0, current_page: 1, per_page: 20 });
   if (path.includes("/traffic-reset/reset-user")) return ok(true);
   if (path.includes("/traffic-reset/user/")) return ok([]);
   for (const [suffix, table] of Object.entries(directFetchTables)) {
@@ -902,15 +902,15 @@ async function adminApi(request: Request, env: Env, path: string) {
   }
   for (const [suffix, table] of Object.entries(pagedFetchTables)) {
     if (path.includes(suffix)) {
-      if (suffix === "/user/fetch") return ok(await adminUserList(env, request));
+      if (suffix === "/user/fetch") return json(await adminUserList(env, request));
       const input = request.method === "POST" ? await body<Record<string, any>>(request.clone()) : {};
       const url = new URL(request.url);
       const page = Number(input.page || input.current || url.searchParams.get("page") || 1);
       const pageSize = Number(input.page_size || input.pageSize || input.limit || url.searchParams.get("page_size") || 20);
-      return ok(await list(env.XBOARD_DB, table, page, pageSize));
+      return json(await list(env.XBOARD_DB, table, page, pageSize));
     }
   }
-  if (path.match(/order|coupon|commission|gift-card/)) return ok({ data: [], total: 0, current_page: 1, per_page: 20 });
+  if (path.match(/order|coupon|commission|gift-card/)) return json({ data: [], total: 0, current_page: 1, per_page: 20 });
   const entry = Object.entries(adminTables).find(([key]) => path.includes(`/${key}`) || path.includes(`/${key.replace("_", "-")}`));
   if (entry) {
     const [, table] = entry;
