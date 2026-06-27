@@ -1012,6 +1012,38 @@ async function adminUi(request: Request, env: Env) {
 </html>`, { headers: { "content-type": "text/html; charset=utf-8" } });
 }
 
+function isAdminDistAlias(pathname: string) {
+  if (!pathname.startsWith("/api/v2/")) return false;
+  const adminPrefixes = [
+    "/api/v2/stat/",
+    "/api/v2/config/",
+    "/api/v2/theme/",
+    "/api/v2/plugin/",
+    "/api/v2/payment/",
+    "/api/v2/mail/",
+    "/api/v2/system/",
+    "/api/v2/server/",
+    "/api/v2/plan/",
+    "/api/v2/order/",
+    "/api/v2/coupon/",
+    "/api/v2/commission/",
+    "/api/v2/gift-card/",
+    "/api/v2/traffic-reset/"
+  ];
+  if (adminPrefixes.some(prefix => pathname.startsWith(prefix))) return true;
+  const adminUserPaths = [
+    "/api/v2/user/fetch",
+    "/api/v2/user/update",
+    "/api/v2/user/resetSecret",
+    "/api/v2/user/generate",
+    "/api/v2/user/destroy",
+    "/api/v2/user/sendMail",
+    "/api/v2/user/dumpCSV",
+    "/api/v2/user/ban"
+  ];
+  return adminUserPaths.some(path => pathname === path || pathname.startsWith(`${path}/`));
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -1029,6 +1061,7 @@ export default {
     }
     if (url.pathname.startsWith("/api/v2/passport")) return adminApi(request, env, url.pathname.replace("/api/v2", "/api/v2/admin"));
     if (url.pathname.startsWith("/api/v2/admin")) return adminApi(request, env, url.pathname);
+    if (isAdminDistAlias(url.pathname)) return adminApi(request, env, url.pathname.replace("/api/v2", "/api/v2/admin"));
     if (url.pathname.startsWith("/api/v1") || url.pathname.startsWith("/api/v2/user")) return userApi(request, env, url.pathname);
     if (url.pathname === "/") return new Response("200", { status: 200, headers: { "content-type": "text/plain; charset=utf-8" } });
     return json({ status: 200 });
