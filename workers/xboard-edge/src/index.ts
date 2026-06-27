@@ -363,6 +363,26 @@ function parseJsonObject(value: unknown): Record<string, any> {
   }
 }
 
+function isNilLike(value: unknown) {
+  return value === null || value === undefined || value === "" || value === "null" || value === "undefined";
+}
+
+function bindValue(value: unknown) {
+  if (isNilLike(value)) return null;
+  if (typeof value === "boolean") return value ? 1 : 0;
+  if (Array.isArray(value) || (value && typeof value === "object")) return JSON.stringify(value);
+  return value;
+}
+
+function safeUser(row: Record<string, any>) {
+  const { password, password_algo, password_salt, token: userToken, ...rest } = row;
+  return {
+    ...rest,
+    token: userToken,
+    has_password: !!password
+  };
+}
+
 function paginated<T extends Record<string, any>>(data: T[], total: number, page: number, pageSize: number) {
   return {
     data,
@@ -609,8 +629,8 @@ function boolNumber(value: unknown, fallback = 1) {
 function normalizeServerInput(input: Record<string, any>) {
   const protocolSettings = parseJsonObject(input.protocol_settings);
   const serverType = String(input.type || input.server_type || protocolSettings.type || "shadowsocks");
-  const port = Number(input.port || input.server_port || 443);
-  const serverPort = Number(input.server_port || input.port || 443);
+  const port = Number(isNilLike(input.port) ? input.server_port || 443 : input.port);
+  const serverPort = Number(isNilLike(input.server_port) ? input.port || 443 : input.server_port);
   return {
     type: serverType,
     name: String(input.name || `${serverType} Node`),
@@ -625,7 +645,7 @@ function normalizeServerInput(input: Record<string, any>) {
     protocol_settings: JSON.stringify(protocolSettings),
     custom_outbounds: JSON.stringify(parseJsonArray(input.custom_outbounds)),
     custom_routes: JSON.stringify(parseJsonArray(input.custom_routes)),
-    cert_config: input.cert_config === undefined ? null : JSON.stringify(input.cert_config),
+    cert_config: isNilLike(input.cert_config) ? null : JSON.stringify(input.cert_config),
     machine_id: nullableNumber(input.machine_id),
     show: boolNumber(input.show, 1),
     enabled: boolNumber(input.enabled, 1),
@@ -650,13 +670,13 @@ async function saveServer(request: Request, env: Env) {
   try {
     if (id) {
       const set = allowed.map(([key]) => `${key} = ?`).join(", ");
-      await env.XBOARD_DB.prepare(`UPDATE v2_server SET ${set}, updated_at = ? WHERE id = ?`).bind(...allowed.map(([, value]) => value), ts, id).run();
+      await env.XBOARD_DB.prepare(`UPDATE v2_server SET ${set}, updated_at = ? WHERE id = ?`).bind(...allowed.map(([, value]) => bindValue(value)), ts, id).run();
     } else {
       const cols = [...allowed.map(([key]) => key), "created_at", "updated_at"];
-      await env.XBOARD_DB.prepare(`INSERT INTO v2_server(${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`).bind(...allowed.map(([, value]) => value), ts, ts).run();
+      await env.XBOARD_DB.prepare(`INSERT INTO v2_server(${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`).bind(...allowed.map(([, value]) => bindValue(value)), ts, ts).run();
     }
     await bump(env.XBOARD_KV, "servers_version");
-    return ok(true);
+    return ok({ success: true, id: id || true });
   } catch (error: any) {
     try {
       const minimal = {
@@ -678,13 +698,13 @@ async function saveServer(request: Request, env: Env) {
       const fallbackAllowed = Object.entries(minimal).filter(([key]) => fallbackColumns.has(key));
       if (id) {
         const set = fallbackAllowed.map(([key]) => `${key} = ?`).join(", ");
-        await env.XBOARD_DB.prepare(`UPDATE v2_server SET ${set}, updated_at = ? WHERE id = ?`).bind(...fallbackAllowed.map(([, value]) => value), ts, id).run();
+        await env.XBOARD_DB.prepare(`UPDATE v2_server SET ${set}, updated_at = ? WHERE id = ?`).bind(...fallbackAllowed.map(([, value]) => bindValue(value)), ts, id).run();
       } else {
         const cols = [...fallbackAllowed.map(([key]) => key), "created_at", "updated_at"];
-        await env.XBOARD_DB.prepare(`INSERT INTO v2_server(${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`).bind(...fallbackAllowed.map(([, value]) => value), ts, ts).run();
+        await env.XBOARD_DB.prepare(`INSERT INTO v2_server(${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`).bind(...fallbackAllowed.map(([, value]) => bindValue(value)), ts, ts).run();
       }
       await bump(env.XBOARD_KV, "servers_version");
-      return ok(true);
+      return ok({ success: true, id: id || true });
     } catch (fallbackError: any) {
       return fail(`保存服务器失败: ${fallbackError?.message || error?.message || "D1 写入失败"}`, 500, 500);
     }
@@ -782,11 +802,11 @@ async function createOrUpdate(table: string, request: Request, env: Env, id?: st
   const allowed = Object.entries(input).filter(([k]) => /^[a-zA-Z0-9_]+$/.test(k) && columns.has(k) && !["id", "created_at", "updated_at"].includes(k));
   if (id) {
     const set = allowed.map(([k]) => `${k} = ?`).join(", ");
-    if (set) await env.XBOARD_DB.prepare(`UPDATE ${table} SET ${set}, updated_at = ? WHERE id = ?`).bind(...allowed.map(([, v]) => typeof v === "object" ? JSON.stringify(v) : v), ts, id).run();
+    if (set) await env.XBOARD_DB.prepare(`UPDATE ${table} SET ${set}, updated_at = ? WHERE id = ?`).bind(...allowed.map(([, v]) => bindValue(v)), ts, id).run();
   } else {
     const cols = [...allowed.map(([k]) => k), "created_at", "updated_at"];
     const marks = cols.map(() => "?").join(", ");
-    await env.XBOARD_DB.prepare(`INSERT INTO ${table}(${cols.join(",")}) VALUES (${marks})`).bind(...allowed.map(([, v]) => typeof v === "object" ? JSON.stringify(v) : v), ts, ts).run();
+    await env.XBOARD_DB.prepare(`INSERT INTO ${table}(${cols.join(",")}) VALUES (${marks})`).bind(...allowed.map(([, v]) => bindValue(v)), ts, ts).run();
   }
   if (table === "v2_settings") await bump(env.XBOARD_KV, "settings_version");
   if (table === "v2_server" || table === "v2_plan") await bump(env.XBOARD_KV, "servers_version");
@@ -877,9 +897,19 @@ async function adminApi(request: Request, env: Env, path: string) {
     const newUuid = uuid();
     await env.XBOARD_DB.prepare("UPDATE v2_user SET token = ?, uuid = ?, updated_at = ? WHERE id = ?").bind(newToken, newUuid, now(), input.id).run();
     await bump(env.XBOARD_KV, `user_version:${input.id}`);
+    await bump(env.XBOARD_KV, `user_version:${newToken}`);
     return ok(true);
   }
-  if (path.includes("/user/ban")) return ok(true);
+  if (path.includes("/user/ban")) {
+    const input = await body<Record<string, any>>(request.clone());
+    const ids = parseJsonArray(input.ids || input.id);
+    if (ids.length) {
+      for (const id of ids) await env.XBOARD_DB.prepare("UPDATE v2_user SET banned = 1, updated_at = ? WHERE id = ?").bind(now(), Number(id)).run();
+    } else if (input.id) {
+      await env.XBOARD_DB.prepare("UPDATE v2_user SET banned = 1, updated_at = ? WHERE id = ?").bind(now(), input.id).run();
+    }
+    return ok(true);
+  }
   if (path.includes("/user/destroy")) {
     const input = await body<Record<string, any>>(request.clone());
     if (input.id) await env.XBOARD_DB.prepare("DELETE FROM v2_user WHERE id = ?").bind(input.id).run();
@@ -940,7 +970,7 @@ async function userApi(request: Request, env: Env, path: string) {
   }
   const user = await currentUser(request, env.XBOARD_DB, env.XBOARD_KV, false);
   if (!user) return fail("未授权", 401, 401);
-  if (path.includes("/user/info")) return ok(user);
+  if (path.includes("/user/info")) return ok(safeUser(user as Record<string, any>));
   if (path.includes("/user/checkLogin")) return ok(true);
   if (path.includes("/user/getSubscribe")) return ok({ subscribe_url: subscribeUrl(request, (user as any).token), token: (user as any).token });
   if (path.includes("/user/getStat")) return ok({ u: (user as any).u || 0, d: (user as any).d || 0, transfer_enable: (user as any).transfer_enable || 0 });
@@ -953,13 +983,28 @@ async function userApi(request: Request, env: Env, path: string) {
   }
   if (path.includes("/user/changePassword")) {
     const input = await body<Record<string, any>>(request);
+    const oldPassword = String(input.old_password || input.oldPassword || "");
+    if (oldPassword && !(await verifyPassword(oldPassword, String((user as any).password || "")))) return fail("旧密码错误", 400, 400);
     const password = await hashPassword(String(input.new_password || input.password || ""));
     await env.XBOARD_DB.prepare("UPDATE v2_user SET password = ?, updated_at = ? WHERE id = ?").bind(password, now(), (user as any).id).run();
     return ok(true);
   }
-  if (path.includes("/user/update")) return createOrUpdate("v2_user", request, env, String((user as any).id));
-  if (path.includes("/plan/fetch")) return ok(await adminPlanRows(env));
-  if (path.includes("/server/fetch")) return ok(await adminServerRows(env));
+  if (path.includes("/user/update")) {
+    const input = await body<Record<string, any>>(request);
+    const remindExpire = "remind_expire" in input ? boolNumber(input.remind_expire, 1) : undefined;
+    const remindTraffic = "remind_traffic" in input ? boolNumber(input.remind_traffic, 1) : undefined;
+    const updates: Record<string, unknown> = {};
+    if (remindExpire !== undefined) updates.remind_expire = remindExpire;
+    if (remindTraffic !== undefined) updates.remind_traffic = remindTraffic;
+    const entries = Object.entries(updates);
+    if (entries.length) {
+      await env.XBOARD_DB.prepare(`UPDATE v2_user SET ${entries.map(([key]) => `${key} = ?`).join(", ")}, updated_at = ? WHERE id = ?`).bind(...entries.map(([, value]) => value), now(), (user as any).id).run();
+      await bump(env.XBOARD_KV, `user_version:${(user as any).id}`);
+    }
+    return ok(true);
+  }
+  if (path.includes("/plan/fetch")) return ok((await adminPlanRows(env)).filter(row => Number((row as any).show ?? 1) === 1 && Number((row as any).sell ?? 1) === 1));
+  if (path.includes("/server/fetch")) return ok((await adminServerRows(env)).filter(row => Number((row as any).show ?? 1) === 1 && Number((row as any).enabled ?? 1) === 1));
   if (path.includes("/notice/fetch")) return ok((await rows(env.XBOARD_DB, "v2_notice", 50) as any[]).filter(row => Number(row.show ?? 1) === 1));
   if (path.includes("/knowledge/fetch")) return ok((await rows(env.XBOARD_DB, "v2_knowledge", 50) as any[]).filter(row => Number(row.show ?? 1) === 1));
   if (path.includes("/ticket/fetch")) {

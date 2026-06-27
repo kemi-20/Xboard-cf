@@ -47,13 +47,25 @@ export default {
     }
     if (url.pathname.includes("user")) {
       const groupIds = (() => { try { return JSON.parse(node.group_ids || "[]").map(Number); } catch { return []; } })();
-      const users = await env.XBOARD_DB.prepare("SELECT * FROM v2_user WHERE banned = 0 AND (expired_at IS NULL OR expired_at > ?) AND (transfer_enable = 0 OR (u + d) < transfer_enable)").bind(now()).all<any>();
-      return ok((users.results || []).filter(user => groupIds.length === 0 || groupIds.includes(Number(user.group_id))));
+      const users = await env.XBOARD_DB.prepare("SELECT id, uuid, group_id, speed_limit, device_limit, transfer_enable, u, d FROM v2_user WHERE banned = 0 AND (expired_at IS NULL OR expired_at > ?) AND (transfer_enable = 0 OR (u + d) < transfer_enable)").bind(now()).all<any>();
+      return ok((users.results || []).filter(user => groupIds.length === 0 || groupIds.includes(Number(user.group_id))).map(user => ({
+        id: user.id,
+        uuid: user.uuid,
+        speed_limit: user.speed_limit,
+        device_limit: user.device_limit,
+        transfer_enable: user.transfer_enable,
+        u: user.u,
+        d: user.d
+      })));
     }
     if (url.pathname.includes("traffic")) {
       const input = await body<any>(request);
       const rows = Array.isArray(input) ? input : Array.isArray(input?.data) ? input.data : Array.isArray(input?.res) ? input.res.map((r: any[]) => ({ user_id: r[0], u: r[1], d: r[2] })) : [input];
-      const event = { event_id: crypto.randomUUID(), type: "traffic", server_id: node.id, server_type: node.type, rate: Number(node.rate || 1), payload: rows, created_at: now() };
+      const payload = rows.map((row: any) => Array.isArray(row) ? { user_id: row[0], u: row[1], d: row[2] } : row)
+        .filter((row: any) => Number.isFinite(Number(row?.user_id ?? row?.id)) && Number.isFinite(Number(row?.u)) && Number.isFinite(Number(row?.d)))
+        .map((row: any) => ({ user_id: Number(row.user_id ?? row.id), u: Math.max(0, Number(row.u)), d: Math.max(0, Number(row.d)) }));
+      if (!payload.length) return ok(true);
+      const event = { event_id: crypto.randomUUID(), type: "traffic", server_id: node.id, server_type: node.type, rate: Number(node.rate || 1), payload, created_at: now() };
       await env.TRAFFIC_EVENTS.send(event);
       await env.XBOARD_KV.put(`node:last_push:${node.id}`, String(now()), { expirationTtl: 3600 });
       return ok(true);

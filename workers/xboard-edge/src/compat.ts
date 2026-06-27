@@ -14,9 +14,7 @@ export async function body<T = Record<string, unknown>>(request: Request): Promi
   return out as T;
 }
 export function uuid(): string {
-  return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, c =>
-    (Number(c) ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> Number(c) / 4).toString(16)
-  );
+  return crypto.randomUUID();
 }
 export function token(bytes = 32): string {
   const data = new Uint8Array(bytes);
