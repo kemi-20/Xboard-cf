@@ -124,6 +124,13 @@ CREATE TABLE IF NOT EXISTS v2_server (
   custom_outbounds TEXT,
   custom_routes TEXT,
   cert_config TEXT,
+  listen_address TEXT,
+  rate_time_enable INTEGER DEFAULT 0,
+  rate_time_ranges TEXT,
+  transfer_enable INTEGER DEFAULT 0,
+  excludes TEXT,
+  ips TEXT,
+  code TEXT,
   machine_id INTEGER,
   show INTEGER NOT NULL DEFAULT 1,
   enabled INTEGER DEFAULT 1,
@@ -172,6 +179,8 @@ CREATE TABLE IF NOT EXISTS v2_ticket (
   subject TEXT NOT NULL,
   level INTEGER NOT NULL DEFAULT 0,
   status INTEGER NOT NULL DEFAULT 0,
+  reply_status INTEGER NOT NULL DEFAULT 0,
+  last_reply_user_id INTEGER DEFAULT NULL,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -257,7 +266,8 @@ CREATE TABLE IF NOT EXISTS v2_subscribe_templates (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL UNIQUE,
   type TEXT NOT NULL DEFAULT 'clash',
-  template TEXT NOT NULL,
+  content TEXT,
+  template TEXT,
   enabled INTEGER NOT NULL DEFAULT 1,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL

@@ -124,3 +124,154 @@ ON CONFLICT(name) DO UPDATE SET
   content = excluded.content,
   enabled = excluded.enabled,
   updated_at = unixepoch();
+
+INSERT INTO v2_subscribe_templates(name, type, content, template, enabled, created_at, updated_at) VALUES
+('singbox', 'singbox', '{
+  "dns": {"servers": [{"tag": "remote", "address": "https://1.1.1.1/dns-query"}, {"tag": "local", "address": "https://223.5.5.5/dns-query"}]},
+  "inbounds": [{"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": 2334, "sniff": true}],
+  "outbounds": [{"type": "selector", "tag": "节点选择", "outbounds": ["自动选择"]}, {"type": "urltest", "tag": "自动选择", "outbounds": []}, {"type": "direct", "tag": "direct"}, {"type": "block", "tag": "block"}],
+  "route": {"rules": [{"ip_is_private": true, "outbound": "direct"}]}
+}', '{
+  "dns": {"servers": [{"tag": "remote", "address": "https://1.1.1.1/dns-query"}, {"tag": "local", "address": "https://223.5.5.5/dns-query"}]},
+  "inbounds": [{"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": 2334, "sniff": true}],
+  "outbounds": [{"type": "selector", "tag": "节点选择", "outbounds": ["自动选择"]}, {"type": "urltest", "tag": "自动选择", "outbounds": []}, {"type": "direct", "tag": "direct"}, {"type": "block", "tag": "block"}],
+  "route": {"rules": [{"ip_is_private": true, "outbound": "direct"}]}
+}', 1, unixepoch(), unixepoch()),
+('clash', 'clash', 'mixed-port: 7890
+allow-lan: true
+mode: rule
+log-level: info
+proxies:
+proxy-groups:
+  - { name: "$app_name", type: select, proxies: ["自动选择", "DIRECT"] }
+  - { name: "自动选择", type: url-test, proxies: [], url: "http://www.gstatic.com/generate_204", interval: 300 }
+rules:
+  - GEOIP,CN,DIRECT
+  - MATCH,$app_name
+', 'mixed-port: 7890
+allow-lan: true
+mode: rule
+log-level: info
+proxies:
+proxy-groups:
+  - { name: "$app_name", type: select, proxies: ["自动选择", "DIRECT"] }
+  - { name: "自动选择", type: url-test, proxies: [], url: "http://www.gstatic.com/generate_204", interval: 300 }
+rules:
+  - GEOIP,CN,DIRECT
+  - MATCH,$app_name
+', 1, unixepoch(), unixepoch()),
+('clashmeta', 'clashmeta', 'mixed-port: 7890
+allow-lan: true
+mode: rule
+log-level: info
+unified-delay: true
+tcp-concurrent: true
+proxies:
+proxy-groups:
+  - { name: "$app_name", type: select, proxies: ["自动选择", "故障转移", "DIRECT"] }
+  - { name: "自动选择", type: url-test, proxies: [], url: "http://www.gstatic.com/generate_204", interval: 300 }
+  - { name: "故障转移", type: fallback, proxies: [], url: "http://www.gstatic.com/generate_204", interval: 300 }
+rules:
+  - GEOIP,CN,DIRECT
+  - MATCH,$app_name
+', 'mixed-port: 7890
+allow-lan: true
+mode: rule
+log-level: info
+unified-delay: true
+tcp-concurrent: true
+proxies:
+proxy-groups:
+  - { name: "$app_name", type: select, proxies: ["自动选择", "故障转移", "DIRECT"] }
+  - { name: "自动选择", type: url-test, proxies: [], url: "http://www.gstatic.com/generate_204", interval: 300 }
+  - { name: "故障转移", type: fallback, proxies: [], url: "http://www.gstatic.com/generate_204", interval: 300 }
+rules:
+  - GEOIP,CN,DIRECT
+  - MATCH,$app_name
+', 1, unixepoch(), unixepoch()),
+('stash', 'stash', 'mixed-port: 7890
+allow-lan: true
+mode: rule
+log-level: info
+proxies:
+proxy-groups:
+  - { name: "$app_name", type: select, proxies: ["自动选择", "DIRECT"] }
+  - { name: "自动选择", type: url-test, proxies: [], url: "http://www.gstatic.com/generate_204", interval: 300 }
+rules:
+  - GEOIP,CN,DIRECT
+  - MATCH,$app_name
+', 'mixed-port: 7890
+allow-lan: true
+mode: rule
+log-level: info
+proxies:
+proxy-groups:
+  - { name: "$app_name", type: select, proxies: ["自动选择", "DIRECT"] }
+  - { name: "自动选择", type: url-test, proxies: [], url: "http://www.gstatic.com/generate_204", interval: 300 }
+rules:
+  - GEOIP,CN,DIRECT
+  - MATCH,$app_name
+', 1, unixepoch(), unixepoch()),
+('surge', 'surge', '#!MANAGED-CONFIG $subs_link interval=43200 strict=true
+[General]
+loglevel = notify
+dns-server = 223.5.5.5, 114.114.114.114
+[Panel]
+SubscribeInfo = $subscribe_info, style=info
+[Proxy]
+$proxies
+[Proxy Group]
+Proxy = select, auto, fallback, $proxy_group
+[Rule]
+DOMAIN,$subs_domain,DIRECT
+GEOIP,CN,DIRECT
+FINAL,Proxy,dns-failed
+', '#!MANAGED-CONFIG $subs_link interval=43200 strict=true
+[General]
+loglevel = notify
+dns-server = 223.5.5.5, 114.114.114.114
+[Panel]
+SubscribeInfo = $subscribe_info, style=info
+[Proxy]
+$proxies
+[Proxy Group]
+Proxy = select, auto, fallback, $proxy_group
+[Rule]
+DOMAIN,$subs_domain,DIRECT
+GEOIP,CN,DIRECT
+FINAL,Proxy,dns-failed
+', 1, unixepoch(), unixepoch()),
+('surfboard', 'surfboard', '#!MANAGED-CONFIG $subs_link interval=43200 strict=true
+[General]
+loglevel = notify
+dns-server = 223.6.6.6, 119.29.29.29
+[Panel]
+SubscribeInfo = $subscribe_info, style=info
+[Proxy]
+$proxies
+[Proxy Group]
+Proxy = select, auto, fallback, $proxy_group
+[Rule]
+DOMAIN,$subs_domain,DIRECT
+GEOIP,CN,DIRECT
+FINAL,Proxy
+', '#!MANAGED-CONFIG $subs_link interval=43200 strict=true
+[General]
+loglevel = notify
+dns-server = 223.6.6.6, 119.29.29.29
+[Panel]
+SubscribeInfo = $subscribe_info, style=info
+[Proxy]
+$proxies
+[Proxy Group]
+Proxy = select, auto, fallback, $proxy_group
+[Rule]
+DOMAIN,$subs_domain,DIRECT
+GEOIP,CN,DIRECT
+FINAL,Proxy
+', 1, unixepoch(), unixepoch())
+ON CONFLICT(name) DO UPDATE SET
+  content = CASE WHEN v2_subscribe_templates.content IS NULL OR v2_subscribe_templates.content = '' THEN excluded.content ELSE v2_subscribe_templates.content END,
+  template = CASE WHEN v2_subscribe_templates.template IS NULL OR v2_subscribe_templates.template = '' THEN excluded.template ELSE v2_subscribe_templates.template END,
+  enabled = 1,
+  updated_at = unixepoch();
