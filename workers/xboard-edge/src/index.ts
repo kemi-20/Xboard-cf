@@ -41,8 +41,96 @@ async function runSqlIgnore(env: Env, sql: string, binds: any[] = []) {
   }
 }
 
+const DEFAULT_ADMIN_PASSWORD_HASH = "pbkdf2$sha256$100000$xboard-cloudflare-admin$8abd89496c7d7b0cfdc7b786fd49da099859e1167bbcf9f945c38415d6d56268";
+
+const defaultSubscribeTemplates: Record<string, string> = {
+  singbox: JSON.stringify({
+    dns: { servers: [{ tag: "remote", address: "https://1.1.1.1/dns-query" }, { tag: "local", address: "https://223.5.5.5/dns-query" }] },
+    inbounds: [{ type: "mixed", tag: "mixed-in", listen: "127.0.0.1", listen_port: 2334, sniff: true }],
+    outbounds: [{ type: "selector", tag: "节点选择", outbounds: ["自动选择"] }, { type: "urltest", tag: "自动选择", outbounds: [] }, { type: "direct", tag: "direct" }, { type: "block", tag: "block" }],
+    route: { rules: [{ ip_is_private: true, outbound: "direct" }] }
+  }, null, 2),
+  clash: `mixed-port: 7890
+allow-lan: true
+mode: rule
+log-level: info
+proxies:
+proxy-groups:
+  - { name: "$app_name", type: select, proxies: ["自动选择", "DIRECT"] }
+  - { name: "自动选择", type: url-test, proxies: [], url: "http://www.gstatic.com/generate_204", interval: 300 }
+rules:
+  - DOMAIN-SUFFIX,local,DIRECT
+  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+  - GEOIP,CN,DIRECT
+  - MATCH,$app_name
+`,
+  clashmeta: `mixed-port: 7890
+allow-lan: true
+mode: rule
+log-level: info
+unified-delay: true
+tcp-concurrent: true
+proxies:
+proxy-groups:
+  - { name: "$app_name", type: select, proxies: ["自动选择", "故障转移", "DIRECT"] }
+  - { name: "自动选择", type: url-test, proxies: [], url: "http://www.gstatic.com/generate_204", interval: 300 }
+  - { name: "故障转移", type: fallback, proxies: [], url: "http://www.gstatic.com/generate_204", interval: 300 }
+rules:
+  - DOMAIN-SUFFIX,local,DIRECT
+  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+  - GEOIP,CN,DIRECT
+  - MATCH,$app_name
+`,
+  stash: `mixed-port: 7890
+allow-lan: true
+mode: rule
+log-level: info
+proxies:
+proxy-groups:
+  - { name: "$app_name", type: select, proxies: ["自动选择", "DIRECT"] }
+  - { name: "自动选择", type: url-test, proxies: [], url: "http://www.gstatic.com/generate_204", interval: 300 }
+rules:
+  - GEOIP,CN,DIRECT
+  - MATCH,$app_name
+`,
+  surge: `#!MANAGED-CONFIG $subs_link interval=43200 strict=true
+[General]
+loglevel = notify
+dns-server = 223.5.5.5, 114.114.114.114
+[Panel]
+SubscribeInfo = $subscribe_info, style=info
+[Proxy]
+$proxies
+[Proxy Group]
+Proxy = select, auto, fallback, $proxy_group
+auto = url-test, $proxy_group, url=http://www.gstatic.com/generate_204, interval=43200
+fallback = fallback, $proxy_group, url=http://www.gstatic.com/generate_204, interval=43200
+[Rule]
+DOMAIN,$subs_domain,DIRECT
+GEOIP,CN,DIRECT
+FINAL,Proxy,dns-failed
+`,
+  surfboard: `#!MANAGED-CONFIG $subs_link interval=43200 strict=true
+[General]
+loglevel = notify
+dns-server = 223.6.6.6, 119.29.29.29
+[Panel]
+SubscribeInfo = $subscribe_info, style=info
+[Proxy]
+$proxies
+[Proxy Group]
+Proxy = select, auto, fallback, $proxy_group
+auto = url-test, $proxy_group, url=http://www.gstatic.com/generate_204, interval=43200
+fallback = fallback, $proxy_group, url=http://www.gstatic.com/generate_204, interval=43200
+[Rule]
+DOMAIN,$subs_domain,DIRECT
+GEOIP,CN,DIRECT
+FINAL,Proxy
+`
+};
+
 async function ensureBootstrap(env: Env) {
-  const marker = await env.XBOARD_KV.get("bootstrap:edge:v3");
+  const marker = await env.XBOARD_KV.get("bootstrap:edge:v4");
   if (marker) return;
   const alters = [
     "ALTER TABLE v2_user ADD COLUMN speed_limit INTEGER DEFAULT NULL",
@@ -59,7 +147,18 @@ async function ensureBootstrap(env: Env) {
     "ALTER TABLE v2_server_machine ADD COLUMN is_active INTEGER DEFAULT 1",
     "ALTER TABLE v2_server_machine ADD COLUMN last_seen_at INTEGER",
     "ALTER TABLE v2_server ADD COLUMN u INTEGER NOT NULL DEFAULT 0",
-    "ALTER TABLE v2_server ADD COLUMN d INTEGER NOT NULL DEFAULT 0"
+    "ALTER TABLE v2_server ADD COLUMN d INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE v2_server ADD COLUMN listen_address TEXT",
+    "ALTER TABLE v2_server ADD COLUMN rate_time_enable INTEGER DEFAULT 0",
+    "ALTER TABLE v2_server ADD COLUMN rate_time_ranges TEXT",
+    "ALTER TABLE v2_server ADD COLUMN transfer_enable INTEGER DEFAULT 0",
+    "ALTER TABLE v2_server ADD COLUMN excludes TEXT",
+    "ALTER TABLE v2_server ADD COLUMN ips TEXT",
+    "ALTER TABLE v2_server ADD COLUMN code TEXT",
+    "ALTER TABLE v2_subscribe_templates ADD COLUMN content TEXT",
+    "ALTER TABLE v2_subscribe_templates ADD COLUMN template TEXT",
+    "ALTER TABLE v2_ticket ADD COLUMN reply_status INTEGER DEFAULT 0",
+    "ALTER TABLE v2_ticket ADD COLUMN last_reply_user_id INTEGER DEFAULT NULL"
   ];
   for (const sql of alters) await runSqlIgnore(env, sql);
   const ts = now();
@@ -88,7 +187,7 @@ async function ensureBootstrap(env: Env) {
   }
   await runSqlIgnore(env, "INSERT INTO v2_server_group(id, name, created_at, updated_at) VALUES (1, 'Default', ?, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at", [ts, ts]);
   await runSqlIgnore(env, "INSERT INTO v2_plan(id, group_id, transfer_enable, name, speed_limit, device_limit, capacity_limit, reset_traffic_method, prices, content, tags, show, sell, renew, sort, created_at, updated_at) VALUES (1, 1, 1099511627776, 'Default Trial', NULL, NULL, NULL, 0, '{\"monthly\":0}', 'Default seeded plan for first-run compatibility.', '[]', 1, 1, 1, 1, ?, ?) ON CONFLICT(id) DO UPDATE SET group_id = excluded.group_id, transfer_enable = excluded.transfer_enable, name = excluded.name, show = excluded.show, sell = excluded.sell, renew = excluded.renew, updated_at = excluded.updated_at", [ts, ts]);
-  await runSqlIgnore(env, "UPDATE v2_user SET plan_id = COALESCE(plan_id, 1), group_id = COALESCE(group_id, 1), transfer_enable = CASE WHEN transfer_enable = 0 THEN 1099511627776 ELSE transfer_enable END, remind_expire = 1, remind_traffic = 1, updated_at = ? WHERE email = 'admin@admin.com'", [ts]);
+  await runSqlIgnore(env, "INSERT INTO v2_user(email, password, password_algo, password_salt, uuid, token, transfer_enable, u, d, banned, is_admin, is_staff, plan_id, group_id, remind_expire, remind_traffic, created_at, updated_at) VALUES ('admin@admin.com', ?, 'pbkdf2', 'xboard-cloudflare-admin', '00000000-0000-4000-8000-000000000001', 'admin-default-token-change-me', 1099511627776, 0, 0, 0, 1, 1, 1, 1, 1, 1, ?, ?) ON CONFLICT(email) DO UPDATE SET password = excluded.password, password_algo = excluded.password_algo, password_salt = excluded.password_salt, banned = 0, is_admin = 1, is_staff = 1, plan_id = COALESCE(v2_user.plan_id, excluded.plan_id), group_id = COALESCE(v2_user.group_id, excluded.group_id), transfer_enable = CASE WHEN v2_user.transfer_enable = 0 THEN excluded.transfer_enable ELSE v2_user.transfer_enable END, remind_expire = 1, remind_traffic = 1, updated_at = excluded.updated_at", [DEFAULT_ADMIN_PASSWORD_HASH, ts, ts]);
   await runSqlIgnore(env, "INSERT INTO v2_notice(id, title, content, show, sort, created_at, updated_at) VALUES (1, 'Welcome to XBoard CF', 'The Cloudflare-native XBoard panel is ready.', 1, 1, ?, ?) ON CONFLICT(id) DO UPDATE SET title = excluded.title, content = excluded.content, show = excluded.show, updated_at = excluded.updated_at", [ts, ts]);
   await runSqlIgnore(env, "INSERT INTO v2_knowledge(id, category, title, body, show, sort, created_at, updated_at) VALUES (1, 'Getting Started', 'First-run checklist', 'Update the default administrator password, configure app_url, and add real nodes before production use.', 1, 1, ?, ?) ON CONFLICT(id) DO UPDATE SET category = excluded.category, title = excluded.title, body = excluded.body, show = excluded.show, updated_at = excluded.updated_at", [ts, ts]);
   for (const [name, subject, content] of [
@@ -99,7 +198,11 @@ async function ensureBootstrap(env: Env) {
   ]) {
     await runSqlIgnore(env, "INSERT INTO v2_mail_templates(name, subject, content, enabled, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?) ON CONFLICT(name) DO UPDATE SET subject = excluded.subject, content = excluded.content, enabled = excluded.enabled, updated_at = excluded.updated_at", [name, subject, content, ts, ts]);
   }
-  await env.XBOARD_KV.put("bootstrap:edge:v3", String(ts));
+  for (const [name, content] of Object.entries(defaultSubscribeTemplates)) {
+    await runSqlIgnore(env, "INSERT INTO v2_subscribe_templates(name, type, content, template, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?) ON CONFLICT(name) DO UPDATE SET content = CASE WHEN v2_subscribe_templates.content IS NULL OR v2_subscribe_templates.content = '' THEN excluded.content ELSE v2_subscribe_templates.content END, template = CASE WHEN v2_subscribe_templates.template IS NULL OR v2_subscribe_templates.template = '' THEN excluded.template ELSE v2_subscribe_templates.template END, enabled = 1, updated_at = excluded.updated_at", [name, name, content, content, ts, ts]);
+    await runSqlIgnore(env, "INSERT INTO v2_subscribe_templates(name, content, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET content = CASE WHEN v2_subscribe_templates.content IS NULL OR v2_subscribe_templates.content = '' THEN excluded.content ELSE v2_subscribe_templates.content END, updated_at = excluded.updated_at", [name, content, ts, ts]);
+  }
+  await env.XBOARD_KV.put("bootstrap:edge:v4", String(ts));
 }
 
 async function firstNumber(env: Env, sql: string, fallback = 0) {
@@ -118,6 +221,7 @@ function pickSetting(all: Record<string, any>, key: string, fallback: any = "") 
 
 async function adminConfig(env: Env, request: Request) {
   const all = await settings(env.XBOARD_DB);
+  const templates = await subscribeTemplateMap(env);
   const config: Record<string, any> = {
     invite: {
       invite_force: !!pickSetting(all, "invite_force", 0),
@@ -225,12 +329,12 @@ async function adminConfig(env: Env, request: Request) {
       recaptcha_enable: !!pickSetting(all, "captcha_enable", 0)
     },
     subscribe_template: {
-      subscribe_template_singbox: "{}",
-      subscribe_template_clash: "",
-      subscribe_template_clashmeta: "",
-      subscribe_template_stash: "",
-      subscribe_template_surge: "",
-      subscribe_template_surfboard: ""
+      subscribe_template_singbox: templates.singbox || defaultSubscribeTemplates.singbox,
+      subscribe_template_clash: templates.clash || defaultSubscribeTemplates.clash,
+      subscribe_template_clashmeta: templates.clashmeta || defaultSubscribeTemplates.clashmeta,
+      subscribe_template_stash: templates.stash || defaultSubscribeTemplates.stash,
+      subscribe_template_surge: templates.surge || defaultSubscribeTemplates.surge,
+      subscribe_template_surfboard: templates.surfboard || defaultSubscribeTemplates.surfboard
     }
   };
   const key = new URL(request.url).searchParams.get("key");
@@ -248,9 +352,68 @@ function parseJsonArray(value: unknown): any[] {
   }
 }
 
+function parseJsonObject(value: unknown): Record<string, any> {
+  if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, any>;
+  if (typeof value !== "string" || value.trim() === "") return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function paginated<T extends Record<string, any>>(data: T[], total: number, page: number, pageSize: number) {
+  return {
+    data,
+    list: data,
+    rows: data,
+    total,
+    current_page: page,
+    currentPage: page,
+    page,
+    per_page: pageSize,
+    page_size: pageSize,
+    pageSize,
+    last_page: Math.max(1, Math.ceil(total / Math.max(1, pageSize)))
+  };
+}
+
 function subscribeUrl(request: Request, userToken: string) {
   const url = new URL(request.url);
   return `${url.origin}/s/${userToken}`;
+}
+
+async function subscribeTemplateMap(env: Env) {
+  try {
+    const result = await env.XBOARD_DB.prepare("SELECT name, COALESCE(content, template, '') AS content FROM v2_subscribe_templates").all<{ name: string; content: string }>();
+    return Object.fromEntries((result.results || []).map(row => [row.name, row.content || ""])) as Record<string, string>;
+  } catch {
+    try {
+      const result = await env.XBOARD_DB.prepare("SELECT name, COALESCE(template, '') AS content FROM v2_subscribe_templates").all<{ name: string; content: string }>();
+      return Object.fromEntries((result.results || []).map(row => [row.name, row.content || ""])) as Record<string, string>;
+    } catch {
+      return {};
+    }
+  }
+}
+
+async function saveSubscribeTemplate(env: Env, settingKey: string, value: unknown) {
+  const names: Record<string, string> = {
+    subscribe_template_singbox: "singbox",
+    subscribe_template_clash: "clash",
+    subscribe_template_clashmeta: "clashmeta",
+    subscribe_template_stash: "stash",
+    subscribe_template_surge: "surge",
+    subscribe_template_surfboard: "surfboard"
+  };
+  const name = names[settingKey];
+  if (!name) return false;
+  const content = typeof value === "string" ? value : JSON.stringify(value ?? "");
+  const ts = now();
+  await runSqlIgnore(env, "INSERT INTO v2_subscribe_templates(name, type, content, template, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?) ON CONFLICT(name) DO UPDATE SET content = excluded.content, template = excluded.template, enabled = 1, updated_at = excluded.updated_at", [name, name, content, content, ts, ts]);
+  await runSqlIgnore(env, "INSERT INTO v2_subscribe_templates(name, content, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at", [name, content, ts, ts]);
+  return true;
 }
 
 function dayStart(ts = now()) {
@@ -373,7 +536,7 @@ async function adminUserList(env: Env, request: Request) {
       online_count: 0
     });
   }
-  return { ...result, data };
+  return { ...paginated(data, Number(result.total || data.length), page, pageSize), meta: result };
 }
 
 async function adminPlanRows(env: Env) {
@@ -428,6 +591,122 @@ async function adminMachineRows(env: Env) {
     });
   }
   return out;
+}
+
+function nullableNumber(value: unknown): number | null {
+  if (value === "" || value === null || value === undefined || value === "null") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function boolNumber(value: unknown, fallback = 1) {
+  if (value === "" || value === null || value === undefined || value === "null") return fallback;
+  if (value === true || value === "true") return 1;
+  if (value === false || value === "false") return 0;
+  return Number(value) ? 1 : 0;
+}
+
+function normalizeServerInput(input: Record<string, any>) {
+  const protocolSettings = parseJsonObject(input.protocol_settings);
+  const serverType = String(input.type || input.server_type || protocolSettings.type || "shadowsocks");
+  const port = Number(input.port || input.server_port || 443);
+  const serverPort = Number(input.server_port || input.port || 443);
+  return {
+    type: serverType,
+    name: String(input.name || `${serverType} Node`),
+    parent_id: nullableNumber(input.parent_id) || null,
+    group_ids: JSON.stringify(parseJsonArray(input.group_ids).length ? parseJsonArray(input.group_ids).map(Number) : [1]),
+    route_ids: JSON.stringify(parseJsonArray(input.route_ids).map(Number)),
+    host: String(input.host || input.address || "127.0.0.1"),
+    port,
+    server_port: serverPort,
+    rate: Number(input.rate || 1),
+    tags: JSON.stringify(parseJsonArray(input.tags)),
+    protocol_settings: JSON.stringify(protocolSettings),
+    custom_outbounds: JSON.stringify(parseJsonArray(input.custom_outbounds)),
+    custom_routes: JSON.stringify(parseJsonArray(input.custom_routes)),
+    cert_config: input.cert_config === undefined ? null : JSON.stringify(input.cert_config),
+    machine_id: nullableNumber(input.machine_id),
+    show: boolNumber(input.show, 1),
+    enabled: boolNumber(input.enabled, 1),
+    sort: Number(input.sort || input.order || 0),
+    listen_address: String(input.listen_address || ""),
+    rate_time_enable: boolNumber(input.rate_time_enable, 0),
+    rate_time_ranges: JSON.stringify(parseJsonArray(input.rate_time_ranges)),
+    transfer_enable: input.transfer_enable ? Number(input.transfer_enable) : input.transfer_enable_gb ? Math.round(Number(input.transfer_enable_gb) * 1073741824) : 0,
+    excludes: JSON.stringify(parseJsonArray(input.excludes)),
+    ips: JSON.stringify(parseJsonArray(input.ips)),
+    code: input.code ? String(input.code) : null
+  };
+}
+
+async function saveServer(request: Request, env: Env) {
+  const input = await body<Record<string, any>>(request);
+  const data = normalizeServerInput(input);
+  const columns = await tableColumns(env, "v2_server");
+  const allowed = Object.entries(data).filter(([key]) => columns.has(key));
+  const ts = now();
+  const id = nullableNumber(input.id);
+  try {
+    if (id) {
+      const set = allowed.map(([key]) => `${key} = ?`).join(", ");
+      await env.XBOARD_DB.prepare(`UPDATE v2_server SET ${set}, updated_at = ? WHERE id = ?`).bind(...allowed.map(([, value]) => value), ts, id).run();
+    } else {
+      const cols = [...allowed.map(([key]) => key), "created_at", "updated_at"];
+      await env.XBOARD_DB.prepare(`INSERT INTO v2_server(${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`).bind(...allowed.map(([, value]) => value), ts, ts).run();
+    }
+    await bump(env.XBOARD_KV, "servers_version");
+    return ok(true);
+  } catch (error: any) {
+    return fail(`保存服务器失败: ${error?.message || "D1 写入失败"}`, 500, 500);
+  }
+}
+
+async function updateServer(request: Request, env: Env) {
+  const input = await body<Record<string, any>>(request);
+  const id = nullableNumber(input.id);
+  if (!id) return fail("服务器不存在", 400, 400202);
+  const data: Record<string, any> = {};
+  if ("show" in input) data.show = boolNumber(input.show, 1);
+  if ("enabled" in input) data.enabled = boolNumber(input.enabled, 1);
+  if ("machine_id" in input) data.machine_id = nullableNumber(input.machine_id);
+  if (!Object.keys(data).length) return ok(true);
+  const set = Object.keys(data).map(key => `${key} = ?`).join(", ");
+  await env.XBOARD_DB.prepare(`UPDATE v2_server SET ${set}, updated_at = ? WHERE id = ?`).bind(...Object.values(data), now(), id).run();
+  await bump(env.XBOARD_KV, "servers_version");
+  return ok(true);
+}
+
+async function sortServers(request: Request, env: Env) {
+  const input = await body<any>(request);
+  const items = Array.isArray(input) ? input : Array.isArray(input?.data) ? input.data : [];
+  for (const item of items) {
+    if (item?.id !== undefined && item?.order !== undefined) {
+      await env.XBOARD_DB.prepare("UPDATE v2_server SET sort = ?, updated_at = ? WHERE id = ?").bind(Number(item.order), now(), Number(item.id)).run();
+    }
+  }
+  await bump(env.XBOARD_KV, "servers_version");
+  return ok(true);
+}
+
+async function copyServer(request: Request, env: Env) {
+  const input = await body<Record<string, any>>(request);
+  const id = nullableNumber(input.id);
+  if (!id) return fail("服务器不存在", 400, 400202);
+  const server = await env.XBOARD_DB.prepare("SELECT * FROM v2_server WHERE id = ?").bind(id).first<Record<string, any>>();
+  if (!server) return fail("服务器不存在", 400, 400202);
+  delete server.id;
+  server.name = `${server.name || "Node"} Copy`;
+  server.show = 0;
+  server.u = 0;
+  server.d = 0;
+  server.created_at = now();
+  server.updated_at = now();
+  const columns = await tableColumns(env, "v2_server");
+  const allowed = Object.entries(server).filter(([key]) => columns.has(key));
+  await env.XBOARD_DB.prepare(`INSERT INTO v2_server(${allowed.map(([key]) => key).join(",")}) VALUES (${allowed.map(() => "?").join(",")})`).bind(...allowed.map(([, value]) => value)).run();
+  await bump(env.XBOARD_KV, "servers_version");
+  return ok(true);
 }
 
 async function audit(env: Env, adminId: number, request: Request, path: string) {
@@ -500,6 +779,7 @@ async function adminApi(request: Request, env: Env, path: string) {
     const input = await body<Record<string, any>>(request);
     const ts = now();
     for (const [name, value] of Object.entries(input)) {
+      if (await saveSubscribeTemplate(env, name, value)) continue;
       await env.XBOARD_DB.prepare("INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
         .bind(name, typeof value === "object" ? JSON.stringify(value) : String(value), ts, ts).run();
     }
@@ -525,6 +805,33 @@ async function adminApi(request: Request, env: Env, path: string) {
   if (path.includes("/system/getSystemStatus")) return ok({ ok: true, time: now() });
   if (path.includes("/system/getQueueStats") || path.includes("/system/getQueueWorkload") || path.includes("/system/getQueueMasters")) return ok([]);
   if (path.includes("/system/getHorizonFailedJobs")) return ok({ data: [], total: 0, current_page: 1, per_page: 20 });
+  if (path.includes("/server/manage/save")) return saveServer(request, env);
+  if (path.includes("/server/manage/update")) return updateServer(request, env);
+  if (path.includes("/server/manage/sort")) return sortServers(request, env);
+  if (path.includes("/server/manage/drop")) {
+    const input = await body<Record<string, any>>(request.clone());
+    if (input.id) await env.XBOARD_DB.prepare("DELETE FROM v2_server WHERE id = ?").bind(input.id).run();
+    await bump(env.XBOARD_KV, "servers_version");
+    return ok(true);
+  }
+  if (path.includes("/server/manage/batchDelete")) {
+    const input = await body<Record<string, any>>(request.clone());
+    const ids = parseJsonArray(input.ids);
+    for (const id of ids) await env.XBOARD_DB.prepare("DELETE FROM v2_server WHERE id = ?").bind(Number(id)).run();
+    await bump(env.XBOARD_KV, "servers_version");
+    return ok(true);
+  }
+  if (path.includes("/server/manage/resetTraffic")) {
+    const input = await body<Record<string, any>>(request.clone());
+    if (input.id) await env.XBOARD_DB.prepare("UPDATE v2_server SET u = 0, d = 0, updated_at = ? WHERE id = ?").bind(now(), input.id).run();
+    return ok(true);
+  }
+  if (path.includes("/server/manage/batchResetTraffic")) {
+    const input = await body<Record<string, any>>(request.clone());
+    for (const id of parseJsonArray(input.ids)) await env.XBOARD_DB.prepare("UPDATE v2_server SET u = 0, d = 0, updated_at = ? WHERE id = ?").bind(now(), Number(id)).run();
+    return ok(true);
+  }
+  if (path.includes("/server/manage/copy")) return copyServer(request, env);
   if (path.includes("/server/machine/nodes")) {
     const machineId = Number(new URL(request.url).searchParams.get("machine_id") || 0);
     const data = machineId ? (await rows(env.XBOARD_DB, "v2_server", 1000) as any[]).filter(row => Number(row.machine_id || 0) === machineId) : [];
