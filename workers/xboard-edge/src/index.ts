@@ -413,6 +413,19 @@ function parseJsonArray(value: unknown): any[] {
   }
 }
 
+function routeMatchArray(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map(item => String(item).trim()).filter(Boolean);
+  if (typeof value !== "string" || value.trim() === "") return [];
+  try {
+    const parsed = JSON.parse(value);
+    if (Array.isArray(parsed)) return parsed.map(item => String(item).trim()).filter(Boolean);
+    if (typeof parsed === "string" && parsed.trim()) return [parsed.trim()];
+  } catch {
+    // Legacy rows may contain newline-separated text instead of JSON.
+  }
+  return value.split(/\r?\n/).map(item => item.trim()).filter(Boolean);
+}
+
 function parseJsonObject(value: unknown): Record<string, any> {
   if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, any>;
   if (typeof value !== "string" || value.trim() === "") return {};
@@ -638,6 +651,14 @@ async function adminPlanRows(env: Env) {
     });
   }
   return out;
+}
+
+async function adminRouteRows(env: Env) {
+  const routes = await rows(env.XBOARD_DB, "v2_server_route", 1000) as any[];
+  return routes.map(route => ({
+    ...route,
+    match: routeMatchArray(route.match)
+  }));
 }
 
 async function adminServerRows(env: Env) {
@@ -1061,6 +1082,7 @@ async function adminApi(request: Request, env: Env, path: string) {
     if (path.includes(suffix)) {
       if (suffix === "/server/manage/getNodes") return ok(await adminServerRows(env));
       if (suffix === "/server/machine/fetch") return ok(await adminMachineRows(env));
+      if (suffix === "/server/route/fetch") return ok(await adminRouteRows(env));
       if (suffix === "/plan/fetch") return ok(await adminPlanRows(env));
       return ok(await rows(env.XBOARD_DB, table, 1000));
     }

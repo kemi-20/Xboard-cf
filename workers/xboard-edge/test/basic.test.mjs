@@ -90,3 +90,10 @@ test("user editor defaults missing commission type safely", () => {
   assert.match(source, /commission_type: Number\(row\.commission_type \?\? 0\)/);
   assert.match(bundle, /value:\(t\.value\?\?0\)\.toString\(\)/);
 });
+
+test("route fetch returns match rules as an array", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /function routeMatchArray\(value: unknown\): string\[\]/);
+  assert.match(source, /match: routeMatchArray\(route\.match\)/);
+  assert.match(source, /suffix === "\/server\/route\/fetch"\) return ok\(await adminRouteRows\(env\)\)/);
+});
