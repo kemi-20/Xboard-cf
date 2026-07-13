@@ -23,7 +23,61 @@ test("subscription cache varies by filters and hostname", () => {
   assert.match(source, /searchParams\.get\("types"\)/);
   assert.match(source, /searchParams\.get\("filter"\)/);
   assert.match(source, /url\.hostname/);
-  assert.match(source, /subscribe:\$\{token\}:\$\{client\}:\$\{variant\}/);
+  assert.match(source, /subscribe:v2:\$\{token\}:\$\{client\}:\$\{variant\}/);
+});
+
+test("plain browser subscriptions display inline like upstream General", () => {
+  const headers = __test.responseHeaders("plain", { app_name: "XBoard" }, { u: 1, d: 2, transfer_enable: 3, expired_at: 4 });
+  assert.equal(headers["content-type"], "text/plain");
+  assert.equal(headers["content-disposition"], undefined);
+  assert.equal(headers["profile-update-interval"], undefined);
+  assert.equal(headers["subscription-userinfo"], "upload=1; download=2; total=3; expire=4");
+});
+
+test("subscription response headers follow each upstream protocol", () => {
+  const user = { u: 1, d: 2, transfer_enable: 3, expired_at: 4 };
+  const config = { app_name: "Board Name", app_url: "https://panel.example" };
+  assert.match(__test.responseHeaders("clash", config, user)["content-disposition"], /^attachment;/);
+  assert.equal(__test.responseHeaders("clash", config, user)["profile-web-page-url"], config.app_url);
+  assert.equal(__test.responseHeaders("clashmeta", config, user)["profile-web-page-url"], undefined);
+  assert.equal(__test.responseHeaders("singbox", config, user)["content-disposition"], undefined);
+  assert.equal(__test.responseHeaders("surge", config, user)["subscription-userinfo"], undefined);
+  assert.equal(__test.responseHeaders("surfboard", config, user)["content-type"], "text/html; charset=UTF-8");
+  assert.equal(__test.responseHeaders("shadowrocket", config, user)["subscription-userinfo"], undefined);
+});
+
+test("client matching and encoded formats follow upstream flags", () => {
+  assert.equal(__test.clientOf(new Request("https://sub.example/s/token", { headers: { "user-agent": "Mozilla/5.0" } })), "plain");
+  assert.equal(__test.clientOf(new Request("https://sub.example/s/token?flag=shadowsocks")), "shadowsocks");
+  assert.equal(__test.clientOf(new Request("https://sub.example/s/token?flag=quantumult-x")), "quantumultx");
+  const user = { uuid: "00000000-0000-4000-8000-000000000000", u: 0, d: 0, transfer_enable: 1 };
+  const server = { id: 1, type: "shadowsocks", name: "Node", host: "127.0.0.1", port: 8388, protocol_settings: { cipher: "aes-128-gcm" } };
+  const quantumult = __test.output("quantumultx", {}, {}, user, [server], new Request("https://sub.example/s/token"), "token");
+  assert.match(quantumult, /^[A-Za-z0-9+/]+={0,2}$/);
+  assert.deepEqual(JSON.parse(__test.shadowsocksProfile(user, [server])).servers[0], {
+    id: 1, remarks: "Node", server: "127.0.0.1", server_port: 8388,
+    password: user.uuid, method: "aes-128-gcm"
+  });
+});
+
+test("client output filters protocols using upstream allowlists", () => {
+  const user = { uuid: "00000000-0000-4000-8000-000000000000", u: 0, d: 0, transfer_enable: 1 };
+  const servers = [
+    { type: "vless", name: "VLESS", host: "vless.example", port: 443, protocol_settings: {} },
+    { type: "trojan", name: "Trojan", host: "trojan.example", port: 443, protocol_settings: {} }
+  ];
+  const classic = __test.output("clash", {}, { clash: "proxies: []\nproxy-groups: []\nrules: []\n" }, user, servers, new Request("https://sub.example/s/token"), "token");
+  assert.doesNotMatch(classic, /VLESS/);
+  assert.match(classic, /Trojan/);
+  const meta = __test.output("clashmeta", {}, { clashmeta: "proxies: []\nproxy-groups: []\nrules: []\n" }, user, servers, new Request("https://sub.example/s/token"), "token");
+  assert.match(meta, /VLESS/);
+  assert.match(meta, /Trojan/);
+});
+
+test("invalid type filters behave like upstream and do not hide all nodes", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /filter\(value => validServerTypes\.has\(value\)\)/);
+  assert.match(source, /requestedTypes\.length && !requestedTypes\.includes\(server\.type\)/);
 });
 
 test("subscription settings decorate server names like upstream", () => {

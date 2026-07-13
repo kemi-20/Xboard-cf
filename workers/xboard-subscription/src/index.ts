@@ -6,8 +6,23 @@ import { settings as loadSettings } from "./db.ts";
 
 export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; }
 
-type Client = "plain" | "shadowrocket" | "clash" | "clashmeta" | "stash" | "surge" | "surfboard" | "singbox" | "quantumultx" | "loon";
+type Client = "plain" | "shadowrocket" | "shadowsocks" | "clash" | "clashmeta" | "stash" | "surge" | "surfboard" | "singbox" | "quantumultx" | "loon";
 type Config = Record<string, any>;
+
+const validServerTypes = new Set(["shadowsocks", "vmess", "vless", "trojan", "hysteria", "tuic", "anytls", "socks", "http", "mieru", "naive"]);
+const allowedProtocols: Record<Client, Set<string>> = {
+  plain: new Set(["vmess", "vless", "shadowsocks", "trojan", "hysteria", "anytls", "socks", "tuic", "http"]),
+  clash: new Set(["shadowsocks", "vmess", "trojan", "socks", "http"]),
+  clashmeta: new Set(["shadowsocks", "vmess", "trojan", "vless", "hysteria", "tuic", "anytls", "socks", "http", "mieru"]),
+  stash: new Set(["shadowsocks", "vmess", "vless", "hysteria", "trojan", "tuic", "anytls", "socks", "http"]),
+  singbox: new Set(["shadowsocks", "trojan", "vmess", "vless", "hysteria", "tuic", "anytls", "socks", "http"]),
+  surge: new Set(["shadowsocks", "vmess", "trojan", "hysteria", "anytls", "socks", "http"]),
+  surfboard: new Set(["shadowsocks", "vmess", "trojan", "anytls"]),
+  shadowrocket: new Set(["shadowsocks", "vmess", "vless", "trojan", "hysteria", "tuic", "anytls", "socks"]),
+  shadowsocks: new Set(["shadowsocks"]),
+  quantumultx: new Set(["shadowsocks", "vmess", "vless", "trojan", "anytls", "socks", "http"]),
+  loon: new Set(["shadowsocks", "vmess", "trojan", "hysteria", "vless", "anytls"])
+};
 
 function b64(value: string) {
   const bytes = new TextEncoder().encode(value);
@@ -34,14 +49,15 @@ function boolSetting(config: Config, key: string, fallback = false) {
 function clientOf(request: Request): Client {
   const ua = (request.headers.get("user-agent") || "").toLowerCase();
   const url = new URL(request.url);
-  const flag = (url.searchParams.get("flag") || url.searchParams.get("target") || ua).toLowerCase();
+  const flag = (url.searchParams.get("flag") || ua).toLowerCase();
   if (flag.includes("surge")) return "surge";
   if (flag.includes("surfboard")) return "surfboard";
-  if (flag.includes("quantumult")) return "quantumultx";
-  if (flag.includes("loon")) return "loon";
-  if (flag.includes("shadowrocket")) return "shadowrocket";
   if (flag.includes("stash")) return "stash";
   if (flag.includes("sing-box") || flag.includes("singbox") || flag.includes("hiddify") || flag.includes("sfm")) return "singbox";
+  if (flag.includes("shadowsocks")) return "shadowsocks";
+  if (flag.includes("shadowrocket")) return "shadowrocket";
+  if (flag.includes("quantumult%20x") || flag.includes("quantumult x") || flag.includes("quantumult-x")) return "quantumultx";
+  if (flag.includes("loon")) return "loon";
   if (["meta", "verge", "flclash", "nekobox", "clashmetaforandroid"].some(name => flag.includes(name))) return "clashmeta";
   if (flag.includes("clash")) return "clash";
   return "plain";
@@ -273,6 +289,25 @@ function singboxProfile(template: string, user: any, servers: any[]) {
   return JSON.stringify(document, null, 2);
 }
 
+function shadowsocksProfile(user: any, servers: any[]) {
+  const supportedCiphers = new Set(["aes-128-gcm", "aes-256-gcm", "aes-192-gcm", "chacha20-ietf-poly1305"]);
+  const items = servers.filter(server => server.type === "shadowsocks" && supportedCiphers.has(server.protocol_settings?.cipher)).map(server => ({
+    id: server.id,
+    remarks: server.name,
+    server: server.host,
+    server_port: Number(server.port),
+    password: user.uuid,
+    method: server.protocol_settings?.cipher
+  }));
+  const used = Number(user.u || 0) + Number(user.d || 0);
+  return JSON.stringify({
+    servers: items,
+    bytes_used: used,
+    bytes_remaining: Number(user.transfer_enable || 0) - used,
+    version: 1
+  });
+}
+
 function proxyLine(user: any, server: any, style: "surge" | "surfboard") {
   const ps = server.protocol_settings || {};
   const type = server.type === "shadowsocks" ? "ss" : server.type;
@@ -322,15 +357,56 @@ async function templates(env: Env) {
 }
 
 function output(client: Client, config: Config, templateMap: Config, user: any, servers: any[], request: Request, token: string) {
+  servers = servers.filter(server => allowedProtocols[client].has(server.type));
   if (["clash", "clashmeta", "stash"].includes(client)) return yamlProfile(client, String(templateMap[client] || templateMap.clash || ""), config, user, servers, request);
   if (client === "singbox") return singboxProfile(String(templateMap.singbox || ""), user, servers);
+  if (client === "shadowsocks") return shadowsocksProfile(user, servers);
   if (client === "surge" || client === "surfboard") return textTemplateProfile(client, String(templateMap[client] || ""), config, user, servers, request, token);
   if (client === "shadowrocket") {
     const status = `STATUS=🚀↑:${Math.round(Number(user.u || 0) / 1073741824 * 100) / 100}GB,↓:${Math.round(Number(user.d || 0) / 1073741824 * 100) / 100}GB,TOT:${Math.round(Number(user.transfer_enable || 0) / 1073741824 * 100) / 100}GB💡Expires:${user.expired_at ? new Date(Number(user.expired_at) * 1000).toISOString().slice(0, 10) : "长期有效"}\r\n`;
     return b64(status + general(user, servers, false));
   }
-  if (client === "loon" || client === "quantumultx") return general(user, servers, false);
+  if (client === "loon") return general(user, servers, false);
+  if (client === "quantumultx") return general(user, servers);
   return general(user, servers);
+}
+
+function responseHeaders(client: Client, config: Config, user: any) {
+  const appName = String(config.app_name || "XBoard");
+  const userInfo = `upload=${Number(user.u || 0)}; download=${Number(user.d || 0)}; total=${Number(user.transfer_enable || 0)}; expire=${Number(user.expired_at || 0)}`;
+  const headers: Config = {};
+
+  if (["clash", "clashmeta", "stash"].includes(client)) {
+    headers["content-type"] = "text/yaml";
+    headers["subscription-userinfo"] = userInfo;
+    headers["profile-update-interval"] = "24";
+    headers["content-disposition"] = `attachment;filename*=UTF-8''${encodeURIComponent(appName)}`;
+    if (client === "clash" && config.app_url) headers["profile-web-page-url"] = String(config.app_url);
+    return headers;
+  }
+  if (client === "singbox") {
+    return {
+      "content-type": "application/json",
+      "profile-title": `base64:${b64(appName)}`,
+      "subscription-userinfo": userInfo,
+      "profile-update-interval": "24"
+    };
+  }
+  if (client === "surge") {
+    return {
+      "content-type": "application/octet-stream",
+      "content-disposition": `attachment;filename*=UTF-8''${encodeURIComponent(appName)}.conf`
+    };
+  }
+  if (client === "surfboard") {
+    return {
+      "content-type": "text/html; charset=UTF-8",
+      "content-disposition": `attachment;filename*=UTF-8''${encodeURIComponent(appName)}.conf`
+    };
+  }
+  if (client === "shadowsocks") return { "content-type": "application/json" };
+  if (client === "shadowrocket") return { "content-type": "text/plain" };
+  return { "content-type": "text/plain", "subscription-userinfo": userInfo };
 }
 
 async function build(request: Request, env: Env, token: string) {
@@ -342,7 +418,8 @@ async function build(request: Request, env: Env, token: string) {
   const config = await loadSettings(env.XBOARD_DB);
   const templateMap = await templates(env);
   const url = new URL(request.url);
-  const requestedTypes = (url.searchParams.get("types") || "all").split(/[|,｜]+/).map(value => value.trim()).filter(Boolean);
+  const requestedTypeInput = url.searchParams.get("types") || "all";
+  const requestedTypes = requestedTypeInput === "all" ? [...validServerTypes] : requestedTypeInput.split(/[|,｜]+/).map(value => value.trim()).filter(value => validServerTypes.has(value));
   const filterKeywords = (url.searchParams.get("filter") || "").length <= 20 ? (url.searchParams.get("filter") || "").split(/[|,｜]+/).map(value => value.trim().toLowerCase()).filter(Boolean) : [];
   const all = (await env.XBOARD_DB.prepare("SELECT * FROM v2_server WHERE enabled = 1 AND show = 1 ORDER BY sort ASC, id ASC").all<any>()).results || [];
   const available = all.filter(server => {
@@ -351,27 +428,17 @@ async function build(request: Request, env: Env, token: string) {
     return !groups.length || groups.includes(Number(user.group_id || 0));
   }).map(server => ({ ...server, group_ids: jsonValue(server.group_ids, []), tags: jsonValue(server.tags, []), protocol_settings: jsonValue(server.protocol_settings, {}) }));
   const filtered = available.filter(server => {
-    if (!requestedTypes.includes("all") && !requestedTypes.includes(server.type)) return false;
+    if (requestedTypes.length && !requestedTypes.includes(server.type)) return false;
     if (filterKeywords.length && !filterKeywords.some(keyword => String(server.name).toLowerCase().includes(keyword) || server.tags.map((tag: unknown) => String(tag).toLowerCase()).includes(keyword))) return false;
     return true;
   });
   const servers = decorateServers(filtered, user, config, available.length - filtered.length);
   const client = clientOf(request);
   const body = output(client, config, templateMap, user, servers, request, token);
-  const appName = String(config.app_name || "XBoard");
-  const contentType = ["clash", "clashmeta", "stash"].includes(client) ? "text/yaml; charset=utf-8" : client === "singbox" ? "application/json; charset=utf-8" : client === "surge" || client === "surfboard" ? "application/octet-stream" : "text/plain; charset=utf-8";
-  const headers: Config = {
-    "subscription-userinfo": `upload=${Number(user.u || 0)}; download=${Number(user.d || 0)}; total=${Number(user.transfer_enable || 0)}; expire=${Number(user.expired_at || 0)}`,
-    "profile-update-interval": "24",
-    "content-type": contentType,
-    "content-disposition": `attachment;filename*=UTF-8''${encodeURIComponent(appName)}${client === "surge" || client === "surfboard" ? ".conf" : ""}`
-  };
-  if (config.app_url) headers["profile-web-page-url"] = String(config.app_url);
-  if (client === "singbox") headers["profile-title"] = `base64:${b64(appName)}`;
-  return { status: 200, body, headers };
+  return { status: 200, body, headers: responseHeaders(client, config, user) };
 }
 
-export const __test = { decorateServers, general, generalUri, yamlProfile, clashProxy, singboxOutbound, textTemplateProfile };
+export const __test = { clientOf, decorateServers, general, generalUri, yamlProfile, clashProxy, singboxOutbound, shadowsocksProfile, textTemplateProfile, output, responseHeaders };
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -386,7 +453,7 @@ export default {
     const userVersion = await env.XBOARD_KV.get(`user_version:${user.id}`) || "0";
     const client = clientOf(request);
     const variant = b64url(`${url.searchParams.get("types") || "all"}|${url.searchParams.get("filter") || ""}|${url.hostname}`);
-    const cacheKey = `subscribe:${token}:${client}:${variant}:${settingsVersion}:${serversVersion}:${userVersion}`;
+    const cacheKey = `subscribe:v2:${token}:${client}:${variant}:${settingsVersion}:${serversVersion}:${userVersion}`;
     const result = await cached(env.XBOARD_KV, cacheKey, 60, () => build(request, env, token));
     return new Response(result.body, { status: result.status, headers: result.headers as HeadersInit });
   }
