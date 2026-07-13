@@ -78,7 +78,7 @@ ON CONFLICT(name) DO UPDATE SET
 
 INSERT INTO v2_server_group(id, name, created_at, updated_at) VALUES
 (1, 'Default', unixepoch(), unixepoch())
-ON CONFLICT(id) DO UPDATE SET name = excluded.name, updated_at = unixepoch();
+ON CONFLICT(id) DO NOTHING;
 
 INSERT INTO v2_plan(id, group_id, transfer_enable, name, speed_limit, device_limit, capacity_limit, reset_traffic_method, prices, content, tags, show, sell, renew, sort, created_at, updated_at) VALUES
 (1, 1, 1099511627776, 'Default Trial', NULL, NULL, NULL, 0, '{"monthly":0}', 'Default seeded plan for first-run compatibility.', '[]', 1, 1, 1, 1, unixepoch(), unixepoch())

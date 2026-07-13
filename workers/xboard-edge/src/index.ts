@@ -6,11 +6,23 @@ import { bump } from "./kv";
 
 export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; ASSETS: Fetcher; }
 
-const adminTables: Record<string, string> = {
-  user: "v2_user", plan: "v2_plan", server: "v2_server", group: "v2_server_group", route: "v2_server_route",
-  machine: "v2_server_machine", notice: "v2_notice", knowledge: "v2_knowledge", ticket: "v2_ticket",
-  mail_template: "v2_mail_templates", audit: "v2_admin_audit_log"
-};
+const adminTableRoutes: Array<[string, string]> = [
+  ["/server/group/", "v2_server_group"],
+  ["/server/route/", "v2_server_route"],
+  ["/server/machine/", "v2_server_machine"],
+  ["/server/manage/", "v2_server"],
+  ["/mail/template/", "v2_mail_templates"],
+  ["/user/", "v2_user"],
+  ["/plan/", "v2_plan"],
+  ["/notice/", "v2_notice"],
+  ["/knowledge/", "v2_knowledge"],
+  ["/ticket/", "v2_ticket"],
+  ["/audit/", "v2_admin_audit_log"]
+];
+
+function adminTableForPath(path: string) {
+  return adminTableRoutes.find(([route]) => path.includes(route))?.[1];
+}
 
 const directFetchTables: Record<string, string> = {
   "/server/manage/getNodes": "v2_server",
@@ -185,7 +197,7 @@ async function ensureBootstrap(env: Env) {
     await runSqlIgnore(env, "INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = CASE WHEN v2_settings.value IS NULL OR v2_settings.value = '' THEN excluded.value ELSE v2_settings.value END, updated_at = excluded.updated_at",
       [name, typeof value === "object" ? JSON.stringify(value) : String(value), ts, ts]);
   }
-  await runSqlIgnore(env, "INSERT INTO v2_server_group(id, name, created_at, updated_at) VALUES (1, 'Default', ?, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at", [ts, ts]);
+  await runSqlIgnore(env, "INSERT INTO v2_server_group(id, name, created_at, updated_at) VALUES (1, 'Default', ?, ?) ON CONFLICT(id) DO NOTHING", [ts, ts]);
   await runSqlIgnore(env, "INSERT INTO v2_plan(id, group_id, transfer_enable, name, speed_limit, device_limit, capacity_limit, reset_traffic_method, prices, content, tags, show, sell, renew, sort, created_at, updated_at) VALUES (1, 1, 1099511627776, 'Default Trial', NULL, NULL, NULL, 0, '{\"monthly\":0}', 'Default seeded plan for first-run compatibility.', '[]', 1, 1, 1, 1, ?, ?) ON CONFLICT(id) DO UPDATE SET group_id = excluded.group_id, transfer_enable = excluded.transfer_enable, name = excluded.name, show = excluded.show, sell = excluded.sell, renew = excluded.renew, updated_at = excluded.updated_at", [ts, ts]);
   await runSqlIgnore(env, "INSERT INTO v2_user(email, password, password_algo, password_salt, uuid, token, transfer_enable, u, d, banned, is_admin, is_staff, plan_id, group_id, remind_expire, remind_traffic, created_at, updated_at) VALUES ('admin@admin.com', ?, 'pbkdf2', 'xboard-cloudflare-admin', '00000000-0000-4000-8000-000000000001', 'admin-default-token-change-me', 1099511627776, 0, 0, 0, 1, 1, 1, 1, 1, 1, ?, ?) ON CONFLICT(email) DO UPDATE SET password = excluded.password, password_algo = excluded.password_algo, password_salt = excluded.password_salt, banned = 0, is_admin = 1, is_staff = 1, plan_id = COALESCE(v2_user.plan_id, excluded.plan_id), group_id = COALESCE(v2_user.group_id, excluded.group_id), transfer_enable = CASE WHEN v2_user.transfer_enable = 0 THEN excluded.transfer_enable ELSE v2_user.transfer_enable END, remind_expire = 1, remind_traffic = 1, updated_at = excluded.updated_at", [DEFAULT_ADMIN_PASSWORD_HASH, ts, ts]);
   await runSqlIgnore(env, "INSERT INTO v2_notice(id, title, content, show, sort, created_at, updated_at) VALUES (1, 'Welcome to XBoard CF', 'The Cloudflare-native XBoard panel is ready.', 1, 1, ?, ?) ON CONFLICT(id) DO UPDATE SET title = excluded.title, content = excluded.content, show = excluded.show, updated_at = excluded.updated_at", [ts, ts]);
@@ -996,9 +1008,8 @@ async function adminApi(request: Request, env: Env, path: string) {
     }
   }
   if (path.match(/order|coupon|commission|gift-card/)) return json({ data: [], total: 0, current_page: 1, per_page: 20 });
-  const entry = Object.entries(adminTables).find(([key]) => path.includes(`/${key}`) || path.includes(`/${key.replace("_", "-")}`));
-  if (entry) {
-    const [, table] = entry;
+  const table = adminTableForPath(path);
+  if (table) {
     const url = new URL(request.url);
     if (path.endsWith("/fetch") || path.endsWith("/list") || (request.method === "GET" && !path.match(/\/\d+$/))) return ok(await rows(env.XBOARD_DB, table, 1000));
     const input = request.method === "POST" ? await body<Record<string, any>>(request.clone()) : {};

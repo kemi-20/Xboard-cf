@@ -20,3 +20,17 @@ test("admin shell references the current bundle without caching", () => {
   assert.doesNotMatch(source, /src="\/assets\/index-CEIYH7i8\.js"/);
   assert.match(source, /"cache-control": "no-store, no-cache, must-revalidate"/);
 });
+
+test("admin CRUD routes server resources to their own tables", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /\["\/server\/group\/", "v2_server_group"\]/);
+  assert.match(source, /\["\/server\/route\/", "v2_server_route"\]/);
+  assert.match(source, /\["\/server\/machine\/", "v2_server_machine"\]/);
+  assert.match(source, /\["\/server\/manage\/", "v2_server"\]/);
+  assert.match(source, /const table = adminTableForPath\(path\)/);
+});
+
+test("bootstrap preserves renamed default groups", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /INSERT INTO v2_server_group[\s\S]*?ON CONFLICT\(id\) DO NOTHING/);
+});
