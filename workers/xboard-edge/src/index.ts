@@ -667,16 +667,19 @@ async function saveServer(request: Request, env: Env) {
   const allowed = Object.entries(data).filter(([key]) => columns.has(key));
   const ts = now();
   const id = nullableNumber(input.id);
+  let saved = false;
   try {
     if (id) {
       const set = allowed.map(([key]) => `${key} = ?`).join(", ");
-      await env.XBOARD_DB.prepare(`UPDATE v2_server SET ${set}, updated_at = ? WHERE id = ?`).bind(...allowed.map(([, value]) => bindValue(value)), ts, id).run();
+      if (!set) return fail("保存服务器失败: 没有可保存的字段", 400, 400);
+      const result = await env.XBOARD_DB.prepare(`UPDATE v2_server SET ${set}, updated_at = ? WHERE id = ?`).bind(...allowed.map(([, value]) => bindValue(value)), ts, id).run();
+      if (!result.success) throw new Error("D1 更新服务器失败");
     } else {
       const cols = [...allowed.map(([key]) => key), "created_at", "updated_at"];
-      await env.XBOARD_DB.prepare(`INSERT INTO v2_server(${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`).bind(...allowed.map(([, value]) => bindValue(value)), ts, ts).run();
+      const result = await env.XBOARD_DB.prepare(`INSERT INTO v2_server(${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`).bind(...allowed.map(([, value]) => bindValue(value)), ts, ts).run();
+      if (!result.success) throw new Error("D1 创建服务器失败");
     }
-    await bump(env.XBOARD_KV, "servers_version");
-    return ok({ success: true, id: id || true });
+    saved = true;
   } catch (error: any) {
     try {
       const minimal = {
@@ -698,17 +701,26 @@ async function saveServer(request: Request, env: Env) {
       const fallbackAllowed = Object.entries(minimal).filter(([key]) => fallbackColumns.has(key));
       if (id) {
         const set = fallbackAllowed.map(([key]) => `${key} = ?`).join(", ");
-        await env.XBOARD_DB.prepare(`UPDATE v2_server SET ${set}, updated_at = ? WHERE id = ?`).bind(...fallbackAllowed.map(([, value]) => bindValue(value)), ts, id).run();
+        if (!set) throw new Error("没有兼容字段可保存");
+        const result = await env.XBOARD_DB.prepare(`UPDATE v2_server SET ${set}, updated_at = ? WHERE id = ?`).bind(...fallbackAllowed.map(([, value]) => bindValue(value)), ts, id).run();
+        if (!result.success) throw new Error("D1 兼容更新服务器失败");
       } else {
         const cols = [...fallbackAllowed.map(([key]) => key), "created_at", "updated_at"];
-        await env.XBOARD_DB.prepare(`INSERT INTO v2_server(${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`).bind(...fallbackAllowed.map(([, value]) => bindValue(value)), ts, ts).run();
+        const result = await env.XBOARD_DB.prepare(`INSERT INTO v2_server(${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`).bind(...fallbackAllowed.map(([, value]) => bindValue(value)), ts, ts).run();
+        if (!result.success) throw new Error("D1 兼容创建服务器失败");
       }
-      await bump(env.XBOARD_KV, "servers_version");
-      return ok({ success: true, id: id || true });
+      saved = true;
     } catch (fallbackError: any) {
       return fail(`保存服务器失败: ${fallbackError?.message || error?.message || "D1 写入失败"}`, 500, 500);
     }
   }
+  if (!saved) return fail("保存服务器失败: D1 写入未完成", 500, 500);
+  try {
+    await bump(env.XBOARD_KV, "servers_version");
+  } catch {
+    // The server is already persisted. Cache invalidation must not turn a successful save into an API failure.
+  }
+  return ok(true);
 }
 
 async function updateServer(request: Request, env: Env) {
