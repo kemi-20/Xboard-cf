@@ -108,3 +108,11 @@ test("node list exposes upstream-compatible health and load fields", () => {
   assert.match(source, /load_status: loadStatus/);
   assert.match(source, /online_conn: Number\(metrics\?\.active_connections \|\| 0\)/);
 });
+
+test("login sessions fall back to D1 when KV writes fail", () => {
+  const source = fs.readFileSync("src/auth.ts", "utf8");
+  const d1Insert = source.indexOf('INSERT INTO personal_access_tokens');
+  const kvWrite = source.indexOf('await kv.put');
+  assert.ok(d1Insert >= 0 && kvWrite > d1Insert);
+  assert.match(source.slice(kvWrite - 20, kvWrite + 500), /try[\s\S]*await kv\.put[\s\S]*catch/);
+});

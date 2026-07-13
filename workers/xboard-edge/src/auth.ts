@@ -21,9 +21,13 @@ export async function hashPassword(password: string): Promise<string> {
 
 export async function createSession(db: D1Database, kv: KVNamespace, user: { id: number; email: string; is_admin?: number }, admin = false) {
   const value = token(32);
-  await kv.put(`${admin ? "admin_session" : "session"}:${value}`, JSON.stringify({ id: user.id, email: user.email, is_admin: !!user.is_admin, created_at: now() }), { expirationTtl: 86400 * 7 });
   await db.prepare("INSERT INTO personal_access_tokens(tokenable_id, name, token, abilities, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
     .bind(user.id, admin ? "admin" : "user", value, admin ? '["admin"]' : '["user"]', now(), now()).run();
+  try {
+    await kv.put(`${admin ? "admin_session" : "session"}:${value}`, JSON.stringify({ id: user.id, email: user.email, is_admin: !!user.is_admin, created_at: now() }), { expirationTtl: 86400 * 7 });
+  } catch {
+    // D1 tokens remain authoritative when KV is unavailable or its write quota is exhausted.
+  }
   return value;
 }
 
