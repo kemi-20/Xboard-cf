@@ -1,10 +1,10 @@
-import type { D1Database, Fetcher, KVNamespace } from "./types";
+import type { D1Database, ExecutionContext, Fetcher, KVNamespace } from "./types";
 import { body, fail, json, now, ok, token, uuid } from "./compat";
 import { createSession, currentUser, hashPassword, verifyPassword } from "./auth";
 import { list, rows, settings } from "./db";
 import { bump } from "./kv";
 
-export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; ASSETS: Fetcher; }
+export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; ASSETS: Fetcher; XBOARD_SERVER: Fetcher; }
 
 const adminTableRoutes: Array<[string, string]> = [
   ["/server/group/", "v2_server_group"],
@@ -44,6 +44,54 @@ const pagedFetchTables: Record<string, string> = {
   "/gift-card/codes": "v2_gift_card_code",
   "/gift-card/usages": "v2_gift_card_usage"
 };
+
+const v2NodeProtocolPaths = new Set([
+  "/api/v2/server/handshake", "/api/v2/server/report", "/api/v2/server/config",
+  "/api/v2/server/user", "/api/v2/server/push", "/api/v2/server/alive",
+  "/api/v2/server/alivelist", "/api/v2/server/status",
+  "/api/v2/server/machine/nodes", "/api/v2/server/machine/status"
+]);
+
+function isNodeProtocolPath(pathname: string) {
+  return pathname === "/ws" || pathname.startsWith("/api/v1/server/") || v2NodeProtocolPaths.has(pathname);
+}
+
+async function internalSyncToken(env: Env) {
+  const explicit = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = 'internal_sync_token'").first<{ value: string }>();
+  if (explicit?.value) return explicit.value;
+  const serverToken = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = 'server_token'").first<{ value: string }>();
+  return serverToken?.value || "";
+}
+
+type NodeSyncIntent = { scope: "all" } | { scope: "user"; user_id: number; old_group_id?: number };
+
+async function notifyNodeSync(env: Env, intent: NodeSyncIntent = { scope: "all" }) {
+  try {
+    await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/sync", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-xboard-internal-token": await internalSyncToken(env) },
+      body: JSON.stringify(intent)
+    });
+  } catch {
+    // HTTP polling remains the compatibility fallback when no node is connected by WebSocket.
+  }
+}
+
+async function nodeSyncIntent(request: Request, pathname: string, env: Env): Promise<NodeSyncIntent | null> {
+  if (!shouldNotifyNodeSync(pathname, request.method)) return null;
+  if (!pathname.includes("/user/")) return { scope: "all" };
+  const input = await body<Record<string, any>>(request);
+  const rawId = input.id ?? (Array.isArray(input.ids) && input.ids.length === 1 ? input.ids[0] : undefined);
+  const userId = Number(rawId || 0);
+  if (!userId) return { scope: "all" };
+  const previous = await env.XBOARD_DB.prepare("SELECT group_id FROM v2_user WHERE id = ?").bind(userId).first<{ group_id: number | null }>();
+  return { scope: "user", user_id: userId, old_group_id: Number(previous?.group_id || 0) };
+}
+
+function shouldNotifyNodeSync(pathname: string, method: string) {
+  if (method !== "POST" && method !== "DELETE") return false;
+  return ["/server/", "/user/", "/plan/", "/route/", "/group/"].some(part => pathname.includes(part));
+}
 
 async function runSqlIgnore(env: Env, sql: string, binds: any[] = []) {
   try {
@@ -1161,8 +1209,9 @@ function isAdminDistAlias(pathname: string) {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+    if (isNodeProtocolPath(url.pathname)) return env.XBOARD_SERVER.fetch(request);
     if (url.pathname.startsWith("/admin/api/")) {
       url.pathname = url.pathname.slice("/admin".length);
       request = new Request(url.toString(), request);
@@ -1176,8 +1225,18 @@ export default {
       return env.ASSETS.fetch(request);
     }
     if (url.pathname.startsWith("/api/v2/passport")) return adminApi(request, env, url.pathname.replace("/api/v2", "/api/v2/admin"));
-    if (url.pathname.startsWith("/api/v2/admin")) return adminApi(request, env, url.pathname);
-    if (isAdminDistAlias(url.pathname)) return adminApi(request, env, url.pathname.replace("/api/v2", "/api/v2/admin"));
+    if (url.pathname.startsWith("/api/v2/admin")) {
+      const syncIntent = await nodeSyncIntent(request.clone(), url.pathname, env);
+      const response = await adminApi(request, env, url.pathname);
+      if (syncIntent && response.ok) ctx.waitUntil(notifyNodeSync(env, syncIntent));
+      return response;
+    }
+    if (isAdminDistAlias(url.pathname)) {
+      const syncIntent = await nodeSyncIntent(request.clone(), url.pathname, env);
+      const response = await adminApi(request, env, url.pathname.replace("/api/v2", "/api/v2/admin"));
+      if (syncIntent && response.ok) ctx.waitUntil(notifyNodeSync(env, syncIntent));
+      return response;
+    }
     if (url.pathname.startsWith("/api/v1") || url.pathname.startsWith("/api/v2/user")) return userApi(request, env, url.pathname);
     if (url.pathname === "/") return new Response("200", { status: 200, headers: { "content-type": "text/plain; charset=utf-8" } });
     return json({ status: 200 });

@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --test test/basic.test.mjs",
+    "test": "node --experimental-strip-types --test test/*.test.mjs",
     "deploy": "wrangler deploy"
   },
   "devDependencies": {

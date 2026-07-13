@@ -34,3 +34,14 @@ test("bootstrap preserves renamed default groups", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /INSERT INTO v2_server_group[\s\S]*?ON CONFLICT\(id\) DO NOTHING/);
 });
+
+test("node protocol paths are proxied through the xboard-server service binding", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const wrangler = fs.readFileSync("wrangler.toml", "utf8");
+  assert.match(source, /isNodeProtocolPath\(url\.pathname\)/);
+  assert.match(source, /env\.XBOARD_SERVER\.fetch\(request\)/);
+  assert.match(source, /\/api\/v1\/server\//);
+  assert.match(source, /\/api\/v2\/server\/machine\/nodes/);
+  assert.match(wrangler, /binding = "XBOARD_SERVER"/);
+  assert.match(wrangler, /service = "xboard-server"/);
+});

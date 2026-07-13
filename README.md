@@ -8,6 +8,7 @@ XBoard CF is a Cloudflare-native rewrite of XBoard for Workers, D1, KV, Queues, 
 - Admin API and user API in `xboard-edge`
 - Subscription API in `xboard-subscription`
 - Node/server reporting API in `xboard-server`
+- Legacy UniProxy and Tidalab node APIs, V2 machine mode, and WebSocket hot sync
 - Queue consumer in `xboard-jobs`
 - Scheduled maintenance worker in `xboard-cron`
 - D1 database schema and seed files
@@ -74,6 +75,28 @@ workers/xboard-cron
 ```
 
 Cloudflare Workers Builds can be connected directly to this GitHub repository. Use branch `master`, and set each Worker root directory to its corresponding folder.
+
+## Node Compatibility Baseline
+
+The node protocol implementation is pinned to these upstream revisions:
+
+```text
+cedar2025/Xboard      8e4864b4c7f6240e3ef08ecd7b59447e5d9dd363
+cedar2025/Xboard-Node 0a29338e1f102a462363ce3527417029f89bab28
+```
+
+Supported node surfaces include:
+
+```text
+/api/v1/server/UniProxy/*
+/api/v1/server/ShadowsocksTidalab/*
+/api/v1/server/TrojanTidalab/*
+/api/v2/server/*
+/api/v2/server/machine/*
+/ws
+```
+
+Official nodes may use the main panel URL. `xboard-edge` proxies these paths to `xboard-server` through a Cloudflare Service Binding while preserving status codes, bodies, ETags, 304 responses, and WebSocket upgrades.
 
 ## Initialize D1
 

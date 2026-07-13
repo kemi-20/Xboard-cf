@@ -22,3 +22,4 @@ export interface DurableObjectState { storage: Map<string, unknown>; }
 export interface DurableObjectNamespace { idFromName(name: string): DurableObjectId; get(id: DurableObjectId): DurableObjectStub; }
 export interface DurableObjectId {}
 export interface DurableObjectStub { fetch(input: RequestInfo, init?: RequestInit): Promise<Response>; }
+export interface ExecutionContext { waitUntil(promise: Promise<unknown>): void; }

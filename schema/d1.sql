@@ -105,8 +105,20 @@ CREATE TABLE IF NOT EXISTS v2_server_machine_load_history (
   machine_id INTEGER NOT NULL,
   load_status TEXT,
   network TEXT,
-  created_at INTEGER NOT NULL
+  cpu REAL NOT NULL DEFAULT 0,
+  mem_total INTEGER NOT NULL DEFAULT 0,
+  mem_used INTEGER NOT NULL DEFAULT 0,
+  disk_total INTEGER NOT NULL DEFAULT 0,
+  disk_used INTEGER NOT NULL DEFAULT 0,
+  net_in_speed REAL,
+  net_out_speed REAL,
+  recorded_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER
 );
+
+CREATE INDEX IF NOT EXISTS idx_machine_load_recorded
+  ON v2_server_machine_load_history(machine_id, recorded_at);
 
 CREATE TABLE IF NOT EXISTS v2_server (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

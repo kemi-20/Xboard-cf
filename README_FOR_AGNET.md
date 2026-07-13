@@ -483,6 +483,66 @@ Responsibilities:
 - Write node status to KV.
 - Send traffic events to queues where implemented.
 
+### Fixed Node Protocol Baseline
+
+Node compatibility is not a moving target. It is pinned to:
+
+```text
+cedar2025/Xboard      8e4864b4c7f6240e3ef08ecd7b59447e5d9dd363
+cedar2025/Xboard-Node 0a29338e1f102a462363ce3527417029f89bab28
+```
+
+Reference checkouts belong only in:
+
+```text
+.tmp/upstream-Xboard
+.tmp/upstream-Xboard-Node
+```
+
+The server Worker uses strict method plus full-path routing. Do not reintroduce `pathname.includes(...)` for node routes. The route and event inventories are in:
+
+```text
+workers/xboard-server/src/contracts.ts
+```
+
+Protocol configuration generation and PHP-compatible ETag encoding are in:
+
+```text
+workers/xboard-server/src/protocol.ts
+```
+
+Important runtime behavior in `workers/xboard-server/src/index.ts`:
+
+- V1 accepts `token`, `node_id`, and optional `node_type` from Laravel-compatible merged input.
+- V2 accepts server-token mode or machine-token mode.
+- Nodes can be found by numeric `id` or string `code`, with `code` taking precedence.
+- Machine tokens can access only enabled nodes assigned to that machine.
+- GET config/user responses use quoted SHA-1 ETags based on PHP `json_encode` escaping.
+- A matching `If-None-Match` returns an empty 304 response.
+- Traffic is queued; user traffic is multiplied by the current node rate, while server traffic remains raw bytes, matching upstream jobs.
+- Time-range rates are evaluated in `Asia/Shanghai`, matching upstream Laravel configuration.
+- Machine load history is additive and retained for 24 hours.
+
+`NodeHub` uses Durable Object WebSocket Hibernation. Main Worker authentication happens before forwarding, and the DO authenticates again. Active routing is recorded in KV:
+
+```text
+node:ws:target:{nodeId} -> node:{nodeId} or machine:{machineId}
+node:ws:alive:{nodeId}
+```
+
+The target key is essential. A node assigned to a machine can still connect in standalone mode; pushes must follow the actual active connection rather than only the database `machine_id`.
+
+Internal admin-to-node sync uses a Service Binding request to `/internal/sync`. Its token comes from D1 setting `internal_sync_token`, falling back to `server_token`. Do not generate separate Edge and Server tokens in KV because KV eventual consistency can make the first request fail authentication.
+
+User mutations support real `sync.user.delta` events:
+
+```text
+add:    { action: "add", users: [{ id, uuid, speed_limit, device_limit }] }
+remove: { action: "remove", users: [{ id }] }
+```
+
+Machine-mode payloads also contain `node_id`. Broad plan/group/server changes fall back to full config/user sync.
+
 Node status KV keys:
 
 ```text
@@ -844,6 +904,8 @@ Known areas that are compatibility scaffolds or partial:
 - Queue processing and cron behavior are minimal compared with a full Laravel scheduler.
 - Subscription output should be tested against real clients before production use.
 - Node/server APIs should be tested with actual XBoard-Node clients.
+
+The node HTTP and WebSocket APIs have local Wrangler+D1 smoke coverage, including ETag/304, machine status, V2 report, initial WS sync, device sync, and add/remove user deltas. The fixed upstream Go test suite could not be executed on the last Windows environment because the Go toolchain was not installed. Do not describe official binary integration as complete until an unchanged upstream binary has connected to the deployed Worker.
 
 When reporting status to the user, be honest about these limitations. Do not claim complete parity unless it has actually been implemented and tested.
 
