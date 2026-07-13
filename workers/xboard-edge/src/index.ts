@@ -1103,13 +1103,18 @@ async function adminUi(request: Request, env: Env) {
     <script src="/locales/en-US.js"></script>
     <script src="/locales/zh-CN.js"></script>
     <script src="/locales/ru-RU.js"></script>
-    <script type="module" crossorigin src="/assets/index-CEIYH7i8.js"></script>
+    <script type="module" crossorigin src="/assets/index-CF20260713.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-DiYa-_z_.css">
   </head>
   <body>
     <div id="root"></div>
   </body>
-</html>`, { headers: { "content-type": "text/html; charset=utf-8" } });
+</html>`, { headers: {
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": "no-store, no-cache, must-revalidate",
+    "pragma": "no-cache",
+    "expires": "0"
+  } });
 }
 
 function isAdminDistAlias(pathname: string) {
