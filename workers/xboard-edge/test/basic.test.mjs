@@ -91,6 +91,31 @@ test("user editor defaults missing commission type safely", () => {
   assert.match(bundle, /value:\(t\.value\?\?0\)\.toString\(\)/);
 });
 
+test("admin user and node forms receive upstream-compatible boolean values", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  for (const field of ["banned", "is_admin", "is_staff", "remind_expire", "remind_traffic", "commission_auto_check"]) {
+    assert.match(source, new RegExp(`${field}: Boolean\\(Number\\(row\\.${field}`));
+  }
+  assert.match(source, /rate_time_enable: Boolean\(Number\(server\.rate_time_enable/);
+  assert.match(source, /protocol_settings: parseJsonObject\(server\.protocol_settings\)/);
+  assert.doesNotMatch(source, /paginated\(data,[^\n]+meta: result/);
+});
+
+test("admin APIs reject non-official paths and methods before loose compatibility handlers", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /function adminRouteAllowed\(route: string, method: string\)/);
+  assert.match(source, /if \(!adminRouteAllowed\(route, request\.method\)\) return json\(\{ message: "Not Found" \}, 404\)/);
+  assert.match(source, /"\/server\/group\/save": \["POST"\]/);
+});
+
+test("passport, guest and client routes are separated from authenticated user routes", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /startsWith\("\/api\/v1\/passport"\).*startsWith\("\/api\/v2\/passport"\)/s);
+  assert.match(source, /startsWith\("\/api\/v1\/guest"\)\) return guestApi/);
+  assert.match(source, /startsWith\("\/api\/v1\/client"\).*startsWith\("\/api\/v2\/client"\)/s);
+  assert.doesNotMatch(source, /startsWith\("\/api\/v1"\).*return userApi/);
+});
+
 test("route fetch returns match rules as an array", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /function routeMatchArray\(value: unknown\): string\[\]/);

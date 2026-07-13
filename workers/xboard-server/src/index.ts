@@ -260,7 +260,10 @@ async function processStatus(env: Env, node: Row, status: unknown) {
     disk: { total: Number(value.disk?.total || 0), used: Number(value.disk?.used || 0) },
     updated_at: now(),
     kernel_status: value.kernel_status ?? null
-  };
+  } as Row;
+  if (value.net?.in_speed !== undefined && value.net?.out_speed !== undefined) {
+    load.net = { in_speed: Number(value.net.in_speed), out_speed: Number(value.net.out_speed) };
+  }
   await optionalKvPut(env, `node:load:${node.id}`, JSON.stringify(load), { expirationTtl: Math.max(300, Number(await setting(env, "server_push_interval", "60")) * 3) });
 }
 
@@ -598,7 +601,13 @@ export class NodeHub {
     if (!nodeId || !nodeIds.includes(nodeId)) return;
     const node = await getNode(this.env, nodeId);
     if (!node) return;
-    if (event === "node.status") { await touchNode(this.env, node); await processMetrics(this.env, node, data); }
+    if (event === "node.status") {
+      await touchNode(this.env, node);
+      const status = data.status ?? (data.mem && data.disk ? data : null);
+      const metrics = data.metrics ?? data;
+      if (status) await processStatus(this.env, node, status);
+      await processMetrics(this.env, node, metrics);
+    }
     if (event === "report.devices") await processAlive(this.env, nodeId, data.devices ?? data);
     if (event === "request.devices") socket.send(wsMessage("sync.devices", { users: await aggregateDevices(this.env, await nodeUsers(this.env, node)), ...(identity.mode === "machine" ? { node_id: nodeId } : {}) }));
   }

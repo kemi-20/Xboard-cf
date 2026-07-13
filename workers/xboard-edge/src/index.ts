@@ -45,6 +45,44 @@ const pagedFetchTables: Record<string, string> = {
   "/gift-card/usages": "v2_gift_card_usage"
 };
 
+const adminRouteMethods: Record<string, string[]> = {
+  "/config/fetch": ["GET"], "/config/save": ["POST"], "/config/getEmailTemplate": ["GET"], "/config/getThemeTemplate": ["GET"],
+  "/config/setTelegramWebhook": ["POST"], "/config/testSendMail": ["POST"],
+  "/mail/template/list": ["GET"], "/mail/template/get": ["GET"], "/mail/template/save": ["POST"], "/mail/template/reset": ["POST"], "/mail/template/test": ["POST"],
+  "/plan/fetch": ["GET"], "/plan/save": ["POST"], "/plan/drop": ["POST"], "/plan/update": ["POST"], "/plan/sort": ["POST"],
+  "/server/group/fetch": ["GET"], "/server/group/save": ["POST"], "/server/group/drop": ["POST"],
+  "/server/route/fetch": ["GET"], "/server/route/save": ["POST"], "/server/route/drop": ["POST"],
+  "/server/manage/getNodes": ["GET"], "/server/manage/update": ["POST"], "/server/manage/save": ["POST"], "/server/manage/drop": ["POST"],
+  "/server/manage/copy": ["POST"], "/server/manage/sort": ["POST"], "/server/manage/batchDelete": ["POST"], "/server/manage/batchUpdate": ["POST"],
+  "/server/manage/resetTraffic": ["POST"], "/server/manage/batchResetTraffic": ["POST"], "/server/manage/generateEchKey": ["GET"],
+  "/server/machine/fetch": ["GET"], "/server/machine/save": ["POST"], "/server/machine/drop": ["POST"], "/server/machine/resetToken": ["POST"],
+  "/server/machine/getToken": ["GET"], "/server/machine/installCommand": ["GET"], "/server/machine/nodes": ["GET"], "/server/machine/history": ["GET"],
+  "/order/fetch": ["GET", "POST"], "/order/update": ["POST"], "/order/assign": ["POST"], "/order/paid": ["POST"], "/order/cancel": ["POST"], "/order/detail": ["POST"],
+  "/user/fetch": ["GET", "POST"], "/user/update": ["POST"], "/user/getUserInfoById": ["GET"], "/user/generate": ["POST"], "/user/dumpCSV": ["POST"],
+  "/user/sendMail": ["POST"], "/user/ban": ["POST"], "/user/resetSecret": ["POST"], "/user/setInviteUser": ["POST"], "/user/destroy": ["POST"], "/user/getSubscribe": ["GET"],
+  "/stat/getOverride": ["GET"], "/stat/getStats": ["GET"], "/stat/getServerLastRank": ["GET"], "/stat/getServerYesterdayRank": ["GET"],
+  "/stat/getOrder": ["GET"], "/stat/getStatUser": ["GET", "POST"], "/stat/getRanking": ["GET"], "/stat/getStatRecord": ["GET"], "/stat/getTrafficRank": ["GET"],
+  "/notice/fetch": ["GET"], "/notice/save": ["POST"], "/notice/update": ["POST"], "/notice/drop": ["POST"], "/notice/show": ["POST"], "/notice/sort": ["POST"],
+  "/ticket/fetch": ["GET", "POST"], "/ticket/reply": ["POST"], "/ticket/close": ["POST"],
+  "/coupon/fetch": ["GET", "POST"], "/coupon/generate": ["POST"], "/coupon/drop": ["POST"], "/coupon/show": ["POST"], "/coupon/update": ["POST"],
+  "/knowledge/fetch": ["GET"], "/knowledge/getCategory": ["GET"], "/knowledge/save": ["POST"], "/knowledge/show": ["POST"], "/knowledge/drop": ["POST"], "/knowledge/sort": ["POST"],
+  "/payment/fetch": ["GET"], "/payment/getPaymentMethods": ["GET"], "/payment/getPaymentForm": ["POST"], "/payment/save": ["POST"], "/payment/drop": ["POST"], "/payment/show": ["POST"], "/payment/sort": ["POST"],
+  "/system/getSystemStatus": ["GET"], "/system/getQueueStats": ["GET"], "/system/getQueueWorkload": ["GET"], "/system/getQueueMasters": ["GET"],
+  "/system/getHorizonFailedJobs": ["GET"], "/system/getAuditLog": ["GET", "POST"],
+  "/theme/getThemes": ["GET"], "/theme/upload": ["POST"], "/theme/delete": ["POST"], "/theme/saveThemeConfig": ["POST"], "/theme/getThemeConfig": ["POST"],
+  "/plugin/types": ["GET"], "/plugin/getPlugins": ["GET"], "/plugin/upload": ["POST"], "/plugin/delete": ["POST"], "/plugin/install": ["POST"],
+  "/plugin/uninstall": ["POST"], "/plugin/enable": ["POST"], "/plugin/disable": ["POST"], "/plugin/config": ["GET", "POST"], "/plugin/upgrade": ["POST"],
+  "/traffic-reset/logs": ["GET"], "/traffic-reset/stats": ["GET"], "/traffic-reset/reset-user": ["POST"]
+};
+
+function adminRouteAllowed(route: string, method: string) {
+  if (/^\/traffic-reset\/user\/\d+\/history$/.test(route)) return method === "GET";
+  if (/^\/gift-card\/(templates|codes|usages|statistics)$/.test(route)) return method === "GET" || method === "POST";
+  if (/^\/gift-card\/(create-template|update-template|delete-template|generate-codes|toggle-code|update-code|delete-code)$/.test(route)) return method === "POST";
+  if (/^\/gift-card\/(export-codes|types)$/.test(route)) return method === "GET";
+  return adminRouteMethods[route]?.includes(method) === true;
+}
+
 const v2NodeProtocolPaths = new Set([
   "/api/v2/server/handshake", "/api/v2/server/report", "/api/v2/server/config",
   "/api/v2/server/user", "/api/v2/server/push", "/api/v2/server/alive",
@@ -190,7 +228,7 @@ FINAL,Proxy
 };
 
 async function ensureBootstrap(env: Env) {
-  const marker = await env.XBOARD_KV.get("bootstrap:edge:v5");
+  const marker = await env.XBOARD_KV.get("bootstrap:edge:v6");
   if (marker) return;
   const alters = [
     "ALTER TABLE v2_user ADD COLUMN speed_limit INTEGER DEFAULT NULL",
@@ -219,9 +257,25 @@ async function ensureBootstrap(env: Env) {
     "ALTER TABLE v2_subscribe_templates ADD COLUMN content TEXT",
     "ALTER TABLE v2_subscribe_templates ADD COLUMN template TEXT",
     "ALTER TABLE v2_ticket ADD COLUMN reply_status INTEGER DEFAULT 0",
-    "ALTER TABLE v2_ticket ADD COLUMN last_reply_user_id INTEGER DEFAULT NULL"
+    "ALTER TABLE v2_ticket ADD COLUMN last_reply_user_id INTEGER DEFAULT NULL",
+    "ALTER TABLE v2_server_machine_load_history ADD COLUMN cpu REAL NOT NULL DEFAULT 0",
+    "ALTER TABLE v2_server_machine_load_history ADD COLUMN mem_total INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE v2_server_machine_load_history ADD COLUMN mem_used INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE v2_server_machine_load_history ADD COLUMN disk_total INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE v2_server_machine_load_history ADD COLUMN disk_used INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE v2_server_machine_load_history ADD COLUMN net_in_speed REAL",
+    "ALTER TABLE v2_server_machine_load_history ADD COLUMN net_out_speed REAL",
+    "ALTER TABLE v2_server_machine_load_history ADD COLUMN recorded_at INTEGER",
+    "ALTER TABLE v2_server_machine_load_history ADD COLUMN updated_at INTEGER"
   ];
   for (const sql of alters) await runSqlIgnore(env, sql);
+  await runSqlIgnore(env, "CREATE INDEX IF NOT EXISTS idx_machine_load_recorded ON v2_server_machine_load_history(machine_id, recorded_at)");
+  for (const sql of [
+    "CREATE TABLE IF NOT EXISTS v2_invite_code (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, code TEXT NOT NULL UNIQUE, status INTEGER NOT NULL DEFAULT 0, pv INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS v2_mail_log (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL, subject TEXT NOT NULL, template_name TEXT NOT NULL, error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS v2_plugins (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, code TEXT NOT NULL UNIQUE, version TEXT NOT NULL, type TEXT, is_enabled INTEGER NOT NULL DEFAULT 0, config TEXT, installed_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS failed_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, connection TEXT NOT NULL, queue TEXT NOT NULL, payload TEXT NOT NULL, exception TEXT NOT NULL, failed_at INTEGER NOT NULL)"
+  ]) await runSqlIgnore(env, sql);
   const ts = now();
   const settingsDefaults: Record<string, any> = {
     app_name: "XBoard CF", app_description: "XBoard Cloudflare-native panel", app_url: "", logo: "", subscribe_url: "",
@@ -263,7 +317,7 @@ async function ensureBootstrap(env: Env) {
     await runSqlIgnore(env, "INSERT INTO v2_subscribe_templates(name, type, content, template, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?) ON CONFLICT(name) DO UPDATE SET content = CASE WHEN v2_subscribe_templates.content IS NULL OR v2_subscribe_templates.content = '' THEN excluded.content ELSE v2_subscribe_templates.content END, template = CASE WHEN v2_subscribe_templates.template IS NULL OR v2_subscribe_templates.template = '' THEN excluded.template ELSE v2_subscribe_templates.template END, enabled = 1, updated_at = excluded.updated_at", [name, name, content, content, ts, ts]);
     await runSqlIgnore(env, "INSERT INTO v2_subscribe_templates(name, content, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET content = CASE WHEN v2_subscribe_templates.content IS NULL OR v2_subscribe_templates.content = '' THEN excluded.content ELSE v2_subscribe_templates.content END, updated_at = excluded.updated_at", [name, content, ts, ts]);
   }
-  await env.XBOARD_KV.put("bootstrap:edge:v5", String(ts));
+  await env.XBOARD_KV.put("bootstrap:edge:v6", String(ts));
 }
 
 async function firstNumber(env: Env, sql: string, fallback = 0) {
@@ -452,6 +506,12 @@ function safeUser(row: Record<string, any>) {
   const { password, password_algo, password_salt, token: userToken, ...rest } = row;
   return {
     ...rest,
+    banned: Boolean(Number(row.banned || 0)),
+    is_admin: Boolean(Number(row.is_admin || 0)),
+    is_staff: Boolean(Number(row.is_staff || 0)),
+    remind_expire: Boolean(Number(row.remind_expire || 0)),
+    remind_traffic: Boolean(Number(row.remind_traffic || 0)),
+    commission_auto_check: Boolean(Number(row.commission_auto_check || 0)),
     token: userToken,
     has_password: !!password
   };
@@ -476,9 +536,105 @@ function paginated<T extends Record<string, any>>(data: T[], total: number, page
 async function subscribeUrl(request: Request, env: Env, userToken: string) {
   const configured = await env.XBOARD_DB.prepare("SELECT name, value FROM v2_settings WHERE name IN ('subscribe_url', 'subscribe_path')").all<{ name: string; value: string }>();
   const values = Object.fromEntries((configured.results || []).map(row => [row.name, row.value || ""]));
-  const base = String(values.subscribe_url || new URL(request.url).origin).split(",").map(value => value.trim()).filter(Boolean)[0];
+  const configuredBase = String(values.subscribe_url || new URL(request.url).origin).split(",").map(value => value.trim()).filter(Boolean)[0];
+  const base = /^[a-z][a-z0-9+.-]*:\/\//i.test(configuredBase) ? configuredBase : `https://${configuredBase}`;
   const path = String(values.subscribe_path || "s").replace(/^\/+|\/+$/g, "") || "s";
   return `${base.replace(/\/$/, "")}/${path}/${userToken}`;
+}
+
+async function guestApi(request: Request, env: Env, path: string) {
+  if (request.method === "GET" && path === "/api/v1/guest/plan/fetch") {
+    return ok((await adminPlanRows(env)).filter(row => Number((row as any).show ?? 1) === 1 && Number((row as any).sell ?? 1) === 1));
+  }
+  if (request.method === "GET" && path === "/api/v1/guest/comm/config") {
+    const all = await settings(env.XBOARD_DB);
+    return ok({
+      tos_url: pickSetting(all, "tos_url", ""),
+      is_email_verify: Number(Boolean(pickSetting(all, "email_verify", 0))),
+      is_invite_force: Number(Boolean(pickSetting(all, "invite_force", 0))),
+      email_whitelist_suffix: pickSetting(all, "email_whitelist_enable", 0) ? pickSetting(all, "email_whitelist_suffix", []) : 0,
+      is_captcha: Number(Boolean(pickSetting(all, "captcha_enable", 0))),
+      captcha_type: pickSetting(all, "captcha_type", "recaptcha"),
+      recaptcha_site_key: pickSetting(all, "recaptcha_site_key", ""),
+      recaptcha_v3_site_key: pickSetting(all, "recaptcha_v3_site_key", ""),
+      recaptcha_v3_score_threshold: Number(pickSetting(all, "recaptcha_v3_score_threshold", 0.5)),
+      turnstile_site_key: pickSetting(all, "turnstile_site_key", ""),
+      app_description: pickSetting(all, "app_description", ""),
+      app_url: pickSetting(all, "app_url", ""),
+      logo: pickSetting(all, "logo", ""),
+      is_recaptcha: Number(Boolean(pickSetting(all, "captcha_enable", 0)))
+    });
+  }
+  return json({ message: "Not Found" }, 404);
+}
+
+async function clientUser(request: Request, env: Env) {
+  const url = new URL(request.url);
+  let input: Record<string, any> = {};
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    try { input = await body<Record<string, any>>(request.clone()); } catch { input = {}; }
+  }
+  const clientToken = url.searchParams.get("token") || input.token;
+  if (!clientToken) return null;
+  return await env.XBOARD_DB.prepare("SELECT * FROM v2_user WHERE token = ?").bind(String(clientToken)).first<Record<string, any>>();
+}
+
+async function clientApi(request: Request, env: Env, path: string) {
+  const user = await clientUser(request, env);
+  if (!user) return fail(new URL(request.url).searchParams.get("token") ? "token is error" : "token is null", 403, 403);
+  const all = await settings(env.XBOARD_DB);
+  if (request.method === "GET" && path.endsWith("/app/getVersion")) {
+    const userAgent = request.headers.get("user-agent") || "";
+    if (/tidalab\/4\.0\.0|tunnelab\/4\.0\.0/i.test(userAgent)) {
+      const windows = /Win64/i.test(userAgent);
+      return ok({
+        version: pickSetting(all, windows ? "windows_version" : "macos_version", ""),
+        download_url: pickSetting(all, windows ? "windows_download_url" : "macos_download_url", "")
+      });
+    }
+    return ok({
+      windows_version: pickSetting(all, "windows_version", ""),
+      windows_download_url: pickSetting(all, "windows_download_url", ""),
+      macos_version: pickSetting(all, "macos_version", ""),
+      macos_download_url: pickSetting(all, "macos_download_url", ""),
+      android_version: pickSetting(all, "android_version", ""),
+      android_download_url: pickSetting(all, "android_download_url", "")
+    });
+  }
+  if (request.method === "GET" && path === "/api/v1/client/app/getConfig") {
+    const subscription = new URL(await subscribeUrl(request, env, String(user.token)));
+    subscription.searchParams.set("flag", "clash");
+    const response = await fetch(subscription, { headers: { "user-agent": request.headers.get("user-agent") || "Clash" } });
+    return new Response(response.body, { status: response.status, headers: response.headers });
+  }
+  if (request.method === "GET" && path === "/api/v2/client/app/getConfig") {
+    return ok({
+      app_info: {
+        app_name: pickSetting(all, "app_name", "XB加速器"),
+        app_description: pickSetting(all, "app_description", "专业的网络加速服务"),
+        app_url: pickSetting(all, "app_url", ""),
+        logo: pickSetting(all, "logo", ""),
+        version: pickSetting(all, "app_version", "1.0.0")
+      },
+      features: {
+        enable_register: Boolean(pickSetting(all, "app_enable_register", true)),
+        enable_invite_system: Boolean(pickSetting(all, "app_enable_invite_system", true)),
+        enable_telegram_bot: Boolean(pickSetting(all, "telegram_bot_enable", false)),
+        enable_ticket_system: Boolean(pickSetting(all, "app_enable_ticket_system", true)),
+        ticket_must_wait_reply: Boolean(pickSetting(all, "ticket_must_wait_reply", false)),
+        enable_commission_system: Boolean(pickSetting(all, "app_enable_commission_system", true)),
+        enable_traffic_log: Boolean(pickSetting(all, "app_enable_traffic_log", true)),
+        enable_knowledge_base: Boolean(pickSetting(all, "app_enable_knowledge_base", true)),
+        enable_announcements: Boolean(pickSetting(all, "app_enable_announcements", true)),
+        enable_auto_renewal: Boolean(pickSetting(all, "app_enable_auto_renewal", false)),
+        enable_coupon_system: Boolean(pickSetting(all, "app_enable_coupon_system", true)),
+        enable_speed_test: Boolean(pickSetting(all, "app_enable_speed_test", true)),
+        enable_server_ping: Boolean(pickSetting(all, "app_enable_server_ping", true))
+      },
+      last_updated: now()
+    });
+  }
+  return json({ message: "Not Found" }, 404);
 }
 
 async function subscribeTemplateMap(env: Env) {
@@ -621,7 +777,7 @@ async function adminUserList(env: Env, request: Request) {
     const plan = await planById(env, row.plan_id);
     const group = await groupById(env, row.group_id);
     data.push({
-      ...row,
+      ...safeUser(row),
       balance: Number(row.balance || 0) / 100,
       commission_balance: Number(row.commission_balance || 0) / 100,
       commission_type: Number(row.commission_type ?? 0),
@@ -634,7 +790,7 @@ async function adminUserList(env: Env, request: Request) {
       online_count: 0
     });
   }
-  return { ...paginated(data, Number(result.total || data.length), page, pageSize), meta: result };
+  return paginated(data, Number(result.total || data.length), page, pageSize);
 }
 
 async function adminPlanRows(env: Env) {
@@ -701,7 +857,7 @@ async function adminServerRows(env: Env) {
     const lastPushAt = Math.max(Number(kvLastPush || server.last_push_at || 0), machineOnline ? machineSeenAt : 0) || null;
     const availableStatus = nodeAvailableStatus(lastCheckAt, lastPushAt);
     const loadStatus = parseKvObject(kvLoad) || parseKvObject(kvMachineLoad) || (machine?.load_status ? parseJsonObject(machine.load_status) : null);
-    const metrics = parseKvObject(kvMetrics);
+    const metrics = parseKvObject(kvMetrics) || (loadStatus?.metrics && typeof loadStatus.metrics === "object" ? loadStatus.metrics : null);
     const groupIds = parseJsonArray(server.group_ids);
     const groups = [];
     for (const id of groupIds) {
@@ -710,9 +866,17 @@ async function adminServerRows(env: Env) {
     }
     out.push({
       ...server,
+      show: Boolean(Number(server.show ?? 1)),
+      enabled: Boolean(Number(server.enabled ?? 1)),
+      rate_time_enable: Boolean(Number(server.rate_time_enable || 0)),
+      rate_time_ranges: parseJsonArray(server.rate_time_ranges),
       group_ids: groupIds,
       route_ids: parseJsonArray(server.route_ids),
       tags: parseJsonArray(server.tags),
+      protocol_settings: parseJsonObject(server.protocol_settings),
+      custom_outbounds: parseJsonArray(server.custom_outbounds),
+      custom_routes: parseJsonArray(server.custom_routes),
+      cert_config: isNilLike(server.cert_config) ? null : parseJsonObject(server.cert_config),
       groups,
       parent: server.parent_id ? servers.find(s => Number(s.id) === Number(server.parent_id)) || null : null,
       machine: machine ? { ...machine, token: undefined, load_status: loadStatus } : null,
@@ -988,6 +1152,91 @@ async function audit(env: Env, adminId: number, request: Request, path: string) 
   }
 }
 
+const mailTemplateMeta: Record<string, { label: string; required_vars: string[]; optional_vars: string[] }> = {
+  verify: { label: "邮箱验证码", required_vars: ["name", "code", "url"], optional_vars: [] },
+  notify: { label: "站点通知", required_vars: ["name", "content", "url"], optional_vars: [] },
+  remind_expire: { label: "服务到期提醒", required_vars: ["name", "url"], optional_vars: [] },
+  remind_traffic: { label: "流量使用提醒", required_vars: ["name", "url"], optional_vars: [] }
+};
+
+const mailTemplateDefaults: Record<string, { subject: string; content: string }> = {
+  verify: { subject: "{{name}} - 邮箱验证码", content: "您的验证码是：{{code}}。返回 {{url}}" },
+  notify: { subject: "{{name}} - 站点通知", content: "{{content}}\n\n{{url}}" },
+  remind_expire: { subject: "{{name}} - 服务即将到期", content: "您的服务即将到期，请及时续费。{{url}}" },
+  remind_traffic: { subject: "{{name}} - 流量使用提醒", content: "您的流量使用量已接近上限。{{url}}" }
+};
+
+async function adminMailTemplateList(env: Env) {
+  const result = await env.XBOARD_DB.prepare("SELECT name, subject, updated_at FROM v2_mail_templates").all<Record<string, any>>();
+  const templates = new Map((result.results || []).map(row => [String(row.name), row]));
+  return Object.entries(mailTemplateMeta).map(([name, meta]) => ({
+    name,
+    label: meta.label,
+    customized: templates.has(name),
+    subject: templates.get(name)?.subject || null,
+    updated_at: templates.get(name)?.updated_at || null
+  }));
+}
+
+async function adminMailTemplateGet(env: Env, name: string) {
+  const meta = mailTemplateMeta[name];
+  if (!meta) return null;
+  const row = await env.XBOARD_DB.prepare("SELECT name, subject, content FROM v2_mail_templates WHERE name = ?").bind(name).first<Record<string, any>>();
+  return {
+    name,
+    label: meta.label,
+    required_vars: meta.required_vars,
+    optional_vars: meta.optional_vars,
+    customized: Boolean(row),
+    subject: row?.subject || mailTemplateDefaults[name].subject,
+    content: row?.content || mailTemplateDefaults[name].content
+  };
+}
+
+async function adminAuditLogs(env: Env, request: Request) {
+  const input = request.method === "POST" ? await body<Record<string, any>>(request.clone()) : {};
+  const url = new URL(request.url);
+  const page = Math.max(1, Number(input.page || url.searchParams.get("page") || 1));
+  const pageSize = Math.min(100, Math.max(1, Number(input.page_size || input.per_page || url.searchParams.get("page_size") || 20)));
+  const offset = (page - 1) * pageSize;
+  const result = await env.XBOARD_DB.prepare("SELECT l.*, u.email AS admin_email FROM v2_admin_audit_log l LEFT JOIN v2_user u ON u.id = l.admin_id ORDER BY l.id DESC LIMIT ? OFFSET ?").bind(pageSize, offset).all();
+  const total = await firstNumber(env, "SELECT COUNT(*) AS c FROM v2_admin_audit_log");
+  return paginated((result.results || []) as Record<string, any>[], total, page, pageSize);
+}
+
+async function trafficResetLogs(env: Env, request: Request) {
+  const url = new URL(request.url);
+  const page = Math.max(1, Number(url.searchParams.get("page") || 1));
+  const pageSize = Math.min(10000, Math.max(1, Number(url.searchParams.get("per_page") || 20)));
+  const offset = (page - 1) * pageSize;
+  const result = await env.XBOARD_DB.prepare("SELECT l.*, u.email AS user_email FROM v2_traffic_reset_logs l LEFT JOIN v2_user u ON u.id = l.user_id ORDER BY l.reset_time DESC LIMIT ? OFFSET ?").bind(pageSize, offset).all<Record<string, any>>();
+  const data = (result.results || []).map(row => ({
+    ...row,
+    old_traffic: { upload: Number(row.old_u || 0), download: Number(row.old_d || 0), total: Number(row.old_u || 0) + Number(row.old_d || 0) },
+    new_traffic: { upload: 0, download: 0, total: 0 },
+    trigger_source: parseJsonObject(row.metadata).trigger_source || "manual",
+    metadata: parseJsonObject(row.metadata)
+  }));
+  const total = await firstNumber(env, "SELECT COUNT(*) AS c FROM v2_traffic_reset_logs");
+  return { data, pagination: { current_page: page, last_page: Math.max(1, Math.ceil(total / pageSize)), per_page: pageSize, total } };
+}
+
+async function resetUserTraffic(env: Env, request: Request, adminId: number) {
+  const input = await body<Record<string, any>>(request);
+  const userId = nullableNumber(input.user_id);
+  if (!userId) return fail("user_id 字段是必须的", 422, 422);
+  const user = await env.XBOARD_DB.prepare("SELECT id, email, u, d, reset_count, next_reset_at FROM v2_user WHERE id = ?").bind(userId).first<Record<string, any>>();
+  if (!user) return fail("用户不存在", 404, 404);
+  const ts = now();
+  const metadata = JSON.stringify({ reason: input.reason || "", admin_id: adminId, trigger_source: "manual" });
+  await env.XBOARD_DB.batch([
+    env.XBOARD_DB.prepare("INSERT INTO v2_traffic_reset_logs(user_id, reset_type, old_u, old_d, metadata, reset_time, created_at) VALUES (?, 'manual', ?, ?, ?, ?, ?)").bind(userId, Number(user.u || 0), Number(user.d || 0), metadata, ts, ts),
+    env.XBOARD_DB.prepare("UPDATE v2_user SET u = 0, d = 0, reset_count = COALESCE(reset_count, 0) + 1, last_reset_at = ?, updated_at = ? WHERE id = ?").bind(ts, ts, userId)
+  ]);
+  await bump(env.XBOARD_KV, `user_version:${userId}`);
+  return json({ message: "重置成功", data: { user_id: userId, email: user.email, reset_time: ts, next_reset_at: user.next_reset_at } });
+}
+
 async function login(request: Request, env: Env, admin = false) {
   const input = await body<any>(request);
   const email = String(input.email || input.username || "");
@@ -1039,7 +1288,9 @@ async function createOrUpdate(table: string, request: Request, env: Env, id?: st
 }
 
 async function adminApi(request: Request, env: Env, path: string) {
-  if (path.includes("/passport/auth/login")) return login(request, env, true);
+  const route = path.replace(/^\/api\/v2\/admin/, "");
+  if (request.method === "POST" && route === "/passport/auth/login") return login(request, env, true);
+  if (!adminRouteAllowed(route, request.method)) return json({ message: "Not Found" }, 404);
   const admin = await currentUser(request, env.XBOARD_DB, env.XBOARD_KV, true);
   if (!admin) return fail("未授权", 401, 401);
   await audit(env, Number((admin as any).id || 0), request, path);
@@ -1055,9 +1306,65 @@ async function adminApi(request: Request, env: Env, path: string) {
     await bump(env.XBOARD_KV, "settings_version");
     return ok(true);
   }
+  if (request.method === "GET" && route === "/config/getEmailTemplate") return ok(["default"]);
+  if (request.method === "GET" && route === "/config/getThemeTemplate") return ok(["default"]);
+  if (request.method === "POST" && route === "/config/testSendMail") return fail("未配置邮件队列发送服务", 503, 503);
+  if (request.method === "POST" && route === "/config/setTelegramWebhook") return fail("未配置 Telegram Webhook 发送服务", 503, 503);
+  if (request.method === "GET" && route === "/stat/getOverride") {
+    const nodes = await adminServerRows(env);
+    const today = dayStart();
+    const month = monthStart();
+    const todayU = await firstNumber(env, `SELECT COALESCE(SUM(u), 0) AS c FROM v2_stat_server WHERE record_at >= ${today}`);
+    const todayD = await firstNumber(env, `SELECT COALESCE(SUM(d), 0) AS c FROM v2_stat_server WHERE record_at >= ${today}`);
+    const monthU = await firstNumber(env, `SELECT COALESCE(SUM(u), 0) AS c FROM v2_stat_server WHERE record_at >= ${month}`);
+    const monthD = await firstNumber(env, `SELECT COALESCE(SUM(d), 0) AS c FROM v2_stat_server WHERE record_at >= ${month}`);
+    const totalU = await firstNumber(env, "SELECT COALESCE(SUM(u), 0) AS c FROM v2_stat_server");
+    const totalD = await firstNumber(env, "SELECT COALESCE(SUM(d), 0) AS c FROM v2_stat_server");
+    return ok({
+      month_income: 0,
+      month_register_total: await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE created_at >= ${month}`),
+      ticket_pending_total: await firstNumber(env, "SELECT COUNT(*) AS c FROM v2_ticket WHERE status = 0"),
+      commission_pending_total: 0,
+      day_income: 0,
+      last_month_income: 0,
+      commission_month_payout: 0,
+      commission_last_month_payout: 0,
+      online_nodes: nodes.filter(node => Number((node as any).available_status) > 0).length,
+      online_devices: nodes.reduce((sum, node) => sum + Number((node as any).online_conn || 0), 0),
+      online_users: nodes.reduce((sum, node) => sum + Number((node as any).online || 0), 0),
+      today_traffic: { upload: todayU, download: todayD, total: todayU + todayD },
+      month_traffic: { upload: monthU, download: monthD, total: monthU + monthD },
+      total_traffic: { upload: totalU, download: totalD, total: totalU + totalD }
+    });
+  }
   if (path.includes("/stat/getStats")) return ok(await adminStats(env));
   if (path.includes("/stat/getOrder")) return ok(orderStats(new URL(request.url)));
   if (path.includes("/stat/getTrafficRank")) return ok(await trafficRank(env, new URL(request.url)));
+  if (request.method === "GET" && (route === "/stat/getServerLastRank" || route === "/stat/getServerYesterdayRank")) {
+    const start = route.endsWith("YesterdayRank") ? dayStart() - 86400 : monthStart();
+    const end = route.endsWith("YesterdayRank") ? dayStart() - 1 : now();
+    const url = new URL(request.url); url.searchParams.set("type", "node"); url.searchParams.set("start_time", String(start)); url.searchParams.set("end_time", String(end));
+    return ok(await trafficRank(env, url));
+  }
+  if ((request.method === "GET" || request.method === "POST") && route === "/stat/getStatUser") {
+    const input: Record<string, any> = request.method === "POST" ? await body<Record<string, any>>(request.clone()) : {};
+    if (request.method === "GET") new URL(request.url).searchParams.forEach((value, key) => { input[key] = value; });
+    const userId = nullableNumber(input.user_id);
+    if (!userId) return fail("user_id 字段是必须的", 422, 422);
+    const page = Math.max(1, Number(input.page || 1));
+    const pageSize = Math.min(100, Math.max(1, Number(input.pageSize || input.page_size || 10)));
+    const result = await env.XBOARD_DB.prepare("SELECT * FROM v2_stat_user WHERE user_id = ? ORDER BY record_at DESC LIMIT ? OFFSET ?").bind(userId, pageSize, (page - 1) * pageSize).all();
+    const total = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_stat_user WHERE user_id = ${userId}`);
+    return json({ data: result.results || [], total });
+  }
+  if (request.method === "GET" && route === "/stat/getRanking") {
+    const result = await env.XBOARD_DB.prepare("SELECT id, email, u, d, (u + d) AS total FROM v2_user ORDER BY total DESC LIMIT 20").all();
+    return ok(result.results || []);
+  }
+  if (request.method === "GET" && route === "/stat/getStatRecord") {
+    const result = await env.XBOARD_DB.prepare("SELECT * FROM v2_stat ORDER BY record_at DESC LIMIT 90").all();
+    return ok(result.results || []);
+  }
   if (path.includes("/theme/getThemes")) return ok({ themes: {}, active: "default" });
   if (path.includes("/theme/getThemeConfig")) return ok({});
   if (path.match(/\/theme\/(saveThemeConfig|upload|delete)/)) return ok(true);
@@ -1068,12 +1375,34 @@ async function adminApi(request: Request, env: Env, path: string) {
   if (path.includes("/payment/getPaymentMethods")) return ok([]);
   if (path.includes("/payment/getPaymentForm")) return ok({ enabled: false, message: "Payment features are disabled in this build." });
   if (path.match(/\/payment\/(save|drop|show|sort)/)) return ok(true);
-  if (path.includes("/mail/template/list")) return ok(await rows(env.XBOARD_DB, "v2_mail_templates", 100));
-  if (path.includes("/mail/template/get")) return ok({ name: new URL(request.url).searchParams.get("name") || "", subject: "", content: "", enabled: 1 });
-  if (path.match(/\/mail\/template\/(save|reset|test)/)) return ok(true);
+  if (request.method === "GET" && route === "/mail/template/list") return ok(await adminMailTemplateList(env));
+  if (request.method === "GET" && route === "/mail/template/get") {
+    const template = await adminMailTemplateGet(env, new URL(request.url).searchParams.get("name") || "");
+    return template ? ok(template) : fail("模板不存在", 404, 404);
+  }
+  if (request.method === "POST" && route === "/mail/template/save") {
+    const input = await body<Record<string, any>>(request);
+    const name = String(input.name || "");
+    if (!mailTemplateMeta[name] || !input.subject || !input.content) return fail("模板参数不正确", 422, 422);
+    const ts = now();
+    await env.XBOARD_DB.prepare("INSERT INTO v2_mail_templates(name, subject, content, enabled, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?) ON CONFLICT(name) DO UPDATE SET subject = excluded.subject, content = excluded.content, enabled = 1, updated_at = excluded.updated_at")
+      .bind(name, String(input.subject), String(input.content), ts, ts).run();
+    return ok(true);
+  }
+  if (request.method === "POST" && route === "/mail/template/reset") {
+    const input = await body<Record<string, any>>(request);
+    if (!mailTemplateMeta[String(input.name || "")]) return fail("模板不存在", 404, 404);
+    await env.XBOARD_DB.prepare("DELETE FROM v2_mail_templates WHERE name = ?").bind(String(input.name)).run();
+    return ok(true);
+  }
+  if (request.method === "POST" && route === "/mail/template/test") return fail("未配置邮件队列发送服务", 503, 503);
   if (path.includes("/system/getSystemStatus")) return ok({ ok: true, time: now() });
   if (path.includes("/system/getQueueStats") || path.includes("/system/getQueueWorkload") || path.includes("/system/getQueueMasters")) return ok([]);
-  if (path.includes("/system/getHorizonFailedJobs")) return json({ data: [], total: 0, current_page: 1, per_page: 20 });
+  if (request.method === "GET" && route === "/system/getHorizonFailedJobs") {
+    const result = await env.XBOARD_DB.prepare("SELECT * FROM failed_jobs ORDER BY id DESC LIMIT 100").all();
+    return json({ data: result.results || [], total: (result.results || []).length, current_page: 1, per_page: 100 });
+  }
+  if ((request.method === "GET" || request.method === "POST") && route === "/system/getAuditLog") return ok(await adminAuditLogs(env, request));
   if (path.includes("/server/manage/save")) return saveServer(request, env);
   if (path.includes("/server/manage/update")) return updateServer(request, env);
   if (path.includes("/server/manage/sort")) return sortServers(request, env);
@@ -1161,9 +1490,23 @@ async function adminApi(request: Request, env: Env, path: string) {
   if (path.includes("/user/generate")) return ok([]);
   if (path.includes("/user/sendMail")) return ok(true);
   if (path.includes("/user/dumpCSV")) return ok([]);
-  if (path.includes("/traffic-reset/logs")) return json({ data: [], total: 0, current_page: 1, per_page: 20 });
-  if (path.includes("/traffic-reset/reset-user")) return ok(true);
-  if (path.includes("/traffic-reset/user/")) return ok([]);
+  if (request.method === "GET" && route === "/traffic-reset/logs") return json(await trafficResetLogs(env, request));
+  if (request.method === "GET" && route === "/traffic-reset/stats") {
+    const days = Math.min(365, Math.max(1, Number(new URL(request.url).searchParams.get("days") || 30)));
+    const since = now() - days * 86400;
+    const total = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_traffic_reset_logs WHERE reset_time >= ${since}`);
+    const manual = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_traffic_reset_logs WHERE reset_time >= ${since} AND reset_type = 'manual'`);
+    return json({ data: { total_resets: total, auto_resets: total - manual, manual_resets: manual, cron_resets: 0 } });
+  }
+  if (request.method === "POST" && route === "/traffic-reset/reset-user") return resetUserTraffic(env, request, Number((admin as any).id));
+  const historyMatch = route.match(/^\/traffic-reset\/user\/(\d+)\/history$/);
+  if (request.method === "GET" && historyMatch) {
+    const userId = Number(historyMatch[1]);
+    const user = await env.XBOARD_DB.prepare("SELECT id, email, reset_count, last_reset_at, next_reset_at FROM v2_user WHERE id = ?").bind(userId).first();
+    if (!user) return fail("用户不存在", 404, 404);
+    const result = await env.XBOARD_DB.prepare("SELECT * FROM v2_traffic_reset_logs WHERE user_id = ? ORDER BY reset_time DESC LIMIT ?").bind(userId, Math.min(50, Number(new URL(request.url).searchParams.get("limit") || 10))).all();
+    return json({ data: { user, history: result.results || [] } });
+  }
   for (const [suffix, table] of Object.entries(directFetchTables)) {
     if (path.includes(suffix)) {
       if (suffix === "/server/manage/getNodes") return ok(await adminServerRows(env));
@@ -1212,6 +1555,67 @@ async function userApi(request: Request, env: Env, path: string) {
   }
   const user = await currentUser(request, env.XBOARD_DB, env.XBOARD_KV, false);
   if (!user) return fail("未授权", 401, 401);
+  const route = path.replace(/^\/api\/v[12]\/user/, "");
+  if (request.method === "GET" && route === "/getActiveSession") {
+    const result = await env.XBOARD_DB.prepare("SELECT id, name, abilities, last_used_at, expires_at, created_at, updated_at FROM personal_access_tokens WHERE tokenable_id = ? ORDER BY id DESC").bind((user as any).id).all();
+    return ok(result.results || []);
+  }
+  if (request.method === "POST" && route === "/removeActiveSession") {
+    const input = await body<Record<string, any>>(request);
+    await env.XBOARD_DB.prepare("DELETE FROM personal_access_tokens WHERE id = ? AND tokenable_id = ?").bind(input.session_id, (user as any).id).run();
+    return ok(true);
+  }
+  if (request.method === "GET" && route === "/invite/save") {
+    const all = await settings(env.XBOARD_DB);
+    const limit = Number(pickSetting(all, "invite_gen_limit", 5));
+    const count = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_invite_code WHERE user_id = ${Number((user as any).id)} AND status = 0`);
+    if (count >= limit) return fail("已达到最大创建数量", 400, 400);
+    const ts = now();
+    await env.XBOARD_DB.prepare("INSERT INTO v2_invite_code(user_id, code, status, pv, created_at, updated_at) VALUES (?, ?, 0, 0, ?, ?)").bind((user as any).id, randomString(8), ts, ts).run();
+    return ok(true);
+  }
+  if (request.method === "GET" && route === "/invite/fetch") {
+    const all = await settings(env.XBOARD_DB);
+    const codes = await env.XBOARD_DB.prepare("SELECT id, code, status, pv, created_at, updated_at FROM v2_invite_code WHERE user_id = ? AND status = 0 ORDER BY id DESC").bind((user as any).id).all();
+    const invited = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE invite_user_id = ${Number((user as any).id)}`);
+    const commission = await firstNumber(env, `SELECT COALESCE(SUM(amount), 0) AS c FROM v2_commission_log WHERE user_id = ${Number((user as any).id)}`);
+    const rate = Number((user as any).commission_rate || pickSetting(all, "invite_commission", 10));
+    return ok({ codes: codes.results || [], stat: [invited, commission, 0, rate, Number((user as any).commission_balance || 0)] });
+  }
+  if (request.method === "GET" && route === "/invite/details") {
+    const result = await env.XBOARD_DB.prepare("SELECT * FROM v2_commission_log WHERE user_id = ? ORDER BY id DESC LIMIT 100").bind((user as any).id).all();
+    return json({ data: result.results || [], total: (result.results || []).length });
+  }
+  if (request.method === "GET" && route === "/comm/config") {
+    const all = await settings(env.XBOARD_DB);
+    return ok({
+      is_telegram: Number(Boolean(pickSetting(all, "telegram_bot_enable", 0))),
+      telegram_discuss_link: pickSetting(all, "telegram_discuss_link", ""),
+      stripe_pk: "",
+      withdraw_methods: pickSetting(all, "commission_withdraw_method", ["USDT", "支付宝"]),
+      withdraw_close: Number(Boolean(pickSetting(all, "withdraw_close_enable", 0))),
+      currency: pickSetting(all, "currency", "CNY"),
+      currency_symbol: pickSetting(all, "currency_symbol", "¥"),
+      commission_distribution_enable: Number(Boolean(pickSetting(all, "commission_distribution_enable", 0))),
+      commission_distribution_l1: pickSetting(all, "commission_distribution_l1", ""),
+      commission_distribution_l2: pickSetting(all, "commission_distribution_l2", ""),
+      commission_distribution_l3: pickSetting(all, "commission_distribution_l3", "")
+    });
+  }
+  if (request.method === "GET" && route === "/telegram/getBotInfo") {
+    const all = await settings(env.XBOARD_DB);
+    return ok({ enabled: Boolean(pickSetting(all, "telegram_bot_enable", 0)), username: pickSetting(all, "telegram_bot_username", ""), discuss_link: pickSetting(all, "telegram_discuss_link", "") });
+  }
+  if (request.method === "GET" && route === "/knowledge/getCategory") {
+    const result = await env.XBOARD_DB.prepare("SELECT DISTINCT category FROM v2_knowledge WHERE show = 1 AND category IS NOT NULL AND category != '' ORDER BY category").all<{ category: string }>();
+    return ok((result.results || []).map(row => row.category));
+  }
+  if (request.method === "GET" && route === "/stat/getTrafficLog") {
+    const start = new Date();
+    start.setUTCDate(1); start.setUTCHours(0, 0, 0, 0);
+    const result = await env.XBOARD_DB.prepare("SELECT * FROM v2_stat_user WHERE user_id = ? AND record_at >= ? ORDER BY record_at DESC").bind((user as any).id, Math.floor(start.getTime() / 1000)).all();
+    return ok(result.results || []);
+  }
   if (path.includes("/user/info")) return ok(safeUser(user as Record<string, any>));
   if (path.includes("/user/checkLogin")) return ok(true);
   if (path.includes("/user/getSubscribe")) return ok({ subscribe_url: await subscribeUrl(request, env, (user as any).token), token: (user as any).token });
@@ -1264,7 +1668,20 @@ async function userApi(request: Request, env: Env, path: string) {
     await env.XBOARD_DB.prepare("UPDATE v2_ticket SET status = 1, updated_at = ? WHERE id = ? AND user_id = ?").bind(now(), input.id, (user as any).id).run();
     return ok(true);
   }
-  if (path.includes("/ticket/reply") || path.includes("/ticket/withdraw")) return ok(true);
+  if (request.method === "POST" && route === "/ticket/reply") {
+    const input = await body<Record<string, any>>(request);
+    if (!input.id || !input.message) return fail("参数不正确", 400, 400);
+    const ticket = await env.XBOARD_DB.prepare("SELECT id, status FROM v2_ticket WHERE id = ? AND user_id = ?").bind(input.id, (user as any).id).first<Record<string, any>>();
+    if (!ticket) return fail("工单不存在", 400, 400);
+    if (Number(ticket.status)) return fail("工单已关闭，无法回复", 400, 400);
+    const ts = now();
+    await env.XBOARD_DB.batch([
+      env.XBOARD_DB.prepare("INSERT INTO v2_ticket_message(ticket_id, user_id, message, created_at, updated_at) VALUES (?, ?, ?, ?, ?)").bind(ticket.id, (user as any).id, String(input.message), ts, ts),
+      env.XBOARD_DB.prepare("UPDATE v2_ticket SET reply_status = 1, last_reply_user_id = ?, updated_at = ? WHERE id = ?").bind((user as any).id, ts, ticket.id)
+    ]);
+    return ok(true);
+  }
+  if (request.method === "POST" && route === "/ticket/withdraw") return fail("佣金提现功能未启用", 503, 503);
   return ok({ message: "compatible placeholder", path });
 }
 
@@ -1352,7 +1769,13 @@ export default {
     if (["/settings.js", "/settings.local.js", "/manifest.json"].includes(url.pathname) || url.pathname.startsWith("/assets/") || url.pathname.startsWith("/locales/") || url.pathname.startsWith("/images/")) {
       return env.ASSETS.fetch(request);
     }
-    if (url.pathname.startsWith("/api/v2/passport")) return adminApi(request, env, url.pathname.replace("/api/v2", "/api/v2/admin"));
+    if (url.pathname.startsWith("/api/v1/passport") || url.pathname.startsWith("/api/v2/passport")) {
+      return userApi(request, env, url.pathname);
+    }
+    if (url.pathname.startsWith("/api/v1/guest")) return guestApi(request, env, url.pathname);
+    if (url.pathname.startsWith("/api/v1/client") || url.pathname.startsWith("/api/v2/client")) {
+      return clientApi(request, env, url.pathname);
+    }
     if (url.pathname.startsWith("/api/v2/admin")) {
       const syncIntent = await nodeSyncIntent(request.clone(), url.pathname, env);
       const response = await adminApi(request, env, url.pathname);
@@ -1365,8 +1788,8 @@ export default {
       if (syncIntent && response.ok) ctx.waitUntil(notifyNodeSync(env, syncIntent));
       return response;
     }
-    if (url.pathname.startsWith("/api/v1") || url.pathname.startsWith("/api/v2/user")) return userApi(request, env, url.pathname);
+    if (url.pathname.startsWith("/api/v1/user") || url.pathname.startsWith("/api/v2/user")) return userApi(request, env, url.pathname);
     if (url.pathname === "/") return new Response("200", { status: 200, headers: { "content-type": "text/plain; charset=utf-8" } });
-    return json({ status: 200 });
+    return json({ message: "Not Found" }, 404);
   }
 };

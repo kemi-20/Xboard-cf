@@ -25,3 +25,11 @@ test("websocket protocol includes the official event vocabulary", () => {
     assert.ok(source.includes(event), `missing ${event}`);
   }
 });
+
+test("node status accepts official flat metrics and nested status payloads", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /const status = data\.status \?\? \(data\.mem && data\.disk \? data : null\)/);
+  assert.match(source, /const metrics = data\.metrics \?\? data/);
+  assert.match(source, /if \(status\) await processStatus/);
+  assert.match(source, /await processMetrics/);
+});
