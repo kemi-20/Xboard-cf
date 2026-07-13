@@ -4,6 +4,14 @@ This file is intentionally detailed. It is written for any future coding agent t
 
 The filename is `README_FOR_AGNET.md` because that is the requested name. Do not silently rename it unless the user asks.
 
+Last verified repository state:
+
+```text
+date: 2026-07-13
+branch: master
+implementation baseline: 749e6e6 Return machine load history for admin charts
+```
+
 ## Project Goal
 
 This repository is a Cloudflare-native rewrite of XBoard. The target architecture is serverless and should run on Cloudflare Workers with D1 and KV as the only persistent data services requested by the user.
@@ -164,7 +172,7 @@ The Worker maps that to the admin login handler internally.
 [assets]
 directory = "./public"
 binding = "ASSETS"
-run_worker_first = ["/", "/health", "/admin", "/admin/*", "/api/*"]
+run_worker_first = ["/", "/health", "/admin", "/admin/*", "/api/*", "/ws"]
 ```
 
 This setting is important.
@@ -442,9 +450,18 @@ GET /api/v1/client/subscribe
 Responsibilities:
 
 - Read D1.
-- Use KV short cache.
+- Use KV as an optional short cache.
 - Validate token, ban, expiry, and traffic limits.
 - Return subscription outputs and headers compatible with original XBoard conventions.
+
+Current observable response behavior:
+
+- Plain URI subscriptions are Base64 encoded.
+- The response content type is `text/plain`.
+- Do not add `Content-Disposition: attachment`; opening a subscription URL should display the body rather than force a TXT download.
+- Subscription URL generation must honor the configured subscription URL/path instead of always using the request origin.
+- Node generators must read protocol-specific node fields, routes, transport, TLS, Reality and other stored configuration instead of emitting a minimal host/port-only link.
+- KV cache failures must fall back to D1 generation. A successful D1 read must not become a 500 merely because KV quota or availability fails.
 
 The planned cache key shape:
 
@@ -522,6 +539,89 @@ Important runtime behavior in `workers/xboard-server/src/index.ts`:
 - Traffic is queued; user traffic is multiplied by the current node rate, while server traffic remains raw bytes, matching upstream jobs.
 - Time-range rates are evaluated in `Asia/Shanghai`, matching upstream Laravel configuration.
 - Machine load history is additive and retained for 24 hours.
+- KV status writes are best-effort. D1 report processing must continue when KV read/write quota is exhausted or KV is temporarily unavailable.
+
+### Admin Node Health And Machine Inheritance
+
+The official admin UI consumes node health from `GET /api/v2/admin/server/manage/getNodes`. The node row shape must include:
+
+```text
+last_check_at
+last_push_at
+is_online
+available_status
+load_status
+metrics
+online_conn
+machine
+```
+
+`available_status` has three states:
+
+```text
+0 = no fresh check in the last 300 seconds; UI shows not running
+1 = fresh check but no fresh push in the last 300 seconds
+2 = fresh check and fresh push; UI shows green/running normally
+```
+
+For a node assigned through `v2_server.machine_id`, do not look only at `node:last_check:{id}` and `node:last_push:{id}`. Machine mode writes its authoritative heartbeat to:
+
+```text
+v2_server_machine.last_seen_at
+v2_server_machine.load_status
+machine:load:{machineId}
+```
+
+When an enabled machine has a heartbeat newer than 300 seconds, its `last_seen_at` contributes to both node check and push timestamps. Load fallback order is:
+
+```text
+node:load:{nodeId}
+machine:load:{machineId}
+v2_server_machine.load_status
+```
+
+This behavior is required for machine-managed nodes to show the same green status dot and load tooltip as upstream. Never expose the machine token inside the node list relation.
+
+### Machine Load History Contract
+
+Machine status reports are handled by `xboard-server`:
+
+```text
+POST /api/v2/server/machine/status
+```
+
+Every accepted report updates `v2_server_machine.load_status` and `last_seen_at`, then inserts one row into `v2_server_machine_load_history`. Rows older than 24 hours for that machine are deleted.
+
+The admin chart reads:
+
+```text
+GET /api/v2/admin/server/machine/history
+```
+
+Query parameters must match upstream:
+
+```text
+machine_id  required integer; existing machine
+limit       optional integer, 10..1440, default 60
+range_hours optional integer, 1..24
+```
+
+Response `data` is an array containing only:
+
+```text
+cpu
+mem_total
+mem_used
+disk_total
+disk_used
+net_in_speed
+net_out_speed
+recorded_at
+```
+
+Query rows with `ORDER BY recorded_at DESC LIMIT ?`, then reverse them before returning so the chart receives chronological order. Do not replace this endpoint with `ok([])`: doing so makes the official WebUI display `暂无历史负载数据` even while reports are being stored correctly.
+
+The current WebUI requests up to 360 points and passes `range_hours` for the `1h`, `6h`, `12h`, and `24h` controls. Online verification on 2026-07-13 confirmed a non-empty 480x224 SVG chart with CPU, MEM, DISK, IN and OUT series.
 
 `NodeHub` uses Durable Object WebSocket Hibernation. Main Worker authentication happens before forwarding, and the DO authenticates again. Active routing is recorded in KV:
 
@@ -646,6 +746,11 @@ c7fe6e5  Add assets run_worker_first so / is handled by Worker
 a66a035  Serve admin shell directly through Worker to avoid Assets loop
 76f99ff  Accept raw Authorization tokens from official admin frontend
 e6f998d  Add admin dashboard stats responses
+ac5123c  Keep admin login working without KV writes
+0eee0fe  Match upstream subscription response behavior
+f057f35  Keep subscriptions available without KV cache
+5288fbe  Use machine health for managed node status
+749e6e6  Return machine load history for admin charts
 ```
 
 If another agent sees older failed builds in Cloudflare, note that earlier failures were fixed. Check the latest build, not only the visible failed history row.
@@ -663,7 +768,7 @@ Fix:
 Use:
 
 ```toml
-run_worker_first = ["/", "/health", "/admin", "/admin/*", "/api/*"]
+run_worker_first = ["/", "/health", "/admin", "/admin/*", "/api/*", "/ws"]
 ```
 
 ### Pitfall: `/admin` Returns `200` Text Or Fallback JSON
@@ -710,6 +815,26 @@ Using `INSERT OR IGNORE` for default admin.
 Fix:
 
 Use `ON CONFLICT(email) DO UPDATE` in `schema/seed.sql` and `scripts/seed-admin.ts`.
+
+### Pitfall: Machine Is Online But Its Node Shows "未运行"
+
+Cause:
+
+The admin node list read only node KV heartbeat keys and ignored `server.machine_id`, `v2_server_machine.last_seen_at`, and machine load data.
+
+Fix:
+
+Resolve the assigned machine, inherit a fresh machine heartbeat, and use machine load as the fallback described in "Admin Node Health And Machine Inheritance".
+
+### Pitfall: Server Detail Shows "暂无历史负载数据"
+
+Cause:
+
+`/api/v2/admin/server/machine/history` returned a hard-coded empty array even though `xboard-server` was inserting D1 history rows.
+
+Fix:
+
+Keep `adminMachineHistory()` querying `v2_server_machine_load_history`, applying upstream validation, limiting in descending order, and reversing the result for chronological chart rendering.
 
 ## Local Validation Commands
 
@@ -771,6 +896,7 @@ $login = Invoke-RestMethod -Method Post -Uri "$base/api/v2/passport/auth/login" 
 $token = $login.data.token
 Invoke-RestMethod -Method Get -Uri "$base/api/v2/admin/config/fetch" -Headers @{ Authorization = $token }
 Invoke-RestMethod -Method Get -Uri "$base/api/v2/admin/stat/getStats" -Headers @{ Authorization = $token }
+Invoke-RestMethod -Method Get -Uri "$base/api/v2/admin/server/machine/history?machine_id=1&limit=360&range_hours=1" -Headers @{ Authorization = $token }
 ```
 
 The second request intentionally uses:
@@ -904,6 +1030,7 @@ Known areas that are compatibility scaffolds or partial:
 - Queue processing and cron behavior are minimal compared with a full Laravel scheduler.
 - Subscription output should be tested against real clients before production use.
 - Node/server APIs should be tested with actual XBoard-Node clients.
+- Machine load charts require real reports over time; a single current `load_status` object is not a substitute for history rows.
 
 The node HTTP and WebSocket APIs have local Wrangler+D1 smoke coverage, including ETag/304, machine status, V2 report, initial WS sync, device sync, and add/remove user deltas. The fixed upstream Go test suite could not be executed on the last Windows environment because the Go toolchain was not installed. Do not describe official binary integration as complete until an unchanged upstream binary has connected to the deployed Worker.
 
