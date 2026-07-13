@@ -30,6 +30,14 @@ test("admin CRUD routes server resources to their own tables", () => {
   assert.match(source, /const table = adminTableForPath\(path\)/);
 });
 
+test("server groups include the user and node counts expected by the official admin UI", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /async function adminServerGroupRows\(env: Env\)/);
+  assert.match(source, /users_count: userCounts\.get\(Number\(group\.id\)\) \|\| 0/);
+  assert.match(source, /server_count: serverCounts\.get\(Number\(group\.id\)\) \|\| 0/);
+  assert.match(source, /suffix === "\/server\/group\/fetch"\) return ok\(await adminServerGroupRows\(env\)\)/);
+});
+
 test("bootstrap preserves renamed default groups", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /INSERT INTO v2_server_group[\s\S]*?ON CONFLICT\(id\) DO NOTHING/);

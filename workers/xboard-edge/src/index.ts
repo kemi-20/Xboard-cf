@@ -777,6 +777,26 @@ async function groupById(env: Env, id: unknown) {
   return await env.XBOARD_DB.prepare("SELECT id, name FROM v2_server_group WHERE id = ?").bind(id).first();
 }
 
+async function adminServerGroupRows(env: Env) {
+  const [groupsResult, usersResult, serversResult] = await Promise.all([
+    env.XBOARD_DB.prepare("SELECT * FROM v2_server_group ORDER BY id DESC").all<Record<string, any>>(),
+    env.XBOARD_DB.prepare("SELECT group_id, COUNT(*) AS count FROM v2_user WHERE group_id IS NOT NULL GROUP BY group_id").all<{ group_id: number; count: number }>(),
+    env.XBOARD_DB.prepare("SELECT group_ids FROM v2_server").all<{ group_ids: string | null }>()
+  ]);
+  const userCounts = new Map((usersResult.results || []).map(row => [Number(row.group_id), Number(row.count || 0)]));
+  const serverCounts = new Map<number, number>();
+  for (const server of serversResult.results || []) {
+    for (const groupId of new Set(parseJsonArray(server.group_ids).map(Number).filter(Number.isFinite))) {
+      serverCounts.set(groupId, (serverCounts.get(groupId) || 0) + 1);
+    }
+  }
+  return (groupsResult.results || []).map(group => ({
+    ...group,
+    users_count: userCounts.get(Number(group.id)) || 0,
+    server_count: serverCounts.get(Number(group.id)) || 0
+  }));
+}
+
 async function adminUserList(env: Env, request: Request) {
   const input = request.method === "POST" ? await body<Record<string, any>>(request.clone()) : {};
   const url = new URL(request.url);
@@ -1524,6 +1544,7 @@ async function adminApi(request: Request, env: Env, path: string) {
   }
   for (const [suffix, table] of Object.entries(directFetchTables)) {
     if (path.includes(suffix)) {
+      if (suffix === "/server/group/fetch") return ok(await adminServerGroupRows(env));
       if (suffix === "/server/manage/getNodes") return ok(await adminServerRows(env));
       if (suffix === "/server/machine/fetch") return ok(await adminMachineRows(env));
       if (suffix === "/server/route/fetch") return ok(await adminRouteRows(env));
