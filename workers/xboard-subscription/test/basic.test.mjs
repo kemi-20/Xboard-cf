@@ -80,6 +80,13 @@ test("invalid type filters behave like upstream and do not hide all nodes", () =
   assert.match(source, /requestedTypes\.length && !requestedTypes\.includes\(server\.type\)/);
 });
 
+test("subscription generation survives KV quota and cache failures", () => {
+  const source = fs.readFileSync("src/kv.ts", "utf8");
+  assert.match(source, /try[\s\S]*await kv\.get\(key\)[\s\S]*catch/);
+  assert.match(source, /const value = await load\(\)/);
+  assert.match(source, /try[\s\S]*await kv\.put\(key[\s\S]*catch/);
+});
+
 test("subscription settings decorate server names like upstream", () => {
   const servers = __test.decorateServers([
     { id: 1, type: "vless", name: "Hong Kong", protocol_settings: { version: 1 } }
