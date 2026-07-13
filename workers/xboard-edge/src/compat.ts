@@ -21,6 +21,20 @@ export function token(bytes = 32): string {
   crypto.getRandomValues(data);
   return [...data].map(x => x.toString(16).padStart(2, "0")).join("");
 }
+export function randomString(length = 32): string {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  let result = "";
+  while (result.length < length) {
+    const data = new Uint8Array(length - result.length);
+    crypto.getRandomValues(data);
+    for (const value of data) {
+      if (value >= 248) continue;
+      result += alphabet[value % alphabet.length];
+      if (result.length === length) break;
+    }
+  }
+  return result;
+}
 export function getBearer(request: Request): string | null {
   const h = request.headers.get("authorization") || "";
   if (h.toLowerCase().startsWith("bearer ")) return h.slice(7).trim();

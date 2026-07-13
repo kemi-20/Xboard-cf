@@ -1,5 +1,5 @@
 import type { D1Database, ExecutionContext, Fetcher, KVNamespace } from "./types";
-import { body, fail, json, now, ok, token, uuid } from "./compat";
+import { body, fail, json, now, ok, randomString, token, uuid } from "./compat";
 import { createSession, currentUser, hashPassword, verifyPassword } from "./auth";
 import { list, rows, settings } from "./db";
 import { bump } from "./kv";
@@ -701,7 +701,7 @@ async function saveMachine(request: Request, env: Env) {
     if (!result.success) return fail("保存服务器失败", 500, 500);
     return ok(true);
   }
-  const machineToken = token(32);
+  const machineToken = randomString(32);
   const result = await env.XBOARD_DB.prepare("INSERT INTO v2_server_machine(name, notes, token, enabled, is_active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
     .bind(name, notes, machineToken, isActive, isActive, ts, ts).run();
   if (!result.success) return fail("保存服务器失败", 500, 500);
@@ -1010,7 +1010,7 @@ async function adminApi(request: Request, env: Env, path: string) {
   }
   if (path.includes("/server/machine/resetToken")) {
     const input = await body<Record<string, any>>(request.clone());
-    const machineToken = token(32);
+    const machineToken = randomString(32);
     const result = await env.XBOARD_DB.prepare("UPDATE v2_server_machine SET token = ?, updated_at = ? WHERE id = ?").bind(machineToken, now(), input.id).run();
     return result.success ? ok({ token: machineToken }) : fail("服务器不存在", 404, 400202);
   }

@@ -55,3 +55,11 @@ test("machine detail GET endpoints read ids from query parameters", () => {
   assert.match(source, /--mode machine --panel/);
   assert.match(source, /--machine-id \$\{machineId\}/);
 });
+
+test("machine tokens match Laravel Str::random(32) format", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const compat = fs.readFileSync("src/compat.ts", "utf8");
+  assert.match(source, /const machineToken = randomString\(32\)/);
+  assert.match(compat, /ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/);
+  assert.match(compat, /export function randomString\(length = 32\)/);
+});
