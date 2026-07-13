@@ -77,3 +77,16 @@ test("admin can fetch a fresh subscription URL for the copy action", () => {
   assert.match(source, /path\.includes\("\/user\/getSubscribe"\)/);
   assert.match(source, /SELECT token FROM v2_user WHERE id = \?/);
 });
+
+test("plan list hides payment periods whose price is blank", () => {
+  const bundle = fs.readFileSync("public/assets/index-CF20260713.js", "utf8");
+  assert.match(bundle, /null!=n\[t\]&&""!==String\(n\[t\]\)\.trim\(\)&&Q\.jsxs/);
+});
+
+test("user editor defaults missing commission type safely", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const bundle = fs.readFileSync("public/assets/index-CF20260713.js", "utf8");
+  assert.match(source, /ALTER TABLE v2_user ADD COLUMN commission_type INTEGER NOT NULL DEFAULT 0/);
+  assert.match(source, /commission_type: Number\(row\.commission_type \?\? 0\)/);
+  assert.match(bundle, /value:\(t\.value\?\?0\)\.toString\(\)/);
+});

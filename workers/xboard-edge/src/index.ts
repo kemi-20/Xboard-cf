@@ -190,12 +190,13 @@ FINAL,Proxy
 };
 
 async function ensureBootstrap(env: Env) {
-  const marker = await env.XBOARD_KV.get("bootstrap:edge:v4");
+  const marker = await env.XBOARD_KV.get("bootstrap:edge:v5");
   if (marker) return;
   const alters = [
     "ALTER TABLE v2_user ADD COLUMN speed_limit INTEGER DEFAULT NULL",
     "ALTER TABLE v2_user ADD COLUMN discount INTEGER DEFAULT NULL",
     "ALTER TABLE v2_user ADD COLUMN commission_rate INTEGER DEFAULT NULL",
+    "ALTER TABLE v2_user ADD COLUMN commission_type INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE v2_user ADD COLUMN remind_expire INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE v2_user ADD COLUMN remind_traffic INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE v2_user ADD COLUMN reset_count INTEGER NOT NULL DEFAULT 0",
@@ -262,7 +263,7 @@ async function ensureBootstrap(env: Env) {
     await runSqlIgnore(env, "INSERT INTO v2_subscribe_templates(name, type, content, template, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?) ON CONFLICT(name) DO UPDATE SET content = CASE WHEN v2_subscribe_templates.content IS NULL OR v2_subscribe_templates.content = '' THEN excluded.content ELSE v2_subscribe_templates.content END, template = CASE WHEN v2_subscribe_templates.template IS NULL OR v2_subscribe_templates.template = '' THEN excluded.template ELSE v2_subscribe_templates.template END, enabled = 1, updated_at = excluded.updated_at", [name, name, content, content, ts, ts]);
     await runSqlIgnore(env, "INSERT INTO v2_subscribe_templates(name, content, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET content = CASE WHEN v2_subscribe_templates.content IS NULL OR v2_subscribe_templates.content = '' THEN excluded.content ELSE v2_subscribe_templates.content END, updated_at = excluded.updated_at", [name, content, ts, ts]);
   }
-  await env.XBOARD_KV.put("bootstrap:edge:v4", String(ts));
+  await env.XBOARD_KV.put("bootstrap:edge:v5", String(ts));
 }
 
 async function firstNumber(env: Env, sql: string, fallback = 0) {
@@ -610,6 +611,7 @@ async function adminUserList(env: Env, request: Request) {
       ...row,
       balance: Number(row.balance || 0) / 100,
       commission_balance: Number(row.commission_balance || 0) / 100,
+      commission_type: Number(row.commission_type ?? 0),
       total_used: Number(row.u || 0) + Number(row.d || 0),
       used_traffic: Number(row.u || 0) + Number(row.d || 0),
       subscribe_url: await subscribeUrl(request, env, row.token),
