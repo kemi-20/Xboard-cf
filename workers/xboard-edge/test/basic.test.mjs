@@ -59,12 +59,21 @@ test("cache version bumps cannot turn successful D1 saves into API errors", () =
 test("node protocol paths are proxied through the xboard-server service binding", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   const wrangler = fs.readFileSync("wrangler.toml", "utf8");
-  assert.match(source, /isNodeProtocolPath\(url\.pathname\)/);
+  assert.match(source, /isNodeProtocolPath\(url\.pathname, request\.method\)/);
+  assert.match(source, /pathname === "\/api\/v2\/server\/machine\/nodes"[\s\S]*method === "POST"/);
   assert.match(source, /env\.XBOARD_SERVER\.fetch\(request\)/);
   assert.match(source, /\/api\/v1\/server\//);
   assert.match(source, /\/api\/v2\/server\/machine\/nodes/);
   assert.match(wrangler, /binding = "XBOARD_SERVER"/);
   assert.match(wrangler, /service = "xboard-server"/);
+});
+
+test("official subscription paths are proxied through the subscription service binding", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const wrangler = fs.readFileSync("wrangler.toml", "utf8");
+  assert.match(source, /XBOARD_SUBSCRIPTION: Fetcher/);
+  assert.match(source, /url\.pathname === "\/api\/v1\/client\/subscribe"/);
+  assert.match(wrangler, /binding = "XBOARD_SUBSCRIPTION"[\s\S]*service = "xboard-subscription"/);
 });
 
 test("machine detail GET endpoints read ids from query parameters", () => {
@@ -182,12 +191,56 @@ test("login sessions fall back to D1 when KV writes fail", () => {
 test("bootstrap remains available when the KV daily write limit is exhausted", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /system_bootstrap_edge_version/);
-  assert.match(source, /await optionalKvPut\(env, "bootstrap:edge:v7"/);
-  assert.doesNotMatch(source, /await env\.XBOARD_KV\.put\("bootstrap:edge:v7"/);
+  assert.match(source, /await optionalKvPut\(env, "bootstrap:edge:v9"/);
+  assert.doesNotMatch(source, /await env\.XBOARD_KV\.put\("bootstrap:edge:v9"/);
 });
 
 test("node metrics fall back to D1 when KV writes are unavailable", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /parseKvObject\(kvMetrics\) \|\| parseKvObject\(server\.metrics\)/);
   assert.match(source, /ALTER TABLE v2_server ADD COLUMN metrics TEXT/);
+});
+
+test("gift card APIs implement the official admin and user route set", () => {
+  const source = fs.readFileSync("src/gift-card.ts", "utf8");
+  const index = fs.readFileSync("src/index.ts", "utf8");
+  for (const route of ["templates", "create-template", "update-template", "delete-template", "generate-codes", "codes", "toggle-code", "export-codes", "usages", "statistics", "types", "update-code", "delete-code"]) {
+    assert.match(source, new RegExp(`gift-card/${route}`));
+  }
+  for (const route of ["check", "redeem", "history", "detail", "types"]) assert.match(source, new RegExp(`gift-card/${route}`));
+  assert.match(index, /handleAdminGiftCard/);
+  assert.match(index, /handleUserGiftCard/);
+  assert.match(source, /max_use_per_user/);
+  assert.match(source, /cooldown_hours/);
+  assert.match(source, /invite_reward_rate/);
+  assert.match(source, /reset_package/);
+  assert.match(source, /plan_validity_days/);
+});
+
+test("mail APIs enqueue Resend jobs instead of returning SMTP placeholders", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const wrangler = fs.readFileSync("wrangler.toml", "utf8");
+  assert.match(source, /MAIL_EVENTS: Queue/);
+  assert.match(source, /type: "mail"/);
+  assert.match(source, /resend_api_key/);
+  assert.doesNotMatch(source, /testSendMail"\) return fail\("未配置邮件队列发送服务"/);
+  assert.match(wrangler, /binding = "MAIL_EVENTS"/);
+  assert.match(wrangler, /queue = "mail-events"/);
+});
+
+test("non-payment compatibility endpoints no longer return fake success", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /async function adminTicket/);
+  assert.match(source, /async function adminCoupon/);
+  assert.match(source, /async function themeApi/);
+  assert.match(source, /async function pluginApi/);
+  assert.doesNotMatch(source, /compatible placeholder/);
+});
+
+test("quick login, withdrawals and ECH generation are implemented", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /quick_login:\$\{verify\}/);
+  assert.match(source, /Commission Withdrawal Request/);
+  assert.match(source, /BEGIN \$\{label\}/);
+  assert.match(source, /name: "X25519"/);
 });

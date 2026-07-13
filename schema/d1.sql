@@ -170,6 +170,9 @@ CREATE TABLE IF NOT EXISTS v2_notice (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   title TEXT NOT NULL,
   content TEXT,
+  img_url TEXT,
+  tags TEXT,
+  popup INTEGER NOT NULL DEFAULT 0,
   show INTEGER NOT NULL DEFAULT 1,
   sort INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
@@ -350,11 +353,48 @@ CREATE TABLE IF NOT EXISTS v2_order (
   updated_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS v2_payment (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, payment TEXT, config TEXT, enable INTEGER DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS v2_coupon (id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT UNIQUE, type TEXT, value INTEGER DEFAULT 0, show INTEGER DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS v2_coupon (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  type INTEGER NOT NULL,
+  value INTEGER NOT NULL,
+  show INTEGER NOT NULL DEFAULT 0,
+  limit_use INTEGER,
+  limit_use_with_user INTEGER,
+  limit_plan_ids TEXT,
+  limit_period TEXT,
+  started_at INTEGER NOT NULL,
+  ended_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS v2_commission_log (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, order_id INTEGER, amount INTEGER DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS v2_gift_card_template (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, conditions TEXT, rewards TEXT, limits TEXT, special_config TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS v2_gift_card_code (id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT UNIQUE, template_id INTEGER, status TEXT DEFAULT 'disabled', actual_rewards TEXT, metadata TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS v2_gift_card_usage (id INTEGER PRIMARY KEY AUTOINCREMENT, code_id INTEGER, user_id INTEGER, rewards_given TEXT, invite_rewards TEXT, multiplier_applied REAL DEFAULT 1, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS v2_gift_card_template (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, description TEXT, type INTEGER NOT NULL,
+  status INTEGER NOT NULL DEFAULT 1, conditions TEXT, rewards TEXT NOT NULL, limits TEXT, special_config TEXT,
+  icon TEXT, background_image TEXT, theme_color TEXT NOT NULL DEFAULT '#1890ff', sort INTEGER NOT NULL DEFAULT 0,
+  admin_id INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS v2_gift_card_code (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, template_id INTEGER NOT NULL, code TEXT NOT NULL UNIQUE, batch_id TEXT,
+  status INTEGER NOT NULL DEFAULT 0, user_id INTEGER, used_at INTEGER, expires_at INTEGER, actual_rewards TEXT,
+  usage_count INTEGER NOT NULL DEFAULT 0, max_usage INTEGER NOT NULL DEFAULT 1, metadata TEXT,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS v2_gift_card_usage (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, code_id INTEGER NOT NULL, template_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
+  invite_user_id INTEGER, rewards_given TEXT NOT NULL, invite_rewards TEXT, user_level_at_use INTEGER,
+  plan_id_at_use INTEGER, multiplier_applied REAL NOT NULL DEFAULT 1, ip_address TEXT, user_agent TEXT, notes TEXT,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_gift_template_type_status ON v2_gift_card_template(type, status);
+CREATE INDEX IF NOT EXISTS idx_gift_code_template_id ON v2_gift_card_code(template_id);
+CREATE INDEX IF NOT EXISTS idx_gift_code_status ON v2_gift_card_code(status);
+CREATE INDEX IF NOT EXISTS idx_gift_code_batch_id ON v2_gift_card_code(batch_id);
+CREATE INDEX IF NOT EXISTS idx_gift_usage_user_usage ON v2_gift_card_usage(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_gift_usage_template_stats ON v2_gift_card_usage(template_id, created_at);
 
 CREATE INDEX IF NOT EXISTS idx_v2_user_token ON v2_user(token);
 CREATE INDEX IF NOT EXISTS idx_v2_user_email ON v2_user(email);
