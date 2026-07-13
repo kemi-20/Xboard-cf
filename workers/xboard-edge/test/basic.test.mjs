@@ -8,7 +8,7 @@ test("xboard-edge has an entrypoint", () => {
 });
 
 test("machine form validates while typing", () => {
-  const adminBundle = fs.readFileSync("public/assets/index-CEIYH7i8.js", "utf8");
+  const adminBundle = fs.readFileSync("public/assets/index-CF20260713.js", "utf8");
   const machineFormStart = adminBundle.indexOf("const t3t=");
   assert.notEqual(machineFormStart, -1);
   assert.match(adminBundle.slice(machineFormStart, machineFormStart + 500), /mode:"onChange"/);
