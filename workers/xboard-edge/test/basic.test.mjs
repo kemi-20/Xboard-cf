@@ -113,6 +113,18 @@ test("node list exposes upstream-compatible health and load fields", () => {
   assert.match(source, /parseKvObject\(kvMachineLoad\)/);
 });
 
+test("machine load history matches the upstream chart contract", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /async function adminMachineHistory\(env: Env, url: URL\)/);
+  assert.match(source, /limit < 10 \|\| limit > 1440/);
+  assert.match(source, /rangeHours < 1 \|\| rangeHours > 24/);
+  assert.match(source, /FROM v2_server_machine_load_history WHERE machine_id = \?/);
+  assert.match(source, /ORDER BY recorded_at DESC LIMIT \?/);
+  assert.match(source, /\(result\.results \|\| \[\]\)\.reverse\(\)\.map/);
+  assert.match(source, /net_in_speed: row\.net_in_speed === null/);
+  assert.match(source, /return adminMachineHistory\(env, new URL\(request\.url\)\)/);
+});
+
 test("login sessions fall back to D1 when KV writes fail", () => {
   const source = fs.readFileSync("src/auth.ts", "utf8");
   const d1Insert = source.indexOf('INSERT INTO personal_access_tokens');

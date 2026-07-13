@@ -746,6 +746,46 @@ async function adminMachineRows(env: Env) {
   return out;
 }
 
+async function adminMachineHistory(env: Env, url: URL) {
+  const machineIdValue = url.searchParams.get("machine_id");
+  const limitValue = url.searchParams.get("limit");
+  const rangeHoursValue = url.searchParams.get("range_hours");
+  const machineId = nullableNumber(machineIdValue);
+  const limit = limitValue === null || limitValue === "" ? 60 : nullableNumber(limitValue);
+  const rangeHours = rangeHoursValue === null || rangeHoursValue === "" ? null : nullableNumber(rangeHoursValue);
+
+  if (!machineId || !Number.isInteger(machineId)) return fail("machine_id 字段是必须的", 422, 422);
+  if (!limit || !Number.isInteger(limit) || limit < 10 || limit > 1440) return fail("limit 必须在 10 到 1440 之间", 422, 422);
+  if (rangeHours !== null && (!Number.isInteger(rangeHours) || rangeHours < 1 || rangeHours > 24)) {
+    return fail("range_hours 必须在 1 到 24 之间", 422, 422);
+  }
+
+  const machine = await env.XBOARD_DB.prepare("SELECT id FROM v2_server_machine WHERE id = ?").bind(machineId).first();
+  if (!machine) return fail("服务器不存在", 422, 422);
+
+  let query = "SELECT cpu, mem_total, mem_used, disk_total, disk_used, net_in_speed, net_out_speed, recorded_at FROM v2_server_machine_load_history WHERE machine_id = ?";
+  const bindings: Array<number> = [machineId];
+  if (rangeHours !== null) {
+    query += " AND recorded_at >= ?";
+    bindings.push(now() - rangeHours * 3600);
+  }
+  query += " ORDER BY recorded_at DESC LIMIT ?";
+  bindings.push(limit);
+
+  const result = await env.XBOARD_DB.prepare(query).bind(...bindings).all<Record<string, unknown>>();
+  const history = (result.results || []).reverse().map(row => ({
+    cpu: Number(row.cpu || 0),
+    mem_total: Number(row.mem_total || 0),
+    mem_used: Number(row.mem_used || 0),
+    disk_total: Number(row.disk_total || 0),
+    disk_used: Number(row.disk_used || 0),
+    net_in_speed: row.net_in_speed === null || row.net_in_speed === undefined ? null : Number(row.net_in_speed),
+    net_out_speed: row.net_out_speed === null || row.net_out_speed === undefined ? null : Number(row.net_out_speed),
+    recorded_at: Number(row.recorded_at || 0)
+  }));
+  return ok(history);
+}
+
 function shellQuote(value: string) {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
@@ -1067,7 +1107,7 @@ async function adminApi(request: Request, env: Env, path: string) {
     const data = machineId ? (await rows(env.XBOARD_DB, "v2_server", 1000) as any[]).filter(row => Number(row.machine_id || 0) === machineId) : [];
     return ok(data);
   }
-  if (path.includes("/server/machine/history")) return ok([]);
+  if (path.includes("/server/machine/history")) return adminMachineHistory(env, new URL(request.url));
   if (path.includes("/server/machine/getToken")) {
     const id = nullableNumber(new URL(request.url).searchParams.get("id"));
     if (!id) return fail("id 字段是必须的", 422, 422);
