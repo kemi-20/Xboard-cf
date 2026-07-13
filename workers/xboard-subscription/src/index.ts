@@ -92,6 +92,34 @@ function query(params: Config) {
   return result.toString();
 }
 
+function tlsFingerprint(ps: Config) {
+  return ps.utls?.enabled ? ps.utls?.fingerprint || "chrome" : undefined;
+}
+
+function networkFields(ps: Config, fallbackHost: string) {
+  const network = ps.network || "tcp";
+  const ns = ps.network_settings || {};
+  const fields: Config = { type: network };
+  if (network === "ws") Object.assign(fields, { path: ns.path, host: ns.headers?.Host });
+  else if (network === "grpc") Object.assign(fields, { serviceName: ns.serviceName });
+  else if (network === "h2") Object.assign(fields, { type: "http", path: ns.path, host: Array.isArray(ns.host) ? ns.host.join(",") : ns.host });
+  else if (network === "kcp") Object.assign(fields, { type: ns.header?.type || "none", path: ns.seed });
+  else if (network === "httpupgrade") Object.assign(fields, { path: ns.path, host: ns.host || fallbackHost });
+  else if (network === "xhttp") Object.assign(fields, { path: ns.path, host: ns.host || fallbackHost, mode: ns.mode || "auto", extra: ns.extra && Object.keys(ns.extra).length ? JSON.stringify(ns.extra) : undefined });
+  return fields;
+}
+
+function trojanNetworkFields(ps: Config, fallbackHost: string) {
+  const network = ps.network || "tcp";
+  const ns = ps.network_settings || {};
+  if (network === "ws") return { type: "ws", path: ns.path, host: ns.headers?.Host };
+  if (network === "grpc") return { type: "grpc", serviceName: ns.serviceName };
+  if (network === "h2") return { type: "http", path: ns.path, host: Array.isArray(ns.host) ? ns.host.join(",") : ns.host };
+  if (network === "httpupgrade") return { type: "httpupgrade", path: ns.path, host: ns.host || fallbackHost };
+  if (network === "xhttp") return { type: "xhttp", path: ns.path, host: ns.host || fallbackHost, mode: ns.mode || "auto", extra: ns.extra && Object.keys(ns.extra).length ? JSON.stringify(ns.extra) : undefined };
+  return {};
+}
+
 function generalUri(user: any, server: any) {
   const ps = server.protocol_settings || {};
   const password = user.uuid;
@@ -105,27 +133,42 @@ function generalUri(user: any, server: any) {
   if (server.type === "vmess") {
     const network = ps.network || "tcp";
     const networkSettings = ps.network_settings || {};
-    return `vmess://${b64(JSON.stringify({ v: "2", ps: server.name, add: server.host, port: String(server.port), id: password, aid: "0", net: network, type: networkSettings?.header?.type || "none", host: networkSettings?.headers?.Host || networkSettings?.host || "", path: networkSettings?.path || networkSettings?.serviceName || "", tls: ps.tls ? "tls" : "", sni: ps.tls_settings?.server_name || "" }))}`;
+    const config: Config = { v: "2", ps: server.name, add: server.host, port: String(server.port), id: password, aid: "0", net: network, type: "none", host: "", path: "", tls: ps.tls ? "tls" : "" };
+    if (ps.tls_settings?.server_name) config.sni = ps.tls_settings.server_name;
+    if (tlsFingerprint(ps)) config.fp = tlsFingerprint(ps);
+    if (network === "tcp" && networkSettings.header?.type && networkSettings.header.type !== "none") Object.assign(config, { type: networkSettings.header.type, path: networkSettings.header?.request?.path?.[0] || "/", host: networkSettings.header?.request?.headers?.Host?.[0] || "" });
+    else if (network === "ws") Object.assign(config, { type: "ws", path: networkSettings.path || "", host: networkSettings.headers?.Host || "" });
+    else if (network === "grpc") Object.assign(config, { type: "grpc", path: networkSettings.serviceName || "" });
+    else if (network === "h2") Object.assign(config, { net: "h2", type: "h2", path: networkSettings.path || "", host: Array.isArray(networkSettings.host) ? networkSettings.host.join(",") : networkSettings.host || "" });
+    else if (network === "httpupgrade") Object.assign(config, { net: "httpupgrade", type: "httpupgrade", path: networkSettings.path || "", host: networkSettings.host || server.host });
+    else if (network === "xhttp") Object.assign(config, { net: "xhttp", type: "xhttp", path: networkSettings.path || "", host: networkSettings.host || server.host, mode: networkSettings.mode || "auto", extra: networkSettings.extra && Object.keys(networkSettings.extra).length ? JSON.stringify(networkSettings.extra) : undefined });
+    return `vmess://${b64(JSON.stringify(Object.fromEntries(Object.entries(config).filter(([, value]) => value !== undefined))))}`;
   }
   if (server.type === "vless") {
-    const security = Number(ps.tls || 0) === 2 ? "reality" : Number(ps.tls || 0) === 1 ? "tls" : "none";
-    const params = query({ encryption: ps.encryption?.enabled ? ps.encryption?.encryption : "none", security, type: ps.network || "tcp", flow: ps.flow, sni: ps.reality_settings?.server_name || ps.tls_settings?.server_name, pbk: ps.reality_settings?.public_key, sid: ps.reality_settings?.short_id, path: ps.network_settings?.path || ps.network_settings?.serviceName, host: ps.network_settings?.headers?.Host || ps.network_settings?.host, fp: ps.utls?.enabled ? ps.utls?.fingerprint || "chrome" : undefined });
-    return `vless://${password}@${address}:${server.port}?${params}#${name}`;
+    const tlsMode = Number(ps.tls || 0);
+    const params: Config = { mode: "multi", security: tlsMode === 2 ? "reality" : tlsMode === 1 ? "tls" : "", encryption: ps.encryption?.enabled ? ps.encryption?.encryption || "none" : "none", flow: ps.flow, ...networkFields(ps, server.host) };
+    if (tlsMode === 1) Object.assign(params, { sni: ps.tls_settings?.server_name, allowInsecure: ps.tls_settings?.allow_insecure ? "1" : undefined, fp: tlsFingerprint(ps) });
+    if (tlsMode === 2) Object.assign(params, { pbk: ps.reality_settings?.public_key, sid: ps.reality_settings?.short_id, sni: ps.reality_settings?.server_name, servername: ps.reality_settings?.server_name, spx: "/", fp: tlsFingerprint(ps) });
+    return `vless://${password}@${address}:${server.port}?${query(params)}#${name}`;
   }
   if (server.type === "trojan") {
-    const params = query({ security: Number(ps.tls || 1) === 2 ? "reality" : "tls", type: ps.network || "tcp", sni: ps.reality_settings?.server_name || ps.tls_settings?.server_name, pbk: ps.reality_settings?.public_key, sid: ps.reality_settings?.short_id, path: ps.network_settings?.path || ps.network_settings?.serviceName, host: ps.network_settings?.headers?.Host || ps.network_settings?.host, allowInsecure: ps.tls_settings?.allow_insecure ? 1 : undefined });
-    return `trojan://${password}@${address}:${server.port}?${params}#${name}`;
+    const tlsMode = Number(ps.tls ?? 1);
+    const params: Config = { ...trojanNetworkFields(ps, server.host) };
+    if (tlsMode === 2) Object.assign(params, { security: "reality", pbk: ps.reality_settings?.public_key, sid: ps.reality_settings?.short_id, sni: ps.reality_settings?.server_name, fp: tlsFingerprint(ps) });
+    else Object.assign(params, { allowInsecure: ps.tls_settings?.allow_insecure ? "1" : "0", peer: ps.tls_settings?.server_name, sni: ps.tls_settings?.server_name, fp: tlsFingerprint(ps) });
+    return `trojan://${password}@${address}:${server.port}?${query(params)}#${name}`;
   }
   if (server.type === "hysteria") {
-    const common = { sni: ps.tls?.server_name, insecure: ps.tls?.allow_insecure ? 1 : undefined, obfs: ps.obfs?.open ? ps.obfs?.type : undefined, "obfs-password": ps.obfs?.password };
-    return Number(ps.version || 1) === 2
-      ? `hysteria2://${password}@${address}:${server.port}?${query(common)}#${name}`
-      : `hysteria://${address}:${server.port}?${query({ ...common, auth: password, upmbps: ps.bandwidth?.up, downmbps: ps.bandwidth?.down })}#${name}`;
+    const version = Number(ps.version || 2);
+    if (version === 2) {
+      return `hysteria2://${password}@${address}:${server.port}?${query({ sni: ps.tls?.server_name, insecure: ps.tls?.allow_insecure ? "1" : "0", obfs: ps.obfs?.open ? "salamander" : undefined, "obfs-password": ps.obfs?.open ? ps.obfs?.password : undefined, mport: server.ports })}#${name}`;
+    }
+    return `hysteria://${address}:${server.port}?${query({ protocol: "udp", auth: password, sni: ps.tls?.server_name, insecure: ps.tls?.allow_insecure ? "1" : "0", upmbps: ps.bandwidth?.up, downmbps: ps.bandwidth?.down, obfs: ps.obfs?.open && ps.obfs?.password ? "xplus" : undefined, obfsParam: ps.obfs?.open ? ps.obfs?.password : undefined })}#${name}`;
   }
-  if (server.type === "tuic") return `tuic://${address}:${server.port}?${query({ uuid: password, password, token: Number(ps.version) === 4 ? password : undefined, alpn: Array.isArray(ps.alpn) ? ps.alpn.join(",") : ps.alpn, sni: ps.tls?.server_name, insecure: ps.tls?.allow_insecure ? 1 : undefined, congestion_control: ps.congestion_control || "cubic" })}#${name}`;
-  if (server.type === "anytls") return `anytls://${password}@${address}:${server.port}?${query({ sni: ps.tls?.server_name, insecure: ps.tls?.allow_insecure ? 1 : undefined })}#${name}`;
-  if (server.type === "socks") return `socks://${b64(`${password}:${password}@${address}:${server.port}`)}?method=auto#${name}`;
-  if (server.type === "http") return `http://${b64(`${password}:${password}`)}@${address}:${server.port}#${name}`;
+  if (server.type === "tuic") return `tuic://${password}:${password}@${address}:${server.port}?${query({ alpn: Array.isArray(ps.alpn) ? ps.alpn.join(",") : ps.alpn, sni: ps.tls?.server_name, insecure: ps.tls?.allow_insecure ? 1 : undefined, congestion_control: ps.congestion_control || "cubic", "udp-relay-mode": ps.udp_relay_mode || "native" })}#${name}`;
+  if (server.type === "anytls") return `anytls://${password}@${address}:${server.port}?${query({ sni: ps.tls?.server_name, insecure: ps.tls?.allow_insecure ? "1" : "0" })}#${name}`;
+  if (server.type === "socks") return `socks://${b64(`${password}:${password}`)}@${address}:${server.port}#${name}`;
+  if (server.type === "http") return `http://${b64(`${password}:${password}`)}@${address}:${server.port}${ps.tls ? `?${query({ security: "tls", sni: ps.tls_settings?.server_name, allowInsecure: ps.tls_settings?.allow_insecure ? "1" : "0" })}` : ""}#${name}`;
   return "";
 }
 
@@ -139,7 +182,21 @@ function clashProxy(user: any, server: any) {
   const base: Config = { name: server.name, type: server.type === "shadowsocks" ? "ss" : server.type, server: server.host, port: Number(server.port), udp: true };
   if (server.type === "shadowsocks") Object.assign(base, { cipher: ps.cipher || "aes-128-gcm", password: user.uuid });
   else if (server.type === "vmess") Object.assign(base, { uuid: user.uuid, alterId: 0, cipher: "auto", network: ps.network || "tcp", tls: Boolean(ps.tls), servername: ps.tls_settings?.server_name, "skip-cert-verify": Boolean(ps.tls_settings?.allow_insecure) });
-  else if (server.type === "vless") Object.assign(base, { uuid: user.uuid, network: ps.network || "tcp", tls: Number(ps.tls) === 1, reality: Number(ps.tls) === 2 ? { "public-key": ps.reality_settings?.public_key, "short-id": ps.reality_settings?.short_id } : undefined, servername: ps.reality_settings?.server_name || ps.tls_settings?.server_name, flow: ps.flow });
+  else if (server.type === "vless") {
+    Object.assign(base, { uuid: user.uuid, alterId: 0, cipher: "auto", flow: ps.flow, encryption: ps.encryption?.enabled ? ps.encryption?.encryption || "none" : "none", tls: Boolean(ps.tls), "skip-cert-verify": Number(ps.tls) === 2 ? Boolean(ps.reality_settings?.allow_insecure) : Boolean(ps.tls_settings?.allow_insecure), servername: ps.reality_settings?.server_name || ps.tls_settings?.server_name });
+    if (Number(ps.tls) === 2) base["reality-opts"] = { "public-key": ps.reality_settings?.public_key, "short-id": ps.reality_settings?.short_id };
+    if (tlsFingerprint(ps)) base["client-fingerprint"] = tlsFingerprint(ps);
+    const ns = ps.network_settings || {};
+    if (ps.network === "tcp" && ns.header?.type === "http") Object.assign(base, { network: "http", "http-opts": { headers: ns.header?.request?.headers, path: ns.header?.request?.path || ["/"] } });
+    else if (ps.network === "ws") Object.assign(base, { network: "ws", "ws-opts": { path: ns.path, headers: ns.headers?.Host ? { Host: ns.headers.Host } : undefined } });
+    else if (ps.network === "grpc") Object.assign(base, { network: "grpc", "grpc-opts": { "grpc-service-name": ns.serviceName } });
+    else if (ps.network === "h2") Object.assign(base, { network: "h2", "h2-opts": { path: ns.path, host: Array.isArray(ns.host) ? ns.host : ns.host ? [ns.host] : undefined } });
+    else if (ps.network === "httpupgrade") Object.assign(base, { network: "ws", "ws-opts": { "v2ray-http-upgrade": true, path: ns.path, headers: ns.host ? { Host: ns.host } : undefined } });
+    else if (ps.network === "xhttp") Object.assign(base, { network: "xhttp", "xhttp-opts": { path: ns.path, host: ns.host, mode: ns.mode } });
+    else base.network = "tcp";
+    if (ps.multiplex?.enabled) base.smux = { enabled: true, protocol: ps.multiplex.protocol || "yamux", "max-connections": ps.multiplex.max_connections, padding: ps.multiplex.padding ? true : undefined, "brutal-opts": ps.multiplex.brutal?.enabled ? { enabled: true, up: ps.multiplex.brutal.up_mbps, down: ps.multiplex.brutal.down_mbps } : undefined };
+    if (Number(ps.tls) === 1 && ps.tls_settings?.ech?.enabled) base["ech-opts"] = { enable: true, config: ps.tls_settings.ech.config, "query-server-name": ps.tls_settings.ech.query_server_name };
+  }
   else if (server.type === "trojan") Object.assign(base, { password: user.uuid, sni: ps.reality_settings?.server_name || ps.tls_settings?.server_name, network: ps.network || "tcp", "skip-cert-verify": Boolean(ps.tls_settings?.allow_insecure) });
   else if (server.type === "hysteria") Object.assign(base, { type: Number(ps.version || 1) === 2 ? "hysteria2" : "hysteria", password: user.uuid, auth: user.uuid, sni: ps.tls?.server_name, "skip-cert-verify": Boolean(ps.tls?.allow_insecure) });
   else if (server.type === "tuic") Object.assign(base, { uuid: user.uuid, password: user.uuid, sni: ps.tls?.server_name, "skip-cert-verify": Boolean(ps.tls?.allow_insecure), "congestion-controller": ps.congestion_control || "cubic" });
@@ -176,11 +233,29 @@ function yamlProfile(client: Client, template: string, config: Config, user: any
 
 function singboxOutbound(user: any, server: any) {
   const ps = server.protocol_settings || {};
-  const outbound: Config = { type: server.type === "hysteria" && Number(ps.version || 1) === 2 ? "hysteria2" : server.type, tag: server.name, server: server.host, server_port: Number(server.port) };
+  const outbound: Config = { type: server.type === "hysteria" && Number(ps.version || 2) === 2 ? "hysteria2" : server.type, tag: server.name, server: server.host, server_port: Number(server.port) };
   if (["vmess", "vless", "trojan", "hysteria", "tuic", "anytls"].includes(server.type)) outbound.uuid = user.uuid;
   if (["shadowsocks", "trojan", "hysteria", "tuic", "anytls", "socks", "http"].includes(server.type)) outbound.password = user.uuid;
   if (server.type === "shadowsocks") outbound.method = ps.cipher || "aes-128-gcm";
-  if (ps.tls || ps.tls_settings || ps.reality_settings || ps.tls?.server_name) outbound.tls = { enabled: Boolean(ps.tls || ps.tls?.server_name), server_name: ps.reality_settings?.server_name || ps.tls_settings?.server_name || ps.tls?.server_name, insecure: Boolean(ps.tls_settings?.allow_insecure || ps.tls?.allow_insecure) };
+  if (server.type === "vless") {
+    outbound.packet_encoding = "xudp";
+    if (ps.flow) outbound.flow = ps.flow;
+  }
+  if (ps.tls || ps.tls_settings || ps.reality_settings || ps.tls?.server_name) {
+    outbound.tls = { enabled: Boolean(ps.tls || ps.tls?.server_name), server_name: ps.reality_settings?.server_name || ps.tls_settings?.server_name || ps.tls?.server_name, insecure: Number(ps.tls) === 2 ? Boolean(ps.reality_settings?.allow_insecure) : Boolean(ps.tls_settings?.allow_insecure || ps.tls?.allow_insecure) };
+    if (Number(ps.tls) === 2) outbound.tls.reality = { enabled: true, public_key: ps.reality_settings?.public_key, short_id: ps.reality_settings?.short_id };
+    if (tlsFingerprint(ps)) outbound.tls.utls = { enabled: true, fingerprint: tlsFingerprint(ps) };
+    const ech = ps.tls_settings?.ech || ps.tls?.ech;
+    if (ech?.enabled) outbound.tls.ech = { enabled: true, config: ech.config ? [ech.config] : undefined, query_server_name: ech.query_server_name };
+  }
+  if (ps.multiplex?.enabled) outbound.multiplex = { enabled: true, protocol: ps.multiplex.protocol || "yamux", max_connections: ps.multiplex.max_connections, min_streams: ps.multiplex.min_streams, max_streams: ps.multiplex.max_streams, padding: Boolean(ps.multiplex.padding), brutal: ps.multiplex.brutal?.enabled ? { enabled: true, up_mbps: ps.multiplex.brutal.up_mbps, down_mbps: ps.multiplex.brutal.down_mbps } : undefined };
+  const ns = ps.network_settings || {};
+  if (ps.network === "tcp" && ns.header?.type === "http") outbound.transport = { type: "http", path: ns.header?.request?.path?.[0] || "/", host: ns.header?.request?.headers?.Host || [] };
+  else if (ps.network === "ws") outbound.transport = { type: "ws", path: ns.path, headers: ns.headers?.Host ? { Host: ns.headers.Host } : undefined, max_early_data: 0 };
+  else if (ps.network === "grpc") outbound.transport = { type: "grpc", service_name: ns.serviceName };
+  else if (ps.network === "h2" || ps.network === "http") outbound.transport = { type: "http", host: ns.host, path: ns.path };
+  else if (ps.network === "httpupgrade") outbound.transport = { type: "httpupgrade", host: ns.host || server.host, path: ns.path, headers: ns.headers };
+  else if (ps.network === "quic") outbound.transport = { type: "quic" };
   return outbound;
 }
 
@@ -296,7 +371,7 @@ async function build(request: Request, env: Env, token: string) {
   return { status: 200, body, headers };
 }
 
-export const __test = { decorateServers, yamlProfile, textTemplateProfile };
+export const __test = { decorateServers, general, generalUri, yamlProfile, clashProxy, singboxOutbound, textTemplateProfile };
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {

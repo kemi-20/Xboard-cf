@@ -1018,6 +1018,12 @@ async function adminApi(request: Request, env: Env, path: string) {
     return result.success ? ok({ token: machineToken }) : fail("服务器不存在", 404, 400202);
   }
   if (path.includes("/server/manage/generateEchKey")) return ok({ key: "", config: "" });
+  if (path.includes("/user/getSubscribe")) {
+    const id = nullableNumber(new URL(request.url).searchParams.get("id"));
+    if (!id) return fail("id 字段是必须的", 422, 422);
+    const target = await env.XBOARD_DB.prepare("SELECT token FROM v2_user WHERE id = ?").bind(id).first<{ token: string }>();
+    return target ? ok({ subscribe_url: await subscribeUrl(request, env, target.token), token: target.token }) : fail("用户不存在", 404, 400202);
+  }
   if (path.includes("/user/resetSecret")) {
     const input = await body<Record<string, any>>(request.clone());
     const newToken = token(16);

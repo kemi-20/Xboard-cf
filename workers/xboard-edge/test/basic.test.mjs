@@ -71,3 +71,9 @@ test("generated subscription URLs honor configured domain and path", () => {
   assert.match(source, /values\.subscribe_path/);
   assert.match(source, /await subscribeUrl\(request, env,/);
 });
+
+test("admin can fetch a fresh subscription URL for the copy action", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /path\.includes\("\/user\/getSubscribe"\)/);
+  assert.match(source, /SELECT token FROM v2_user WHERE id = \?/);
+});
