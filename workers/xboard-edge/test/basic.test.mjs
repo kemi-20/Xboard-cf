@@ -228,6 +228,15 @@ test("mail APIs enqueue Resend jobs instead of returning SMTP placeholders", () 
   assert.match(wrangler, /queue = "mail-events"/);
 });
 
+test("Telegram webhook setup and join requests use the official Bot API", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /api\.telegram\.org\/bot\$\{botToken\}/);
+  assert.match(source, /setWebhook/);
+  assert.match(source, /setMyCommands/);
+  assert.match(source, /approveChatJoinRequest/);
+  assert.match(source, /declineChatJoinRequest/);
+});
+
 test("non-payment compatibility endpoints no longer return fake success", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /async function adminTicket/);

@@ -654,6 +654,18 @@ async function subscribeUrl(request: Request, env: Env, userToken: string) {
 }
 
 async function guestApi(request: Request, env: Env, path: string) {
+  if (request.method === "POST" && path === "/api/v1/guest/telegram/webhook") {
+    const all = await settings(env.XBOARD_DB); const botToken = String(pickSetting(all, "telegram_bot_token", ""));
+    if (new URL(request.url).searchParams.get("access_token") !== md5(botToken)) return fail("access_token is error", 401, 401);
+    const update = await body<Record<string, any>>(request);
+    const join = update.chat_join_request;
+    if (join?.chat?.id && join?.from?.id) {
+      const user = await env.XBOARD_DB.prepare("SELECT banned,expired_at,transfer_enable,u,d FROM v2_user WHERE telegram_id = ?").bind(Number(join.from.id)).first<Record<string, any>>();
+      const available = !!user && !Number(user.banned) && (!user.expired_at || Number(user.expired_at) > now()) && (!Number(user.transfer_enable) || Number(user.u || 0) + Number(user.d || 0) < Number(user.transfer_enable));
+      try { await telegramRequest(botToken, available ? "approveChatJoinRequest" : "declineChatJoinRequest", { chat_id: join.chat.id, user_id: join.from.id }); } catch (error: any) { return fail(error?.message || "Telegram request failed", 400, 400); }
+    }
+    return ok(true);
+  }
   if (request.method === "GET" && path === "/api/v1/guest/plan/fetch") {
     return ok((await adminPlanRows(env)).filter(row => Number((row as any).show ?? 1) === 1 && Number((row as any).sell ?? 1) === 1));
   }
@@ -1445,6 +1457,16 @@ async function queueTemplateMail(env: Env, name: string, email: string, vars: Re
   });
 }
 
+async function telegramRequest(botToken: string, method: string, payload: Record<string, unknown> = {}) {
+  if (!botToken) throw new Error("Telegram Bot Token 未配置");
+  const response = await fetch(`https://api.telegram.org/bot${botToken}/${method}`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload)
+  });
+  const result = await response.json() as Record<string, any>;
+  if (!response.ok || !result.ok) throw new Error(String(result.description || `Telegram ${method} failed`));
+  return result.result;
+}
+
 async function adminAuditLogs(env: Env, request: Request) {
   const input = request.method === "POST" ? await body<Record<string, any>>(request.clone()) : {};
   const url = new URL(request.url);
@@ -1716,7 +1738,20 @@ async function adminApi(request: Request, env: Env, path: string) {
     const eventId = await queueTemplateMail(env, "notify", String((admin as any).email), vars, "This is xboard test email");
     return ok({ error: null, queued: true, event_id: eventId });
   }
-  if (request.method === "POST" && route === "/config/setTelegramWebhook") return fail("未配置 Telegram Webhook 发送服务", 503, 503);
+  if (request.method === "POST" && route === "/config/setTelegramWebhook") {
+    const input = await body<Record<string, any>>(request); const all = await settings(env.XBOARD_DB);
+    const botToken = String(input.telegram_bot_token || pickSetting(all, "telegram_bot_token", ""));
+    const custom = String(pickSetting(all, "telegram_webhook_url", "")).trim();
+    const base = (custom || String(pickSetting(all, "app_url", "")) || new URL(request.url).origin).replace(/\/$/, "");
+    const webhookBase = base.includes("/api/v1/guest/telegram/webhook") ? base : `${base}/api/v1/guest/telegram/webhook`;
+    const webhookUrl = `${webhookBase}?access_token=${md5(botToken)}`;
+    try {
+      await telegramRequest(botToken, "getMe");
+      await telegramRequest(botToken, "setWebhook", { url: webhookUrl });
+      await telegramRequest(botToken, "setMyCommands", { commands: [{ command: "start", description: "Start" }, { command: "bind", description: "Bind account" }, { command: "traffic", description: "Traffic usage" }, { command: "subscribe", description: "Subscription" }] });
+      return ok({ success: true, webhook_url: webhookUrl, webhook_base_url: webhookBase });
+    } catch (error: any) { return fail(error?.message || "Telegram Webhook 设置失败", 400, 400); }
+  }
   if (request.method === "GET" && route === "/stat/getOverride") {
     const nodes = await adminServerRows(env);
     const today = dayStart();
