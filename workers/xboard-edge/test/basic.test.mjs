@@ -107,6 +107,10 @@ test("node list exposes upstream-compatible health and load fields", () => {
   assert.match(source, /available_status: availableStatus/);
   assert.match(source, /load_status: loadStatus/);
   assert.match(source, /online_conn: Number\(metrics\?\.active_connections \|\| 0\)/);
+  assert.match(source, /machines\.find\(item => Number\(item\.id\) === Number\(server\.machine_id\)\)/);
+  assert.match(source, /machineOnline \? machineSeenAt : 0/);
+  assert.match(source, /machine:load:\$\{machine\.id\}/);
+  assert.match(source, /parseKvObject\(kvMachineLoad\)/);
 });
 
 test("login sessions fall back to D1 when KV writes fail", () => {

@@ -671,27 +671,36 @@ function parseKvObject(value: string | null) {
   return value ? parseJsonObject(value) : null;
 }
 
+async function optionalKvGet(env: Env, key: string) {
+  try { return await env.XBOARD_KV.get(key); } catch { return null; }
+}
+
 async function adminServerRows(env: Env) {
   const servers = await rows(env.XBOARD_DB, "v2_server", 1000) as any[];
+  const machines = await rows(env.XBOARD_DB, "v2_server_machine", 1000) as any[];
   const out = [];
   for (const server of servers) {
     const stateId = Number(server.parent_id || server.id);
     const ownId = Number(server.id);
+    const machine = Number(server.machine_id) > 0 ? machines.find(item => Number(item.id) === Number(server.machine_id)) : null;
     const readState = async (key: string) => {
-      const inherited = await env.XBOARD_KV.get(`node:${key}:${stateId}`);
-      return inherited ?? (stateId !== ownId ? await env.XBOARD_KV.get(`node:${key}:${ownId}`) : null);
+      const inherited = await optionalKvGet(env, `node:${key}:${stateId}`);
+      return inherited ?? (stateId !== ownId ? await optionalKvGet(env, `node:${key}:${ownId}`) : null);
     };
-    const [kvLastCheck, kvLastPush, kvOnline, kvLoad, kvMetrics] = await Promise.all([
+    const [kvLastCheck, kvLastPush, kvOnline, kvLoad, kvMetrics, kvMachineLoad] = await Promise.all([
       readState("last_check"),
       readState("last_push"),
       readState("online"),
       readState("load"),
-      readState("metrics")
+      readState("metrics"),
+      machine ? optionalKvGet(env, `machine:load:${machine.id}`) : Promise.resolve(null)
     ]);
-    const lastCheckAt = Number(kvLastCheck || server.last_check_at || 0) || null;
-    const lastPushAt = Number(kvLastPush || server.last_push_at || 0) || null;
+    const machineSeenAt = machine && Number(machine.is_active ?? machine.enabled ?? 1) === 1 ? Number(machine.last_seen_at || 0) : 0;
+    const machineOnline = machineSeenAt > 0 && now() - 300 < machineSeenAt;
+    const lastCheckAt = Math.max(Number(kvLastCheck || server.last_check_at || 0), machineOnline ? machineSeenAt : 0) || null;
+    const lastPushAt = Math.max(Number(kvLastPush || server.last_push_at || 0), machineOnline ? machineSeenAt : 0) || null;
     const availableStatus = nodeAvailableStatus(lastCheckAt, lastPushAt);
-    const loadStatus = parseKvObject(kvLoad);
+    const loadStatus = parseKvObject(kvLoad) || parseKvObject(kvMachineLoad) || (machine?.load_status ? parseJsonObject(machine.load_status) : null);
     const metrics = parseKvObject(kvMetrics);
     const groupIds = parseJsonArray(server.group_ids);
     const groups = [];
@@ -706,6 +715,7 @@ async function adminServerRows(env: Env) {
       tags: parseJsonArray(server.tags),
       groups,
       parent: server.parent_id ? servers.find(s => Number(s.id) === Number(server.parent_id)) || null : null,
+      machine: machine ? { ...machine, token: undefined, load_status: loadStatus } : null,
       last_check_at: lastCheckAt,
       last_push_at: lastPushAt,
       online: Number(kvOnline ?? server.online_user ?? 0),

@@ -184,9 +184,13 @@ async function etagResponse(request: Request, data: unknown) {
 async function touchNode(env: Env, node: Row) {
   const ts = now();
   await Promise.all([
-    env.XBOARD_KV.put(`node:last_check:${node.id}`, String(ts), { expirationTtl: 3600 }),
+    optionalKvPut(env, `node:last_check:${node.id}`, String(ts), { expirationTtl: 3600 }),
     env.XBOARD_DB.prepare("UPDATE v2_server SET last_check_at = ? WHERE id = ?").bind(ts, node.id).run()
   ]);
+}
+
+async function optionalKvPut(env: Env, key: string, value: string, options?: { expirationTtl?: number }) {
+  try { await env.XBOARD_KV.put(key, value, options); } catch { /* D1 and live reports remain authoritative. */ }
 }
 
 function currentRate(node: Row) {
@@ -208,8 +212,8 @@ async function enqueueTraffic(env: Env, node: Row, raw: unknown) {
   const ts = now();
   await env.TRAFFIC_EVENTS.send({ event_id: crypto.randomUUID(), type: "traffic", server_id: Number(node.id), server_type: String(node.type), rate: currentRate(node), payload, created_at: ts });
   await Promise.all([
-    env.XBOARD_KV.put(`node:last_push:${node.id}`, String(ts), { expirationTtl: 3600 }),
-    env.XBOARD_KV.put(`node:online:${node.id}`, String(payload.length), { expirationTtl: 3600 }),
+    optionalKvPut(env, `node:last_push:${node.id}`, String(ts), { expirationTtl: 3600 }),
+    optionalKvPut(env, `node:online:${node.id}`, String(payload.length), { expirationTtl: 3600 }),
     env.XBOARD_DB.prepare("UPDATE v2_server SET last_push_at = ?, online_user = ? WHERE id = ?").bind(ts, payload.length, node.id).run()
   ]);
 }
@@ -257,12 +261,12 @@ async function processStatus(env: Env, node: Row, status: unknown) {
     updated_at: now(),
     kernel_status: value.kernel_status ?? null
   };
-  await env.XBOARD_KV.put(`node:load:${node.id}`, JSON.stringify(load), { expirationTtl: Math.max(300, Number(await setting(env, "server_push_interval", "60")) * 3) });
+  await optionalKvPut(env, `node:load:${node.id}`, JSON.stringify(load), { expirationTtl: Math.max(300, Number(await setting(env, "server_push_interval", "60")) * 3) });
 }
 
 async function processMetrics(env: Env, node: Row, metrics: unknown) {
   if (!metrics || typeof metrics !== "object" || Array.isArray(metrics)) return;
-  await env.XBOARD_KV.put(`node:metrics:${node.id}`, JSON.stringify({ ...(metrics as Row), updated_at: now() }), { expirationTtl: Math.max(300, Number(await setting(env, "server_push_interval", "60")) * 3) });
+  await optionalKvPut(env, `node:metrics:${node.id}`, JSON.stringify({ ...(metrics as Row), updated_at: now() }), { expirationTtl: Math.max(300, Number(await setting(env, "server_push_interval", "60")) * 3) });
 }
 
 function validateStatus(input: Row, optional = false): Response | null {
@@ -373,7 +377,7 @@ async function saveMachineStatus(env: Env, machine: Row, input: Row) {
     env.XBOARD_DB.prepare("INSERT INTO v2_server_machine_load_history(machine_id, cpu, mem_total, mem_used, disk_total, disk_used, net_in_speed, net_out_speed, recorded_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(machine.id, load.cpu, load.mem.total, load.mem.used, load.disk.total, load.disk.used, load.net?.in_speed ?? null, load.net?.out_speed ?? null, recordedAt, recordedAt, recordedAt),
     env.XBOARD_DB.prepare("DELETE FROM v2_server_machine_load_history WHERE machine_id = ? AND recorded_at < ?").bind(machine.id, recordedAt - 86400)
   ]);
-  await env.XBOARD_KV.put(`machine:load:${machine.id}`, JSON.stringify(load), { expirationTtl: 3600 });
+  await optionalKvPut(env, `machine:load:${machine.id}`, JSON.stringify(load), { expirationTtl: 3600 });
 }
 
 async function internalToken(env: Env) {
