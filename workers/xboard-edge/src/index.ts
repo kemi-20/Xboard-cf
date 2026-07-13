@@ -613,6 +613,35 @@ async function adminMachineRows(env: Env) {
   return out;
 }
 
+function machineInstallCommand(request: Request, machineToken: string) {
+  const origin = new URL(request.url).origin;
+  return `curl -fsSL ${origin}/api/v2/server/machine/install | sh -s -- --token ${machineToken}`;
+}
+
+async function saveMachine(request: Request, env: Env) {
+  const input = await body<Record<string, any>>(request);
+  const id = nullableNumber(input.id);
+  const name = String(input.name || "").trim();
+  if (!name) return fail("服务器名称不能为空", 422, 422);
+  const notes = isNilLike(input.notes) ? null : String(input.notes);
+  const isActive = boolNumber(input.is_active ?? input.enabled, 1);
+  const ts = now();
+  if (id) {
+    const existing = await env.XBOARD_DB.prepare("SELECT id FROM v2_server_machine WHERE id = ?").bind(id).first();
+    if (!existing) return fail("服务器不存在", 404, 400202);
+    const result = await env.XBOARD_DB.prepare("UPDATE v2_server_machine SET name = ?, notes = ?, is_active = ?, enabled = ?, updated_at = ? WHERE id = ?")
+      .bind(name, notes, isActive, isActive, ts, id).run();
+    if (!result.success) return fail("保存服务器失败", 500, 500);
+    return ok(true);
+  }
+  const machineToken = token(32);
+  const result = await env.XBOARD_DB.prepare("INSERT INTO v2_server_machine(name, notes, token, enabled, is_active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .bind(name, notes, machineToken, isActive, isActive, ts, ts).run();
+  if (!result.success) return fail("保存服务器失败", 500, 500);
+  const machine = await env.XBOARD_DB.prepare("SELECT id FROM v2_server_machine WHERE token = ?").bind(machineToken).first<{ id: number }>();
+  return ok({ id: machine?.id, token: machineToken, install_command: machineInstallCommand(request, machineToken) });
+}
+
 function nullableNumber(value: unknown): number | null {
   if (value === "" || value === null || value === undefined || value === "null") return null;
   const n = Number(value);
@@ -893,15 +922,29 @@ async function adminApi(request: Request, env: Env, path: string) {
     return ok(true);
   }
   if (path.includes("/server/manage/copy")) return copyServer(request, env);
+  if (path.includes("/server/machine/save")) return saveMachine(request, env);
   if (path.includes("/server/machine/nodes")) {
     const machineId = Number(new URL(request.url).searchParams.get("machine_id") || 0);
     const data = machineId ? (await rows(env.XBOARD_DB, "v2_server", 1000) as any[]).filter(row => Number(row.machine_id || 0) === machineId) : [];
     return ok(data);
   }
   if (path.includes("/server/machine/history")) return ok([]);
-  if (path.includes("/server/machine/getToken")) return ok({ token: "" });
-  if (path.includes("/server/machine/installCommand")) return ok({ command: "" });
-  if (path.includes("/server/machine/resetToken")) return ok({ token: token(24) });
+  if (path.includes("/server/machine/getToken")) {
+    const input = await body<Record<string, any>>(request.clone());
+    const machine = await env.XBOARD_DB.prepare("SELECT token FROM v2_server_machine WHERE id = ?").bind(input.id).first<{ token: string }>();
+    return machine ? ok({ token: machine.token }) : fail("服务器不存在", 404, 400202);
+  }
+  if (path.includes("/server/machine/installCommand")) {
+    const input = await body<Record<string, any>>(request.clone());
+    const machine = await env.XBOARD_DB.prepare("SELECT token FROM v2_server_machine WHERE id = ?").bind(input.id).first<{ token: string }>();
+    return machine ? ok({ command: machineInstallCommand(request, machine.token) }) : fail("服务器不存在", 404, 400202);
+  }
+  if (path.includes("/server/machine/resetToken")) {
+    const input = await body<Record<string, any>>(request.clone());
+    const machineToken = token(32);
+    const result = await env.XBOARD_DB.prepare("UPDATE v2_server_machine SET token = ?, updated_at = ? WHERE id = ?").bind(machineToken, now(), input.id).run();
+    return result.success ? ok({ token: machineToken }) : fail("服务器不存在", 404, 400202);
+  }
   if (path.includes("/server/manage/generateEchKey")) return ok({ key: "", config: "" });
   if (path.includes("/user/resetSecret")) {
     const input = await body<Record<string, any>>(request.clone());
