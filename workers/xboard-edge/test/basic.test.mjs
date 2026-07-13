@@ -43,6 +43,19 @@ test("bootstrap preserves renamed default groups", () => {
   assert.match(source, /INSERT INTO v2_server_group[\s\S]*?ON CONFLICT\(id\) DO NOTHING/);
 });
 
+test("bootstrap never overwrites an existing customized default plan", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const seed = fs.readFileSync("../../schema/seed.sql", "utf8");
+  assert.match(source, /INSERT INTO v2_plan[\s\S]*?ON CONFLICT\(id\) DO NOTHING/);
+  assert.match(seed, /INSERT INTO v2_plan[\s\S]*?ON CONFLICT\(id\) DO NOTHING/);
+  assert.doesNotMatch(source, /ON CONFLICT\(id\) DO UPDATE SET group_id = excluded\.group_id, transfer_enable = excluded\.transfer_enable, name = excluded\.name/);
+});
+
+test("cache version bumps cannot turn successful D1 saves into API errors", () => {
+  const source = fs.readFileSync("src/kv.ts", "utf8");
+  assert.match(source, /try[\s\S]*await kv\.put\(key, String\(Date\.now\(\)\)\)[\s\S]*catch/);
+});
+
 test("node protocol paths are proxied through the xboard-server service binding", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   const wrangler = fs.readFileSync("wrangler.toml", "utf8");

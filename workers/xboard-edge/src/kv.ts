@@ -1,6 +1,10 @@
 import type { KVNamespace } from "./types";
 export async function bump(kv: KVNamespace, key: string) {
-  await kv.put(key, String(Date.now()));
+  try {
+    await kv.put(key, String(Date.now()));
+  } catch {
+    // Version keys only invalidate caches; D1 writes must still succeed when KV is unavailable or over quota.
+  }
 }
 export async function cached<T>(kv: KVNamespace, key: string, ttl: number, load: () => Promise<T>): Promise<T> {
   const hit = await kv.get(key);

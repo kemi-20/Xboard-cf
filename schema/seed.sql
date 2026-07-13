@@ -81,15 +81,8 @@ INSERT INTO v2_server_group(id, name, created_at, updated_at) VALUES
 ON CONFLICT(id) DO NOTHING;
 
 INSERT INTO v2_plan(id, group_id, transfer_enable, name, speed_limit, device_limit, capacity_limit, reset_traffic_method, prices, content, tags, show, sell, renew, sort, created_at, updated_at) VALUES
-(1, 1, 1099511627776, 'Default Trial', NULL, NULL, NULL, 0, '{"monthly":0}', 'Default seeded plan for first-run compatibility.', '[]', 1, 1, 1, 1, unixepoch(), unixepoch())
-ON CONFLICT(id) DO UPDATE SET
-  group_id = excluded.group_id,
-  transfer_enable = excluded.transfer_enable,
-  name = excluded.name,
-  show = excluded.show,
-  sell = excluded.sell,
-  renew = excluded.renew,
-  updated_at = unixepoch();
+(1, 1, 1024, 'Default Trial', NULL, NULL, NULL, 0, '{}', 'Default seeded plan for first-run compatibility.', '[]', 1, 1, 1, 1, unixepoch(), unixepoch())
+ON CONFLICT(id) DO NOTHING;
 
 INSERT INTO v2_user(email, password, password_algo, password_salt, uuid, token, transfer_enable, u, d, is_admin, is_staff, plan_id, group_id, remind_expire, remind_traffic, created_at, updated_at)
 VALUES ('admin@admin.com', 'pbkdf2$sha256$100000$xboard-cloudflare-admin$8abd89496c7d7b0cfdc7b786fd49da099859e1167bbcf9f945c38415d6d56268', 'pbkdf2', 'xboard-cloudflare-admin', '00000000-0000-4000-8000-000000000001', 'admin-default-token-change-me', 1099511627776, 0, 0, 1, 1, 1, 1, 1, 1, unixepoch(), unixepoch())
