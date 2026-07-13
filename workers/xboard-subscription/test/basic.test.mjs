@@ -8,6 +8,11 @@ test("xboard-subscription has an entrypoint", () => {
   assert.match(fs.readFileSync("src/index.ts", "utf8"), /export default/);
 });
 
+test("legacy client subscribe reads the query token instead of the route name", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /url\.pathname === "\/api\/v1\/client\/subscribe"[\s\S]*url\.searchParams\.get\("token"\)/);
+});
+
 test("subscription output reads saved settings and templates", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /await loadSettings\(env\.XBOARD_DB\)/);

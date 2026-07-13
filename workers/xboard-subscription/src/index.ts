@@ -444,7 +444,9 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/health") return new Response(JSON.stringify({ data: { service: "xboard-subscription", time: now() } }), { headers: { "content-type": "application/json" } });
-    const token = url.pathname.split("/").filter(Boolean).pop() || url.searchParams.get("token") || "";
+    const token = url.pathname === "/api/v1/client/subscribe"
+      ? url.searchParams.get("token") || ""
+      : url.pathname.split("/").filter(Boolean).pop() || url.searchParams.get("token") || "";
     if (!token) return fail("Token required", 400);
     const user = await env.XBOARD_DB.prepare("SELECT id FROM v2_user WHERE token = ?").bind(token).first<any>();
     if (!user) return new Response("Forbidden", { status: 403 });
