@@ -228,8 +228,17 @@ FINAL,Proxy
 };
 
 async function ensureBootstrap(env: Env) {
-  const marker = await env.XBOARD_KV.get("bootstrap:edge:v6");
+  const marker = await optionalKvGet(env, "bootstrap:edge:v6");
   if (marker) return;
+  try {
+    const persisted = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = 'system_bootstrap_edge_version'").first<{ value: string }>();
+    if (persisted?.value === "v6") {
+      await optionalKvPut(env, "bootstrap:edge:v6", String(now()));
+      return;
+    }
+  } catch {
+    // The schema initializer may be running against a database that has not created v2_settings yet.
+  }
   const alters = [
     "ALTER TABLE v2_user ADD COLUMN speed_limit INTEGER DEFAULT NULL",
     "ALTER TABLE v2_user ADD COLUMN discount INTEGER DEFAULT NULL",
@@ -317,7 +326,8 @@ async function ensureBootstrap(env: Env) {
     await runSqlIgnore(env, "INSERT INTO v2_subscribe_templates(name, type, content, template, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?) ON CONFLICT(name) DO UPDATE SET content = CASE WHEN v2_subscribe_templates.content IS NULL OR v2_subscribe_templates.content = '' THEN excluded.content ELSE v2_subscribe_templates.content END, template = CASE WHEN v2_subscribe_templates.template IS NULL OR v2_subscribe_templates.template = '' THEN excluded.template ELSE v2_subscribe_templates.template END, enabled = 1, updated_at = excluded.updated_at", [name, name, content, content, ts, ts]);
     await runSqlIgnore(env, "INSERT INTO v2_subscribe_templates(name, content, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET content = CASE WHEN v2_subscribe_templates.content IS NULL OR v2_subscribe_templates.content = '' THEN excluded.content ELSE v2_subscribe_templates.content END, updated_at = excluded.updated_at", [name, content, ts, ts]);
   }
-  await env.XBOARD_KV.put("bootstrap:edge:v6", String(ts));
+  await runSqlIgnore(env, "INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES ('system_bootstrap_edge_version', 'v6', ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at", [ts, ts]);
+  await optionalKvPut(env, "bootstrap:edge:v6", String(ts));
 }
 
 async function firstNumber(env: Env, sql: string, fallback = 0) {
@@ -829,6 +839,10 @@ function parseKvObject(value: string | null) {
 
 async function optionalKvGet(env: Env, key: string) {
   try { return await env.XBOARD_KV.get(key); } catch { return null; }
+}
+
+async function optionalKvPut(env: Env, key: string, value: string) {
+  try { await env.XBOARD_KV.put(key, value); } catch { /* D1 remains the source of truth when KV is unavailable. */ }
 }
 
 async function adminServerRows(env: Env) {

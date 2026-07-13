@@ -157,3 +157,10 @@ test("login sessions fall back to D1 when KV writes fail", () => {
   assert.ok(d1Insert >= 0 && kvWrite > d1Insert);
   assert.match(source.slice(kvWrite - 20, kvWrite + 500), /try[\s\S]*await kv\.put[\s\S]*catch/);
 });
+
+test("bootstrap remains available when the KV daily write limit is exhausted", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /system_bootstrap_edge_version/);
+  assert.match(source, /await optionalKvPut\(env, "bootstrap:edge:v6"/);
+  assert.doesNotMatch(source, /await env\.XBOARD_KV\.put\("bootstrap:edge:v6"/);
+});
