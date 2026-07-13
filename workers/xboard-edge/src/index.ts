@@ -667,15 +667,22 @@ async function adminMachineRows(env: Env) {
       notes: machine.notes || "",
       is_active: Boolean(Number(machine.is_active ?? machine.enabled ?? 1)),
       last_seen_at: machine.last_seen_at || null,
+      load_status: machine.load_status ? parseJsonObject(machine.load_status) : null,
       servers_count: await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_server WHERE machine_id = ${Number(machine.id)}`)
     });
   }
   return out;
 }
 
-function machineInstallCommand(request: Request, machineToken: string) {
-  const origin = new URL(request.url).origin;
-  return `curl -fsSL ${origin}/api/v2/server/machine/install | sh -s -- --token ${machineToken}`;
+function shellQuote(value: string) {
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+async function machineInstallCommand(request: Request, env: Env, machineToken: string, machineId: number) {
+  const configured = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = 'app_url'").first<{ value: string }>();
+  const panelUrl = String(configured?.value || new URL(request.url).origin).replace(/\/$/, "");
+  const installerUrl = "https://raw.githubusercontent.com/cedar2025/xboard-node/dev/install.sh";
+  return `curl -fsSL ${installerUrl} | sudo bash -s -- --mode machine --panel ${shellQuote(panelUrl)} --token ${shellQuote(machineToken)} --machine-id ${machineId}`;
 }
 
 async function saveMachine(request: Request, env: Env) {
@@ -699,7 +706,7 @@ async function saveMachine(request: Request, env: Env) {
     .bind(name, notes, machineToken, isActive, isActive, ts, ts).run();
   if (!result.success) return fail("保存服务器失败", 500, 500);
   const machine = await env.XBOARD_DB.prepare("SELECT id FROM v2_server_machine WHERE token = ?").bind(machineToken).first<{ id: number }>();
-  return ok({ id: machine?.id, token: machineToken, install_command: machineInstallCommand(request, machineToken) });
+  return ok({ id: machine?.id, token: machineToken, install_command: await machineInstallCommand(request, env, machineToken, Number(machine?.id)) });
 }
 
 function nullableNumber(value: unknown): number | null {
@@ -990,14 +997,16 @@ async function adminApi(request: Request, env: Env, path: string) {
   }
   if (path.includes("/server/machine/history")) return ok([]);
   if (path.includes("/server/machine/getToken")) {
-    const input = await body<Record<string, any>>(request.clone());
-    const machine = await env.XBOARD_DB.prepare("SELECT token FROM v2_server_machine WHERE id = ?").bind(input.id).first<{ token: string }>();
+    const id = nullableNumber(new URL(request.url).searchParams.get("id"));
+    if (!id) return fail("id 字段是必须的", 422, 422);
+    const machine = await env.XBOARD_DB.prepare("SELECT token FROM v2_server_machine WHERE id = ?").bind(id).first<{ token: string }>();
     return machine ? ok({ token: machine.token }) : fail("服务器不存在", 404, 400202);
   }
   if (path.includes("/server/machine/installCommand")) {
-    const input = await body<Record<string, any>>(request.clone());
-    const machine = await env.XBOARD_DB.prepare("SELECT token FROM v2_server_machine WHERE id = ?").bind(input.id).first<{ token: string }>();
-    return machine ? ok({ command: machineInstallCommand(request, machine.token) }) : fail("服务器不存在", 404, 400202);
+    const id = nullableNumber(new URL(request.url).searchParams.get("id"));
+    if (!id) return fail("id 字段是必须的", 422, 422);
+    const machine = await env.XBOARD_DB.prepare("SELECT token FROM v2_server_machine WHERE id = ?").bind(id).first<{ token: string }>();
+    return machine ? ok({ command: await machineInstallCommand(request, env, machine.token, id) }) : fail("服务器不存在", 404, 400202);
   }
   if (path.includes("/server/machine/resetToken")) {
     const input = await body<Record<string, any>>(request.clone());

@@ -45,3 +45,13 @@ test("node protocol paths are proxied through the xboard-server service binding"
   assert.match(wrangler, /binding = "XBOARD_SERVER"/);
   assert.match(wrangler, /service = "xboard-server"/);
 });
+
+test("machine detail GET endpoints read ids from query parameters", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const getToken = source.slice(source.indexOf('if (path.includes("/server/machine/getToken"))'), source.indexOf('if (path.includes("/server/machine/installCommand"))'));
+  const installCommand = source.slice(source.indexOf('if (path.includes("/server/machine/installCommand"))'), source.indexOf('if (path.includes("/server/machine/resetToken"))'));
+  assert.match(getToken, /new URL\(request\.url\)\.searchParams\.get\("id"\)/);
+  assert.match(installCommand, /new URL\(request\.url\)\.searchParams\.get\("id"\)/);
+  assert.match(source, /--mode machine --panel/);
+  assert.match(source, /--machine-id \$\{machineId\}/);
+});
