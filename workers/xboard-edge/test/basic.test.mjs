@@ -97,3 +97,14 @@ test("route fetch returns match rules as an array", () => {
   assert.match(source, /match: routeMatchArray\(route\.match\)/);
   assert.match(source, /suffix === "\/server\/route\/fetch"\) return ok\(await adminRouteRows\(env\)\)/);
 });
+
+test("node list exposes upstream-compatible health and load fields", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /function nodeAvailableStatus\(lastCheckAt: number \| null, lastPushAt: number \| null/);
+  assert.match(source, /timestamp - 300 >= lastCheckAt/);
+  assert.match(source, /readState\("last_check"\)/);
+  assert.match(source, /readState\("last_push"\)/);
+  assert.match(source, /available_status: availableStatus/);
+  assert.match(source, /load_status: loadStatus/);
+  assert.match(source, /online_conn: Number\(metrics\?\.active_connections \|\| 0\)/);
+});

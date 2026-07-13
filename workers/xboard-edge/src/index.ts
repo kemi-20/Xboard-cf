@@ -661,10 +661,38 @@ async function adminRouteRows(env: Env) {
   }));
 }
 
+function nodeAvailableStatus(lastCheckAt: number | null, lastPushAt: number | null, timestamp = now()) {
+  if (!lastCheckAt || timestamp - 300 >= lastCheckAt) return 0;
+  if (!lastPushAt || timestamp - 300 >= lastPushAt) return 1;
+  return 2;
+}
+
+function parseKvObject(value: string | null) {
+  return value ? parseJsonObject(value) : null;
+}
+
 async function adminServerRows(env: Env) {
   const servers = await rows(env.XBOARD_DB, "v2_server", 1000) as any[];
   const out = [];
   for (const server of servers) {
+    const stateId = Number(server.parent_id || server.id);
+    const ownId = Number(server.id);
+    const readState = async (key: string) => {
+      const inherited = await env.XBOARD_KV.get(`node:${key}:${stateId}`);
+      return inherited ?? (stateId !== ownId ? await env.XBOARD_KV.get(`node:${key}:${ownId}`) : null);
+    };
+    const [kvLastCheck, kvLastPush, kvOnline, kvLoad, kvMetrics] = await Promise.all([
+      readState("last_check"),
+      readState("last_push"),
+      readState("online"),
+      readState("load"),
+      readState("metrics")
+    ]);
+    const lastCheckAt = Number(kvLastCheck || server.last_check_at || 0) || null;
+    const lastPushAt = Number(kvLastPush || server.last_push_at || 0) || null;
+    const availableStatus = nodeAvailableStatus(lastCheckAt, lastPushAt);
+    const loadStatus = parseKvObject(kvLoad);
+    const metrics = parseKvObject(kvMetrics);
     const groupIds = parseJsonArray(server.group_ids);
     const groups = [];
     for (const id of groupIds) {
@@ -678,7 +706,15 @@ async function adminServerRows(env: Env) {
       tags: parseJsonArray(server.tags),
       groups,
       parent: server.parent_id ? servers.find(s => Number(s.id) === Number(server.parent_id)) || null : null,
-      online: Number(server.online_user || 0)
+      last_check_at: lastCheckAt,
+      last_push_at: lastPushAt,
+      online: Number(kvOnline ?? server.online_user ?? 0),
+      is_online: availableStatus === 0 ? 0 : 1,
+      available_status: availableStatus,
+      cache_key: `${server.type}-${server.id}-${server.updated_at}-${availableStatus === 0 ? 0 : 1}`,
+      load_status: loadStatus,
+      metrics,
+      online_conn: Number(metrics?.active_connections || 0)
     });
   }
   return out;
