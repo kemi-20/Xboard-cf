@@ -1,4 +1,4 @@
-import type { KVNamespace } from "./types";
+import type { KVNamespace } from "./types.ts";
 export async function bump(kv: KVNamespace, key: string) {
   await kv.put(key, String(Date.now()));
 }

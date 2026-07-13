@@ -4,11 +4,14 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --test test/basic.test.mjs",
+    "test": "node --experimental-strip-types --test test/basic.test.mjs",
     "deploy": "wrangler deploy"
   },
   "devDependencies": {
     "typescript": "^5.9.2",
     "wrangler": "^4.53.0"
+  },
+  "dependencies": {
+    "yaml": "^2.9.0"
   }
 }

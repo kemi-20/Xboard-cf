@@ -1,4 +1,4 @@
-import type { D1Database } from "./types";
+import type { D1Database } from "./types.ts";
 export async function list(db: D1Database, table: string, page = 1, pageSize = 20) {
   const safe = table.replace(/[^a-zA-Z0-9_]/g, "");
   const offset = Math.max(0, page - 1) * pageSize;
