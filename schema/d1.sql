@@ -151,6 +151,7 @@ CREATE TABLE IF NOT EXISTS v2_server (
   last_check_at INTEGER,
   last_push_at INTEGER,
   online_user INTEGER NOT NULL DEFAULT 0,
+  metrics TEXT,
   u INTEGER NOT NULL DEFAULT 0,
   d INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,

@@ -228,12 +228,12 @@ FINAL,Proxy
 };
 
 async function ensureBootstrap(env: Env) {
-  const marker = await optionalKvGet(env, "bootstrap:edge:v6");
+  const marker = await optionalKvGet(env, "bootstrap:edge:v7");
   if (marker) return;
   try {
     const persisted = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = 'system_bootstrap_edge_version'").first<{ value: string }>();
-    if (persisted?.value === "v6") {
-      await optionalKvPut(env, "bootstrap:edge:v6", String(now()));
+    if (persisted?.value === "v7") {
+      await optionalKvPut(env, "bootstrap:edge:v7", String(now()));
       return;
     }
   } catch {
@@ -259,6 +259,7 @@ async function ensureBootstrap(env: Env) {
     "ALTER TABLE v2_server ADD COLUMN listen_address TEXT",
     "ALTER TABLE v2_server ADD COLUMN rate_time_enable INTEGER DEFAULT 0",
     "ALTER TABLE v2_server ADD COLUMN rate_time_ranges TEXT",
+    "ALTER TABLE v2_server ADD COLUMN metrics TEXT",
     "ALTER TABLE v2_server ADD COLUMN transfer_enable INTEGER DEFAULT 0",
     "ALTER TABLE v2_server ADD COLUMN excludes TEXT",
     "ALTER TABLE v2_server ADD COLUMN ips TEXT",
@@ -326,8 +327,8 @@ async function ensureBootstrap(env: Env) {
     await runSqlIgnore(env, "INSERT INTO v2_subscribe_templates(name, type, content, template, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?) ON CONFLICT(name) DO UPDATE SET content = CASE WHEN v2_subscribe_templates.content IS NULL OR v2_subscribe_templates.content = '' THEN excluded.content ELSE v2_subscribe_templates.content END, template = CASE WHEN v2_subscribe_templates.template IS NULL OR v2_subscribe_templates.template = '' THEN excluded.template ELSE v2_subscribe_templates.template END, enabled = 1, updated_at = excluded.updated_at", [name, name, content, content, ts, ts]);
     await runSqlIgnore(env, "INSERT INTO v2_subscribe_templates(name, content, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET content = CASE WHEN v2_subscribe_templates.content IS NULL OR v2_subscribe_templates.content = '' THEN excluded.content ELSE v2_subscribe_templates.content END, updated_at = excluded.updated_at", [name, content, ts, ts]);
   }
-  await runSqlIgnore(env, "INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES ('system_bootstrap_edge_version', 'v6', ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at", [ts, ts]);
-  await optionalKvPut(env, "bootstrap:edge:v6", String(ts));
+  await runSqlIgnore(env, "INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES ('system_bootstrap_edge_version', 'v7', ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at", [ts, ts]);
+  await optionalKvPut(env, "bootstrap:edge:v7", String(ts));
 }
 
 async function firstNumber(env: Env, sql: string, fallback = 0) {
@@ -871,7 +872,7 @@ async function adminServerRows(env: Env) {
     const lastPushAt = Math.max(Number(kvLastPush || server.last_push_at || 0), machineOnline ? machineSeenAt : 0) || null;
     const availableStatus = nodeAvailableStatus(lastCheckAt, lastPushAt);
     const loadStatus = parseKvObject(kvLoad) || parseKvObject(kvMachineLoad) || (machine?.load_status ? parseJsonObject(machine.load_status) : null);
-    const metrics = parseKvObject(kvMetrics) || (loadStatus?.metrics && typeof loadStatus.metrics === "object" ? loadStatus.metrics : null);
+    const metrics = parseKvObject(kvMetrics) || parseKvObject(server.metrics) || (loadStatus?.metrics && typeof loadStatus.metrics === "object" ? loadStatus.metrics : null);
     const groupIds = parseJsonArray(server.group_ids);
     const groups = [];
     for (const id of groupIds) {

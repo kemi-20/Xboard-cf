@@ -269,7 +269,14 @@ async function processStatus(env: Env, node: Row, status: unknown) {
 
 async function processMetrics(env: Env, node: Row, metrics: unknown) {
   if (!metrics || typeof metrics !== "object" || Array.isArray(metrics)) return;
-  await optionalKvPut(env, `node:metrics:${node.id}`, JSON.stringify({ ...(metrics as Row), updated_at: now() }), { expirationTtl: Math.max(300, Number(await setting(env, "server_push_interval", "60")) * 3) });
+  const timestamp = now();
+  const value = JSON.stringify({ ...(metrics as Row), updated_at: timestamp });
+  try {
+    await env.XBOARD_DB.prepare("UPDATE v2_server SET metrics = ?, last_push_at = ?, updated_at = ? WHERE id = ?").bind(value, timestamp, timestamp, node.id).run();
+  } catch {
+    // Older databases are migrated by xboard-edge bootstrap; KV still serves metrics during that window.
+  }
+  await optionalKvPut(env, `node:metrics:${node.id}`, value, { expirationTtl: Math.max(300, Number(await setting(env, "server_push_interval", "60")) * 3) });
 }
 
 function validateStatus(input: Row, optional = false): Response | null {

@@ -161,6 +161,12 @@ test("login sessions fall back to D1 when KV writes fail", () => {
 test("bootstrap remains available when the KV daily write limit is exhausted", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /system_bootstrap_edge_version/);
-  assert.match(source, /await optionalKvPut\(env, "bootstrap:edge:v6"/);
-  assert.doesNotMatch(source, /await env\.XBOARD_KV\.put\("bootstrap:edge:v6"/);
+  assert.match(source, /await optionalKvPut\(env, "bootstrap:edge:v7"/);
+  assert.doesNotMatch(source, /await env\.XBOARD_KV\.put\("bootstrap:edge:v7"/);
+});
+
+test("node metrics fall back to D1 when KV writes are unavailable", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /parseKvObject\(kvMetrics\) \|\| parseKvObject\(server\.metrics\)/);
+  assert.match(source, /ALTER TABLE v2_server ADD COLUMN metrics TEXT/);
 });

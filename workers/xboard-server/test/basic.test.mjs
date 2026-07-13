@@ -33,3 +33,9 @@ test("node status accepts official flat metrics and nested status payloads", () 
   assert.match(source, /if \(status\) await processStatus/);
   assert.match(source, /await processMetrics/);
 });
+
+test("node metrics persist to D1 when KV is unavailable", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /UPDATE v2_server SET metrics = \?, last_push_at = \?, updated_at = \?/);
+  assert.match(source, /await optionalKvPut\(env, `node:metrics:\$\{node\.id\}`, value/);
+});
