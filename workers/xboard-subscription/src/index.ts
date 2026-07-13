@@ -212,8 +212,9 @@ function proxyLine(user: any, server: any, style: "surge" | "surfboard") {
 
 function subscriptionUrl(request: Request, config: Config, token: string) {
   const configured = String(config.subscribe_url || "").split(",").map(value => value.trim()).filter(Boolean)[0];
-  if (!configured) return request.url;
-  return `${configured.replace(/\/$/, "")}/s/${token}`;
+  const path = String(config.subscribe_path || "s").replace(/^\/+|\/+$/g, "") || "s";
+  if (!configured) return `${new URL(request.url).origin}/${path}/${token}`;
+  return `${configured.replace(/\/$/, "")}/${path}/${token}`;
 }
 
 function subscribeInfo(config: Config, user: any) {

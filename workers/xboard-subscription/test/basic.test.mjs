@@ -55,9 +55,9 @@ test("saved Clash template controls rendered subscription", () => {
 });
 
 test("saved Surge template placeholders are replaced", () => {
-  const rendered = __test.textTemplateProfile("surge", "$app_name\n$subs_link\n$proxies\n$proxy_group\n$subscribe_info", { app_name: "Custom Board", subscribe_url: "https://subscribe.example" }, { uuid: "uuid", u: 0, d: 0, transfer_enable: 1073741824, expired_at: null }, [{ type: "shadowsocks", name: "Node A", host: "127.0.0.1", port: 8388, protocol_settings: { cipher: "aes-128-gcm" } }], new Request("https://worker.example/s/token"), "token");
+  const rendered = __test.textTemplateProfile("surge", "$app_name\n$subs_link\n$proxies\n$proxy_group\n$subscribe_info", { app_name: "Custom Board", subscribe_url: "https://subscribe.example", subscribe_path: "custom-sub" }, { uuid: "uuid", u: 0, d: 0, transfer_enable: 1073741824, expired_at: null }, [{ type: "shadowsocks", name: "Node A", host: "127.0.0.1", port: 8388, protocol_settings: { cipher: "aes-128-gcm" } }], new Request("https://worker.example/s/token"), "token");
   assert.match(rendered, /Custom Board/);
-  assert.match(rendered, /https:\/\/subscribe\.example\/s\/token/);
+  assert.match(rendered, /https:\/\/subscribe\.example\/custom-sub\/token/);
   assert.match(rendered, /Node A = ss/);
   assert.doesNotMatch(rendered, /\$(app_name|subs_link|proxies|proxy_group|subscribe_info)/);
 });

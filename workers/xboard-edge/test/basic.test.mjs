@@ -63,3 +63,11 @@ test("machine tokens match Laravel Str::random(32) format", () => {
   assert.match(compat, /ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/);
   assert.match(compat, /export function randomString\(length = 32\)/);
 });
+
+test("generated subscription URLs honor configured domain and path", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /name IN \('subscribe_url', 'subscribe_path'\)/);
+  assert.match(source, /values\.subscribe_url/);
+  assert.match(source, /values\.subscribe_path/);
+  assert.match(source, /await subscribeUrl\(request, env,/);
+});

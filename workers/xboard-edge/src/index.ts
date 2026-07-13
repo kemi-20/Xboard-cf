@@ -459,9 +459,12 @@ function paginated<T extends Record<string, any>>(data: T[], total: number, page
   };
 }
 
-function subscribeUrl(request: Request, userToken: string) {
-  const url = new URL(request.url);
-  return `${url.origin}/s/${userToken}`;
+async function subscribeUrl(request: Request, env: Env, userToken: string) {
+  const configured = await env.XBOARD_DB.prepare("SELECT name, value FROM v2_settings WHERE name IN ('subscribe_url', 'subscribe_path')").all<{ name: string; value: string }>();
+  const values = Object.fromEntries((configured.results || []).map(row => [row.name, row.value || ""]));
+  const base = String(values.subscribe_url || new URL(request.url).origin).split(",").map(value => value.trim()).filter(Boolean)[0];
+  const path = String(values.subscribe_path || "s").replace(/^\/+|\/+$/g, "") || "s";
+  return `${base.replace(/\/$/, "")}/${path}/${userToken}`;
 }
 
 async function subscribeTemplateMap(env: Env) {
@@ -609,7 +612,7 @@ async function adminUserList(env: Env, request: Request) {
       commission_balance: Number(row.commission_balance || 0) / 100,
       total_used: Number(row.u || 0) + Number(row.d || 0),
       used_traffic: Number(row.u || 0) + Number(row.d || 0),
-      subscribe_url: subscribeUrl(request, row.token),
+      subscribe_url: await subscribeUrl(request, env, row.token),
       plan,
       group,
       invite_user: null,
@@ -1095,7 +1098,7 @@ async function userApi(request: Request, env: Env, path: string) {
   if (!user) return fail("未授权", 401, 401);
   if (path.includes("/user/info")) return ok(safeUser(user as Record<string, any>));
   if (path.includes("/user/checkLogin")) return ok(true);
-  if (path.includes("/user/getSubscribe")) return ok({ subscribe_url: subscribeUrl(request, (user as any).token), token: (user as any).token });
+  if (path.includes("/user/getSubscribe")) return ok({ subscribe_url: await subscribeUrl(request, env, (user as any).token), token: (user as any).token });
   if (path.includes("/user/getStat")) return ok({ u: (user as any).u || 0, d: (user as any).d || 0, transfer_enable: (user as any).transfer_enable || 0 });
   if (path.includes("/user/resetSecurity")) {
     const newToken = token(16);
