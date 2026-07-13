@@ -11,3 +11,4 @@ dist/
 !.env.example
 bugs.md
 .agnets/
+README_FOR_AGNET.md
