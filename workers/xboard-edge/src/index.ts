@@ -605,7 +605,7 @@ async function adminMachineRows(env: Env) {
     out.push({
       ...machine,
       notes: machine.notes || "",
-      is_active: machine.is_active ?? machine.enabled ?? 1,
+      is_active: Boolean(Number(machine.is_active ?? machine.enabled ?? 1)),
       last_seen_at: machine.last_seen_at || null,
       servers_count: await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_server WHERE machine_id = ${Number(machine.id)}`)
     });
