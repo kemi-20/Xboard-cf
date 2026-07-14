@@ -332,7 +332,7 @@ async function manualExport() {
 }
 
 async function migrateSqlite() {
-  const batchSize = 50;
+  const batchSize = 100;
   for (const table of state.tables) {
     const count = Number(state.counts[table] || 0);
     for (let offset = 0; offset < count; offset += batchSize) {
@@ -451,7 +451,7 @@ async function rollback() {
       let offset = 0;
       do {
         state.phase = "rollback_restore"; state.table = table; state.offset = offset;
-        const result = await api("/rollback/table", { method: "POST", body: JSON.stringify({ run_id: state.runId, table, offset, limit: 50 }) });
+        const result = await api("/rollback/table", { method: "POST", body: JSON.stringify({ run_id: state.runId, table, offset, limit: 100 }) });
         offset = Number(result.next_offset || offset + Number(result.restored || 0));
         state.done += Number(result.restored || 0);
         updateProgress(`还原 ${table}: ${Math.min(offset, expected)}/${expected}`);

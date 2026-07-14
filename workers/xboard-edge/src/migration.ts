@@ -596,7 +596,7 @@ async function rollbackTable(request: Request, env: MigrationEnv) {
   const input = await body<Record<string, unknown>>(request);
   const runId = String(input.run_id || "");
   const table = String(input.table || "");
-  const limit = Math.min(100, Math.max(1, Number(input.limit || 50)));
+  const limit = Math.min(100, Math.max(1, Number(input.limit || 100)));
   const offset = Math.max(0, Number(input.offset || 0));
   if (!runId || !tableSet.has(table)) return fail("无效的还原任务或数据表", 422, 422);
   const run = await migrationRun(env, runId);

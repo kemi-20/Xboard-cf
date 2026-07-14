@@ -299,6 +299,8 @@ test("migration UI parses SQLite and Redis backups locally", () => {
   assert.match(page, /id="skip-backup"/);
   assert.match(app, /skip_backup: state\.skipBackup/);
   assert.match(app, /本次迁移无法一键还原/);
+  assert.match(app, /const batchSize = 100/);
+  assert.match(app, /table, offset, limit: 100/);
   assert.match(index, /\/api\/v2\/admin\/migration/);
 });
 
