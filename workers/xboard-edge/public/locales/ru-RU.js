@@ -1345,13 +1345,6 @@ window.XBOARD_TRANSLATIONS['ru-RU'] = {
         "title": "Пароль SMTP",
         "description": "Пароль приложения или основной пароль"
       },
-      "email_encryption": {
-        "title": "Шифрование",
-        "description": "Способ защиты соединения",
-        "none": "Нет",
-        "ssl": "SSL/TLS",
-        "tls": "STARTTLS"
-      },
       "email_from": {
         "title": "Email отправителя",
         "description": "Будет отображаться в заголовке письма"

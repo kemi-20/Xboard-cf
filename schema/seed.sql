@@ -59,7 +59,6 @@ INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES
 ('email_port', '', unixepoch(), unixepoch()),
 ('email_username', '', unixepoch(), unixepoch()),
 ('email_password', '', unixepoch(), unixepoch()),
-('email_encryption', '', unixepoch(), unixepoch()),
 ('email_from_address', '', unixepoch(), unixepoch()),
 ('resend_api_url', 'https://api.resend.com', unixepoch(), unixepoch()),
 ('resend_api_key', '', unixepoch(), unixepoch()),

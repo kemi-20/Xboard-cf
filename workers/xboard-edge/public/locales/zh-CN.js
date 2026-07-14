@@ -1313,13 +1313,6 @@ window.XBOARD_TRANSLATIONS['zh-CN'] = {
         "title": "Resend API Key",
         "description": "以 re_ 开头的 Resend API Key，也可以配置为 xboard-jobs 的 RESEND_API_KEY Secret"
       },
-      "email_encryption": {
-        "title": "连接方式",
-        "description": "Resend 始终通过 HTTPS/TLS 发送",
-        "none": "无",
-        "ssl": "SSL/TLS",
-        "tls": "STARTTLS"
-      },
       "email_from": {
         "title": "发件人地址",
         "description": "发件人邮箱地址"

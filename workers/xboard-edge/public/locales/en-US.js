@@ -1403,13 +1403,6 @@ window.XBOARD_TRANSLATIONS['en-US'] = {
         "title": "SMTP Password",
         "description": "SMTP authentication password or application-specific password"
       },
-      "email_encryption": {
-        "title": "Encryption Method",
-        "description": "Email encryption method",
-        "none": "None",
-        "ssl": "SSL/TLS",
-        "tls": "STARTTLS"
-      },
       "email_from": {
         "title": "From Address",
         "description": "Sender's email address"

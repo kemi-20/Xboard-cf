@@ -398,7 +398,7 @@ async function ensureBootstrap(env: Env) {
     register_limit_by_ip_enable: 0, register_limit_count: 3, register_limit_expire: 60, password_limit_enable: 1,
     password_limit_count: 5, password_limit_expire: 60, resend_api_url: "https://api.resend.com", resend_api_key: "",
     resend_from_address: "", resend_from_name: "XBoard", email_host: "https://api.resend.com", email_port: "443", email_username: "XBoard",
-    email_password: "", email_encryption: "tls", email_from_address: "", remind_mail_enable: 0,
+    email_password: "", email_from_address: "", remind_mail_enable: 0,
     telegram_bot_enable: 0, telegram_bot_token: "", telegram_webhook_url: "", telegram_discuss_link: "",
     windows_version: "", windows_download_url: "", macos_version: "", macos_download_url: "", android_version: "", android_download_url: ""
   };
@@ -508,7 +508,6 @@ async function adminConfig(env: Env, request: Request) {
       email_port: 443,
       email_username: pickSetting(all, "resend_from_name", pickSetting(all, "email_username", pickSetting(all, "app_name", "XBoard"))),
       email_password: pickSetting(all, "resend_api_key", pickSetting(all, "email_password", "")),
-      email_encryption: "tls",
       email_from_address: pickSetting(all, "resend_from_address", pickSetting(all, "email_from_address", "")),
       resend_api_url: pickSetting(all, "resend_api_url", "https://api.resend.com"),
       resend_api_key: pickSetting(all, "resend_api_key", ""),

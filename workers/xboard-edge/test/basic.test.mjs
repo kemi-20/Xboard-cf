@@ -219,6 +219,7 @@ test("gift card APIs implement the official admin and user route set", () => {
 
 test("mail APIs enqueue Resend jobs instead of returning SMTP placeholders", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
+  const adminBundle = fs.readFileSync("public/assets/index-CF20260713.js", "utf8");
   const wrangler = fs.readFileSync("wrangler.toml", "utf8");
   assert.match(source, /MAIL_EVENTS: Queue/);
   assert.match(source, /type: "mail"/);
@@ -226,6 +227,8 @@ test("mail APIs enqueue Resend jobs instead of returning SMTP placeholders", () 
   assert.doesNotMatch(source, /testSendMail"\) return fail\("未配置邮件队列发送服务"/);
   assert.match(wrangler, /binding = "MAIL_EVENTS"/);
   assert.match(wrangler, /queue = "mail-events"/);
+  assert.doesNotMatch(source, /email_encryption/);
+  assert.doesNotMatch(adminBundle, /email_encryption/);
 });
 
 test("Telegram webhook setup and join requests use the official Bot API", () => {
