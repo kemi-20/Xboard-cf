@@ -1754,6 +1754,12 @@ async function adminApi(request: Request, env: Env, path: string) {
   if (path.includes("/config/fetch")) return ok(await adminConfig(env, request));
   if (path.includes("/config/save")) {
     const input = await body<Record<string, any>>(request);
+    if (Object.prototype.hasOwnProperty.call(input, "secure_path")) {
+      const securePath = normalizeSecurePath(input.secure_path);
+      if (securePath !== "admin" && securePath.length < 8) return fail("后台路径长度最小为8位", 422, 422);
+      if (!/^[A-Za-z0-9_-]+$/.test(securePath)) return fail("后台路径只能为字母、数字、下划线或短横线", 422, 422);
+      input.secure_path = securePath;
+    }
     const ts = now();
     for (const [name, value] of Object.entries(input)) {
       if (await saveSubscribeTemplate(env, name, value)) continue;
@@ -2421,7 +2427,18 @@ function assetRequest(request: Request, pathname: string) {
   return new Request(url.toString(), request);
 }
 
-async function adminUi(request: Request, env: Env) {
+function normalizeSecurePath(value: unknown) {
+  const path = String(value || "").trim().replace(/^\/+|\/+$/g, "");
+  return path || "admin";
+}
+
+async function currentSecurePath(env: Env) {
+  const row = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = 'secure_path'").first<{ value: string }>();
+  return normalizeSecurePath(row?.value || "admin");
+}
+
+async function adminUi(request: Request, env: Env, securePath: string) {
+  const settingsJson = JSON.stringify({ base_url: "/", secure_path: `/${securePath}` }).replace(/</g, "\\u003c");
   return new Response(`<!doctype html>
 <html lang="en">
   <head>
@@ -2431,7 +2448,7 @@ async function adminUi(request: Request, env: Env) {
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Admin</title>
     <meta name="description" content="Admin Dashboard UI built with Shadcn and Vite." />
-    <script src="/settings.js"></script>
+    <script>window.settings = ${settingsJson};</script>
     <script src="/settings.local.js"></script>
     <script src="/locales/en-US.js"></script>
     <script src="/locales/zh-CN.js"></script>
@@ -2493,16 +2510,19 @@ export default {
     const url = new URL(request.url);
     if (isNodeProtocolPath(url.pathname, request.method)) return env.XBOARD_SERVER.fetch(request);
     if (url.pathname === "/api/v1/client/subscribe" || url.pathname.startsWith("/s/") || url.pathname.startsWith("/sub/")) return env.XBOARD_SUBSCRIPTION.fetch(request);
-    if (url.pathname.startsWith("/admin/api/")) {
-      url.pathname = url.pathname.slice("/admin".length);
-      request = new Request(url.toString(), request);
-    }
-    if (!url.pathname.startsWith("/assets/") && !url.pathname.startsWith("/locales/") && !url.pathname.startsWith("/images/")) {
+    const staticAsset = url.pathname === "/settings.local.js" || url.pathname === "/manifest.json" || url.pathname.startsWith("/assets/") || url.pathname.startsWith("/locales/") || url.pathname.startsWith("/images/");
+    if (!staticAsset) {
       await ensureBootstrap(env);
     }
     if (url.pathname === "/health") return ok({ service: "xboard-edge", time: now() });
-    if (url.pathname === "/admin" || url.pathname.startsWith("/admin/")) return adminUi(request, env);
-    if (["/settings.js", "/settings.local.js", "/manifest.json"].includes(url.pathname) || url.pathname.startsWith("/assets/") || url.pathname.startsWith("/locales/") || url.pathname.startsWith("/images/")) {
+    const securePath = staticAsset ? "admin" : await currentSecurePath(env);
+    const adminUiPath = `/${securePath}`;
+    if (url.pathname === adminUiPath || url.pathname === `${adminUiPath}/`) return adminUi(request, env, securePath);
+    if (url.pathname.startsWith(`${adminUiPath}/api/`)) {
+      url.pathname = url.pathname.slice(adminUiPath.length);
+      request = new Request(url.toString(), request);
+    }
+    if (staticAsset) {
       return env.ASSETS.fetch(request);
     }
     if (url.pathname.startsWith("/api/v1/passport") || url.pathname.startsWith("/api/v2/passport")) {
@@ -2512,6 +2532,18 @@ export default {
     if (url.pathname.startsWith("/api/v1/client") || url.pathname.startsWith("/api/v2/client")) {
       return clientApi(request, env, url.pathname);
     }
+    const dynamicAdminPrefix = `/api/v2/${securePath}`;
+    if (url.pathname === dynamicAdminPrefix || url.pathname.startsWith(`${dynamicAdminPrefix}/`)) {
+      const canonicalPath = `/api/v2/admin${url.pathname.slice(dynamicAdminPrefix.length)}`;
+      const canonicalUrl = new URL(request.url);
+      canonicalUrl.pathname = canonicalPath;
+      const canonicalRequest = new Request(canonicalUrl.toString(), request);
+      const syncIntent = await nodeSyncIntent(canonicalRequest.clone(), canonicalPath, env);
+      const response = await adminApi(canonicalRequest, env, canonicalPath);
+      if (syncIntent && response.ok) ctx.waitUntil(notifyNodeSync(env, syncIntent));
+      return response;
+    }
+    if (securePath !== "admin" && url.pathname.startsWith("/api/v2/admin")) return json({ message: "Not Found" }, 404);
     if (url.pathname.startsWith("/api/v2/admin")) {
       const syncIntent = await nodeSyncIntent(request.clone(), url.pathname, env);
       const response = await adminApi(request, env, url.pathname);

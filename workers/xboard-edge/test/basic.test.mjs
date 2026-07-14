@@ -19,6 +19,18 @@ test("admin shell references the current bundle without caching", () => {
   assert.match(source, /src="\/assets\/index-CF20260713\.js"/);
   assert.doesNotMatch(source, /src="\/assets\/index-CEIYH7i8\.js"/);
   assert.match(source, /"cache-control": "no-store, no-cache, must-revalidate"/);
+  assert.match(source, /window\.settings = \$\{settingsJson\}/);
+});
+
+test("admin UI and API follow the saved secure path", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /async function currentSecurePath/);
+  assert.match(source, /const adminUiPath = `\/\$\{securePath\}`/);
+  assert.match(source, /const dynamicAdminPrefix = `\/api\/v2\/\$\{securePath\}`/);
+  assert.match(source, /const canonicalPath = `\/api\/v2\/admin\$\{url\.pathname\.slice\(dynamicAdminPrefix\.length\)\}`/);
+  assert.match(source, /securePath !== "admin" && securePath\.length < 8/);
+  assert.match(source, /securePath !== "admin"/);
+  assert.doesNotMatch(source, /url\.pathname === "\/admin" \|\| url\.pathname\.startsWith\("\/admin\/"\)/);
 });
 
 test("admin CRUD routes server resources to their own tables", () => {
