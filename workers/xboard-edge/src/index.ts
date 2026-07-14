@@ -3399,7 +3399,7 @@ async function adminUi(request: Request, env: Env, securePath: string) {
             link.id = "xboard-migration-menu";
             link.href = href;
             link.className = "inline-flex items-center whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground text-xs h-12 justify-start text-wrap rounded-none px-6";
-            link.innerHTML = '<div class="mr-2"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="tabler-icon tabler-icon-database-import"><path d="M4 6a8 3 0 1 0 16 0a8 3 0 1 0 -16 0"></path><path d="M4 6v12"></path><path d="M20 6v8"></path><path d="M4 12a8 3 0 0 0 16 0"></path><path d="M4 18c0 1.657 3.582 3 8 3c1.05 0 2.052-.076 2.55-.214"></path><path d="M20 17v6"></path><path d="M17 20l3 3l3 -3"></path></svg></div><span></span>';
+            link.innerHTML = '<div class="mr-2"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="tabler-icon tabler-icon-database-import"><path d="M4 6a8 3 0 1 0 16 0a8 3 0 1 0 -16 0"></path><path d="M4 6v12"></path><path d="M20 6v8"></path><path d="M4 12a8 3 0 0 0 16 0"></path><path d="M4 18c0 1.657 3.582 3 8 3c1.05 0 2.052-.076 2.25-.214"></path><path d="M20 17v6"></path><path d="M17 20l3 3l3 -3"></path></svg></div><span></span>';
             nav.appendChild(link);
           }
           link = nav?.querySelector("#xboard-migration-menu");
