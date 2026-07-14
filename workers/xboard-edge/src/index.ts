@@ -3562,11 +3562,11 @@ async function adminUi(request: Request, env: Env, securePath: string) {
         };
         const install = () => {
           const nav = document.querySelector("aside nav");
-          // Reserved for a future native plugin/payment implementation. Keep routes and code, hide only the unsupported menus.
+          // Reserved for future native plugin, payment, and theme implementations. Keep routes and code, hide only their menus.
           nav?.querySelectorAll('a[href]').forEach(menu => {
             const target = new URL(menu.href, location.href);
             const route = target.hash.replace(/^#/, "") || target.pathname;
-            if (route === "/config/plugin" || route === "/config/payment") {
+            if (route === "/config/plugin" || route === "/config/payment" || route === "/config/theme") {
               const item = menu.closest("li") || menu;
               item.dataset.xboardReservedMenu = "true";
               item.style.display = "none";
@@ -3579,6 +3579,10 @@ async function adminUi(request: Request, env: Env, securePath: string) {
           };
           const language = localStorage.getItem("i18nextLng") || "zh-CN";
           const label = migrationLabels[language] || migrationLabels["en-US"];
+          const setMenuLabel = node => Array.from(node.childNodes).forEach(child => {
+            if (child.nodeType === 3 && child.textContent.trim()) child.textContent = label.text;
+            else if (child.nodeType === 1 && child.tagName.toLowerCase() !== "svg") setMenuLabel(child);
+          });
           let link = nav?.querySelector("#xboard-migration-menu");
           if (nav && !link) {
             const knowledgeLink = Array.from(nav.querySelectorAll("a[href]")).find(menu => {
@@ -3599,9 +3603,8 @@ async function adminUi(request: Request, env: Env, securePath: string) {
             }
           }
           link = nav?.querySelector("#xboard-migration-menu");
-          const text = link?.querySelector("span");
           if (link && link.title !== label.title) link.title = label.title;
-          if (text && text.textContent !== label.text) text.textContent = label.text;
+          if (link && link.textContent.trim() !== label.text) setMenuLabel(link);
           updateFooterDate();
         };
         new MutationObserver(install).observe(document.documentElement, { childList: true, subtree: true });
