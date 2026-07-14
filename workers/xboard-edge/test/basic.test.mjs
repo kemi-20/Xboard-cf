@@ -22,6 +22,11 @@ test("admin shell references the current bundle without caching", () => {
   assert.match(source, /window\.settings = \$\{settingsJson\}/);
   assert.match(source, /id = "xboard-migration-menu"/);
   assert.match(source, /nav\.appendChild\(link\)/);
+  assert.match(source, /M19 16v6/);
+  assert.match(source, /M16 19l3 3l3 -3/);
+  assert.match(source, /new Intl\.DateTimeFormat\(undefined/);
+  assert.match(source, /version\.textContent = browserDate\(\)/);
+  assert.match(source, /window\.setInterval\(updateFooterDate, 60000\)/);
   assert.doesNotMatch(source, /position:fixed;left:16px;bottom:12px/);
 });
 

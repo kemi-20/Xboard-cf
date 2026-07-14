@@ -3275,18 +3275,33 @@ async function adminUi(request: Request, env: Env, securePath: string) {
     <script>
       (() => {
         const href = ${migrationHref};
+        const browserDate = () => {
+          const parts = new Intl.DateTimeFormat(undefined, { year: "numeric", month: "2-digit", day: "2-digit" })
+            .formatToParts(new Date());
+          const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+          return values.year + "-" + values.month + "-" + values.day;
+        };
+        const updateFooterDate = () => {
+          const version = document.querySelector("aside div.border-t span.whitespace-nowrap");
+          if (!version) return;
+          version.textContent = browserDate();
+          version.title = "浏览器本地日期";
+        };
         const install = () => {
           const nav = document.querySelector("aside nav");
-          if (!nav || nav.querySelector("#xboard-migration-menu")) return;
-          const link = document.createElement("a");
-          link.id = "xboard-migration-menu";
-          link.href = href;
-          link.title = "从原版 SQLite 导入数据或导出原版兼容数据库";
-          link.className = "inline-flex items-center whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground text-xs h-12 justify-start text-wrap rounded-none px-6";
-          link.innerHTML = '<div class="mr-2"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="tabler-icon tabler-icon-database-import"><path d="M4 6a8 3 0 1 0 16 0a8 3 0 1 0 -16 0"></path><path d="M4 6v12"></path><path d="M20 6v8"></path><path d="M4 12a8 3 0 0 0 16 0"></path><path d="M4 18c0 1.657 3.582 3 8 3c1.05 0 2.052-.076 2.97-.214"></path><path d="M19 15v6"></path><path d="M16 18l3 3l3 -3"></path></svg></div><span>数据迁移</span>';
-          nav.appendChild(link);
+          if (nav && !nav.querySelector("#xboard-migration-menu")) {
+            const link = document.createElement("a");
+            link.id = "xboard-migration-menu";
+            link.href = href;
+            link.title = "从原版 SQLite 导入数据或导出原版兼容数据库";
+            link.className = "inline-flex items-center whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground text-xs h-12 justify-start text-wrap rounded-none px-6";
+            link.innerHTML = '<div class="mr-2"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="tabler-icon tabler-icon-database-import"><path d="M4 6a8 3 0 1 0 16 0a8 3 0 1 0 -16 0"></path><path d="M4 6v12"></path><path d="M20 6v8"></path><path d="M4 12a8 3 0 0 0 16 0"></path><path d="M4 18c0 1.657 3.582 3 8 3c1.05 0 2.052-.076 2.97-.214"></path><path d="M19 16v6"></path><path d="M16 19l3 3l3 -3"></path></svg></div><span>数据迁移</span>';
+            nav.appendChild(link);
+          }
+          updateFooterDate();
         };
         new MutationObserver(install).observe(document.documentElement, { childList: true, subtree: true });
+        window.setInterval(updateFooterDate, 60000);
         install();
       })();
     </script>
