@@ -1459,6 +1459,44 @@ async function queueTemplateMail(env: Env, name: string, email: string, vars: Re
   });
 }
 
+async function sendTestMail(env: Env, email: string) {
+  const all = await settings(env.XBOARD_DB);
+  const template = await adminMailTemplateGet(env, "notify");
+  const endpoint = String(pickSetting(all, "resend_api_url", "https://api.resend.com")).replace(/\/$/, "");
+  const apiKey = String(pickSetting(all, "resend_api_key", ""));
+  const fromAddress = String(pickSetting(all, "resend_from_address", ""));
+  const fromName = String(pickSetting(all, "resend_from_name", pickSetting(all, "app_name", "XBoard")));
+  const subject = "This is xboard test email";
+  const vars = { name: pickSetting(all, "app_name", "XBoard"), content: subject, url: pickSetting(all, "app_url", "") };
+  const content = renderMailText(template?.content || mailTemplateDefaults.notify.content, vars);
+  const config = {
+    driver: "resend",
+    host: endpoint,
+    port: 443,
+    encryption: "HTTPS/TLS",
+    from: { address: fromAddress, name: fromName },
+    username: fromName
+  };
+  let error: string | null = null;
+  try {
+    if (!apiKey) throw new Error("Resend API Key 未配置");
+    if (!fromAddress) throw new Error("Resend 发件人地址未配置");
+    const response = await fetch(`${endpoint}/emails`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+      body: JSON.stringify({ from: `${fromName} <${fromAddress}>`, to: [email], subject, html: mailHtml(content), text: content })
+    });
+    const responseText = await response.text();
+    if (!response.ok) throw new Error(`Resend ${response.status}: ${responseText.slice(0, 500)}`);
+  } catch (caught: any) {
+    error = String(caught?.message || caught);
+  }
+  const ts = now();
+  await env.XBOARD_DB.prepare("INSERT INTO v2_mail_log(email, subject, template_name, error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
+    .bind(email, subject, "notify", error, ts, ts).run();
+  return { email, subject, template_name: "notify", error, config };
+}
+
 async function telegramRequest(botToken: string, method: string, payload: Record<string, unknown> = {}) {
   if (!botToken) throw new Error("Telegram Bot Token 未配置");
   const response = await fetch(`https://api.telegram.org/bot${botToken}/${method}`, {
@@ -1735,10 +1773,7 @@ async function adminApi(request: Request, env: Env, path: string) {
   if (request.method === "GET" && route === "/config/getEmailTemplate") return ok(["default"]);
   if (request.method === "GET" && route === "/config/getThemeTemplate") return ok(["default"]);
   if (request.method === "POST" && route === "/config/testSendMail") {
-    const all = await settings(env.XBOARD_DB);
-    const vars = { name: pickSetting(all, "app_name", "XBoard"), content: "This is xboard test email", url: pickSetting(all, "app_url", "") };
-    const eventId = await queueTemplateMail(env, "notify", String((admin as any).email), vars, "This is xboard test email");
-    return ok({ error: null, queued: true, event_id: eventId });
+    return ok(await sendTestMail(env, String((admin as any).email)));
   }
   if (request.method === "POST" && route === "/config/setTelegramWebhook") {
     const input = await body<Record<string, any>>(request); const all = await settings(env.XBOARD_DB);

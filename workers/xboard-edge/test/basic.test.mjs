@@ -234,6 +234,10 @@ test("mail APIs enqueue Resend jobs instead of returning SMTP placeholders", () 
   assert.doesNotMatch(source, /testSendMail"\) return fail\("未配置邮件队列发送服务"/);
   assert.match(wrangler, /binding = "MAIL_EVENTS"/);
   assert.match(wrangler, /queue = "mail-events"/);
+  assert.match(source, /async function sendTestMail/);
+  assert.match(source, /driver: "resend"/);
+  assert.match(source, /return ok\(await sendTestMail/);
+  assert.doesNotMatch(source, /queued: true, event_id/);
   assert.doesNotMatch(source, /email_encryption/);
   assert.doesNotMatch(adminBundle, /email_encryption/);
 });
