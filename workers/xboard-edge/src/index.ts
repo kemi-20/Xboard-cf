@@ -3541,6 +3541,14 @@ async function adminUi(request: Request, env: Env, securePath: string) {
     <script src="/locales/ru-RU.js"></script>
     <script type="module" crossorigin src="/assets/index-CF20260713.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-DiYa-_z_.css">
+    <style>
+      aside nav li:has(> a[href$="#/config/plugin"]),
+      aside nav li:has(> a[href$="#/config/payment"]),
+      aside nav li:has(> a[href$="#/config/theme"]),
+      aside nav a[href$="#/config/plugin"],
+      aside nav a[href$="#/config/payment"],
+      aside nav a[href$="#/config/theme"] { display: none !important; }
+    </style>
   </head>
   <body>
     <div id="root"></div>
@@ -3579,10 +3587,6 @@ async function adminUi(request: Request, env: Env, securePath: string) {
           };
           const language = localStorage.getItem("i18nextLng") || "zh-CN";
           const label = migrationLabels[language] || migrationLabels["en-US"];
-          const setMenuLabel = node => Array.from(node.childNodes).forEach(child => {
-            if (child.nodeType === 3 && child.textContent.trim()) child.textContent = label.text;
-            else if (child.nodeType === 1 && child.tagName.toLowerCase() !== "svg") setMenuLabel(child);
-          });
           let link = nav?.querySelector("#xboard-migration-menu");
           if (nav && !link) {
             const knowledgeLink = Array.from(nav.querySelectorAll("a[href]")).find(menu => {
@@ -3596,15 +3600,15 @@ async function adminUi(request: Request, env: Env, securePath: string) {
               if (link) {
                 link.id = "xboard-migration-menu";
                 link.href = href;
-                const svg = link.querySelector("svg");
-                if (svg) svg.outerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="tabler-icon tabler-icon-database-import"><path d="M4 6a8 3 0 1 0 16 0a8 3 0 1 0 -16 0"></path><path d="M4 6v12"></path><path d="M20 6v8"></path><path d="M4 12a8 3 0 0 0 16 0"></path><path d="M4 18c0 1.657 3.582 3 8 3c1.05 0 2.052-.076 2.25-.214"></path><path d="M20 17v6"></path><path d="M17 20l3 3l3 -3"></path></svg>';
+                link.innerHTML = '<div class="mr-2"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="tabler-icon tabler-icon-database-import"><path d="M4 6a8 3 0 1 0 16 0a8 3 0 1 0 -16 0"></path><path d="M4 6v12"></path><path d="M20 6v8"></path><path d="M4 12a8 3 0 0 0 16 0"></path><path d="M4 18c0 1.657 3.582 3 8 3c1.05 0 2.052-.076 2.25-.214"></path><path d="M20 17v6"></path><path d="M17 20l3 3l3 -3"></path></svg></div><span></span>';
                 sourceItem.insertAdjacentElement("afterend", item);
               }
             }
           }
           link = nav?.querySelector("#xboard-migration-menu");
+          const text = link?.querySelector("span");
           if (link && link.title !== label.title) link.title = label.title;
-          if (link && link.textContent.trim() !== label.text) setMenuLabel(link);
+          if (text && text.textContent !== label.text) text.textContent = label.text;
           updateFooterDate();
         };
         new MutationObserver(install).observe(document.documentElement, { childList: true, subtree: true });

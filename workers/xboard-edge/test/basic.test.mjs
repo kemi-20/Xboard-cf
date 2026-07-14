@@ -25,8 +25,8 @@ test("admin shell references the current bundle without caching", () => {
   assert.match(source, /knowledgeLink\?\.closest\("li"\) \|\| knowledgeLink/);
   assert.match(source, /sourceItem\.insertAdjacentElement\("afterend", item\)/);
   assert.doesNotMatch(source, /nav\.appendChild\(link\)/);
-  assert.match(source, /const setMenuLabel = node => Array\.from\(node\.childNodes\)/);
-  assert.match(source, /if \(link && link\.textContent\.trim\(\) !== label\.text\) setMenuLabel\(link\)/);
+  assert.match(source, /link\.innerHTML = '<div class="mr-2">/);
+  assert.match(source, /if \(text && text\.textContent !== label\.text\) text\.textContent = label\.text/);
   assert.match(source, /M20 17v6/);
   assert.match(source, /M17 20l3 3l3 -3/);
   assert.match(source, /localStorage\.getItem\("i18nextLng"\)/);
@@ -350,6 +350,8 @@ test("unsupported plugin, payment, and theme menus stay reserved but hidden", ()
   assert.match(source, /route === "\/config\/plugin"/);
   assert.match(source, /route === "\/config\/payment"/);
   assert.match(source, /route === "\/config\/theme"/);
+  assert.match(source, /a\[href\$="#\/config\/theme"\]/);
+  assert.match(source, /display: none !important/);
   assert.match(source, /menu\.closest\("li"\) \|\| menu/);
   assert.match(source, /item\.style\.display = "none"/);
   assert.match(source, /api\.telegram\.org\/bot\$\{botToken\}/);
