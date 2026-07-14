@@ -125,6 +125,12 @@ function exportRow(table: string, source: MigrationRow): MigrationRow | null {
   }
   if (table === "v2_stat" && row.transfer_used_total === undefined) row.transfer_used_total = row.transfer_used ?? "0";
   if (["v2_stat", "v2_stat_user", "v2_stat_server"].includes(table) && !String(row.record_type || "").trim()) row.record_type = "d";
+  if (table === "v2_admin_audit_log") {
+    if (row.admin_id === null || row.admin_id === undefined) row.admin_id = 0;
+    if (!String(row.method || "").trim()) row.method = "UNKNOWN";
+    if (!String(row.uri || "").trim()) row.uri = String(row.target || "/");
+    if (row.updated_at === null || row.updated_at === undefined) row.updated_at = row.created_at ?? 0;
+  }
   if (table === "v2_server_machine" && row.is_active === undefined) row.is_active = row.enabled ?? 1;
   if (table === "v2_subscribe_templates" && row.content === undefined) row.content = row.template ?? "";
   if (table === "v2_commission_log") {

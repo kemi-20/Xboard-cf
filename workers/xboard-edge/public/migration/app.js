@@ -1,3 +1,5 @@
+import { insertExportRows } from "./sqlite-export.js";
+
 const securePath = location.pathname.split("/").filter(Boolean)[0] || "admin";
 const apiBase = "/api/v2/admin/migration";
 document.querySelector("#back").href = `/${securePath}`;
@@ -255,41 +257,6 @@ function sqliteRows(table, limit, offset) {
   const result = state.db.exec(`SELECT * FROM \`${table}\` LIMIT ${Number(limit)} OFFSET ${Number(offset)}`)[0];
   if (!result) return [];
   return result.values.map(values => Object.fromEntries(result.columns.map((column, index) => [column, values[index]])));
-}
-
-function formatSqliteDate(value) {
-  if (value === null || value === undefined || value === "") return value;
-  if (!Number.isFinite(Number(value))) return value;
-  const date = new Date(Number(value) * 1000);
-  const part = number => String(number).padStart(2, "0");
-  return `${date.getFullYear()}-${part(date.getMonth() + 1)}-${part(date.getDate())} ${part(date.getHours())}:${part(date.getMinutes())}:${part(date.getSeconds())}`;
-}
-
-function insertExportRows(db, table, rows) {
-  if (!rows.length) return;
-  const info = db.exec(`PRAGMA table_info(\`${table}\`)`)[0];
-  if (!info) return;
-  const columns = info.values.map(values => ({ name: String(values[1]), type: String(values[2] || "").toUpperCase() }));
-  db.run("BEGIN");
-  try {
-    for (const row of rows) {
-      const selected = columns.filter(column => row[column.name] !== undefined);
-      if (!selected.length) continue;
-      const values = selected.map(column => {
-        let value = row[column.name];
-        if (column.type.includes("DATETIME") && typeof value === "number") value = formatSqliteDate(value);
-        if (value !== null && typeof value === "object") value = JSON.stringify(value);
-        if (typeof value === "boolean") value = value ? 1 : 0;
-        return value;
-      });
-      const names = selected.map(column => `\`${column.name.replaceAll("`", "")}\``).join(",");
-      db.run(`INSERT OR REPLACE INTO \`${table}\` (${names}) VALUES (${selected.map(() => "?").join(",")})`, values);
-    }
-    db.run("COMMIT");
-  } catch (error) {
-    db.run("ROLLBACK");
-    throw new Error(`生成原版 SQLite 时写入 ${table} 失败：${error.message}`);
-  }
 }
 
 function stamp() {
