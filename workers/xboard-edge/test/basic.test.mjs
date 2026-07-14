@@ -237,6 +237,16 @@ test("dashboard statistics follow the upstream order and server traffic contract
   }
 });
 
+test("revenue overview reads the migrated daily statistics table", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const stats = source.slice(source.indexOf("async function orderStats"), source.indexOf("async function trafficRank"));
+  assert.match(stats, /FROM v2_stat WHERE/);
+  assert.match(stats, /record_type = 'd'/);
+  assert.match(stats, /paid_total,paid_count,commission_total,commission_count/);
+  assert.doesNotMatch(stats, /FROM v2_order/);
+  assert.match(stats, /avg_commission_amount/);
+});
+
 test("English and Russian email settings describe Resend instead of SMTP", () => {
   const english = fs.readFileSync("public/locales/en-US.js", "utf8");
   const russian = fs.readFileSync("public/locales/ru-RU.js", "utf8");

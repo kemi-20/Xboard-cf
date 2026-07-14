@@ -1017,37 +1017,65 @@ function dateString(ts: number) {
 }
 
 async function orderStats(env: Env, url: URL) {
-  const end = url.searchParams.get("end_date") || dateString(now());
-  const start = url.searchParams.get("start_date") || end;
-  const startAt = Math.floor(Date.parse(`${start}T00:00:00+08:00`) / 1000);
-  const endAt = Math.floor(Date.parse(`${end}T00:00:00+08:00`) / 1000) + 86400;
-  const result = await env.XBOARD_DB.prepare("SELECT paid_at,total_amount,commission_balance,actual_commission_balance FROM v2_order WHERE status = 3 AND paid_at >= ? AND paid_at < ? ORDER BY paid_at ASC").bind(startAt, endAt).all<Record<string, any>>();
-  const byDate = new Map<string, { date: string; paid_total: number; paid_count: number; commission_total: number; commission_count: number }>();
-  for (const row of result.results || []) {
-    const date = dateString(Number(row.paid_at || 0));
-    const item = byDate.get(date) || { date, paid_total: 0, paid_count: 0, commission_total: 0, commission_count: 0 };
-    item.paid_total += Number(row.total_amount || 0);
-    item.paid_count += 1;
-    const commission = Number(row.actual_commission_balance ?? row.commission_balance ?? 0);
-    item.commission_total += commission;
-    if (commission > 0) item.commission_count += 1;
-    byDate.set(date, item);
+  const start = url.searchParams.get("start_date");
+  const end = url.searchParams.get("end_date");
+  const type = url.searchParams.get("type");
+  const allowedTypes = new Set(["paid_total", "paid_count", "commission_total", "commission_count"]);
+  const clauses = ["record_type = 'd'"];
+  const bindings: number[] = [];
+  if (start) {
+    clauses.push("record_at >= ?");
+    bindings.push(Math.floor(Date.parse(`${start}T00:00:00+08:00`) / 1000));
   }
-  const list = [...byDate.values()];
-  const paidTotal = list.reduce((sum, item) => sum + item.paid_total, 0);
-  const paidCount = list.reduce((sum, item) => sum + item.paid_count, 0);
-  const commissionTotal = list.reduce((sum, item) => sum + item.commission_total, 0);
-  const commissionCount = list.reduce((sum, item) => sum + item.commission_count, 0);
-  return {
-    summary: {
-      start_date: start,
-      end_date: end,
+  if (end) {
+    clauses.push("record_at <= ?");
+    bindings.push(Math.floor(Date.parse(`${end}T23:59:59+08:00`) / 1000));
+  }
+  const result = await env.XBOARD_DB.prepare(`SELECT record_at,paid_total,paid_count,commission_total,commission_count FROM v2_stat WHERE ${clauses.join(" AND ")} ORDER BY record_at DESC`)
+    .bind(...bindings).all<Record<string, any>>();
+  const rows = result.results || [];
+  const dailyStats = rows.map(row => {
+    const date = dateString(Number(row.record_at || 0));
+    if (type && allowedTypes.has(type)) {
+      const labels: Record<string, string> = { paid_total: "收款金额", paid_count: "收款笔数", commission_total: "佣金金额", commission_count: "佣金笔数" };
+      return { date, value: Number(row[type] || 0), type: labels[type] };
+    }
+    const paidTotal = Number(row.paid_total || 0);
+    const paidCount = Number(row.paid_count || 0);
+    const commissionTotal = Number(row.commission_total || 0);
+    const commissionCount = Number(row.commission_count || 0);
+    return {
+      date,
       paid_total: paidTotal,
       paid_count: paidCount,
-      avg_paid_amount: paidCount ? paidTotal / paidCount : 0,
       commission_total: commissionTotal,
       commission_count: commissionCount,
-      commission_rate: paidTotal ? commissionTotal / paidTotal * 100 : 0
+      avg_order_amount: paidCount > 0 ? Math.round(paidTotal / paidCount * 100) / 100 : 0,
+      avg_commission_amount: commissionCount > 0 ? Math.round(commissionTotal / commissionCount * 100) / 100 : 0
+    };
+  });
+  const list = [...dailyStats].reverse();
+  const fullRows = rows.map(row => ({
+    paid_total: Number(row.paid_total || 0),
+    paid_count: Number(row.paid_count || 0),
+    commission_total: Number(row.commission_total || 0),
+    commission_count: Number(row.commission_count || 0)
+  }));
+  const paidTotal = fullRows.reduce((sum, item) => sum + item.paid_total, 0);
+  const paidCount = fullRows.reduce((sum, item) => sum + item.paid_count, 0);
+  const commissionTotal = fullRows.reduce((sum, item) => sum + item.commission_total, 0);
+  const commissionCount = fullRows.reduce((sum, item) => sum + item.commission_count, 0);
+  return {
+    summary: {
+      start_date: start || (rows.length ? dateString(Number(rows.at(-1)?.record_at || 0)) : dateString(now())),
+      end_date: end || (rows.length ? dateString(Number(rows[0]?.record_at || 0)) : dateString(now())),
+      paid_total: paidTotal,
+      paid_count: paidCount,
+      commission_total: commissionTotal,
+      commission_count: commissionCount,
+      avg_paid_amount: paidCount ? Math.round(paidTotal / paidCount * 100) / 100 : 0,
+      avg_commission_amount: commissionCount ? Math.round(commissionTotal / commissionCount * 100) / 100 : 0,
+      commission_rate: paidTotal ? Math.round(commissionTotal / paidTotal * 10000) / 100 : 0
     },
     list
   };
