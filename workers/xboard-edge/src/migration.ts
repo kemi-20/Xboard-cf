@@ -124,6 +124,7 @@ function exportRow(table: string, source: MigrationRow): MigrationRow | null {
     if (name.startsWith("payment_") || name.startsWith("pay_")) return null;
   }
   if (table === "v2_stat" && row.transfer_used_total === undefined) row.transfer_used_total = row.transfer_used ?? "0";
+  if (["v2_stat", "v2_stat_user", "v2_stat_server"].includes(table) && !String(row.record_type || "").trim()) row.record_type = "d";
   if (table === "v2_server_machine" && row.is_active === undefined) row.is_active = row.enabled ?? 1;
   if (table === "v2_subscribe_templates" && row.content === undefined) row.content = row.template ?? "";
   if (table === "v2_commission_log") {

@@ -3254,6 +3254,7 @@ async function currentSecurePath(env: Env) {
 
 async function adminUi(request: Request, env: Env, securePath: string) {
   const settingsJson = JSON.stringify({ base_url: "/", secure_path: `/${securePath}` }).replace(/</g, "\\u003c");
+  const migrationHref = JSON.stringify(`/${securePath}/migration`).replace(/</g, "\\u003c");
   return new Response(`<!doctype html>
 <html lang="en">
   <head>
@@ -3268,11 +3269,27 @@ async function adminUi(request: Request, env: Env, securePath: string) {
     <script src="/locales/ru-RU.js"></script>
     <script type="module" crossorigin src="/assets/index-CF20260713.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-DiYa-_z_.css">
-    <style>#xboard-migration-link{position:fixed;left:16px;bottom:12px;z-index:1000;padding:6px 10px;border:1px solid #d4d4d8;border-radius:6px;background:#fff;color:#18181b;font:12px/1.4 system-ui;text-decoration:none;box-shadow:0 1px 3px rgba(0,0,0,.08)}#xboard-migration-link:hover{background:#f4f4f5}</style>
   </head>
   <body>
     <div id="root"></div>
-    <a id="xboard-migration-link" href="/${securePath}/migration" title="从原版 SQLite 和 Redis 迁移数据">数据迁移</a>
+    <script>
+      (() => {
+        const href = ${migrationHref};
+        const install = () => {
+          const nav = document.querySelector("aside nav");
+          if (!nav || nav.querySelector("#xboard-migration-menu")) return;
+          const link = document.createElement("a");
+          link.id = "xboard-migration-menu";
+          link.href = href;
+          link.title = "从原版 SQLite 导入数据或导出原版兼容数据库";
+          link.className = "inline-flex items-center whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground text-xs h-12 justify-start text-wrap rounded-none px-6";
+          link.innerHTML = '<div class="mr-2"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="tabler-icon tabler-icon-database-import"><path d="M4 6a8 3 0 1 0 16 0a8 3 0 1 0 -16 0"></path><path d="M4 6v6c0 1.657 3.582 3 8 3c.537 0 1.062-.02 1.568-.058"></path><path d="M4 12v6c0 1.657 3.582 3 8 3c1.995 0 3.82-.274 5.22-.726"></path><path d="M19 15v6"></path><path d="M16 18l3 3l3 -3"></path></svg></div><span>数据迁移</span>';
+          nav.appendChild(link);
+        };
+        new MutationObserver(install).observe(document.documentElement, { childList: true, subtree: true });
+        install();
+      })();
+    </script>
   </body>
 </html>`, { headers: {
     "content-type": "text/html; charset=utf-8",

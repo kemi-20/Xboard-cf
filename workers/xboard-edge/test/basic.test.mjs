@@ -20,6 +20,9 @@ test("admin shell references the current bundle without caching", () => {
   assert.doesNotMatch(source, /src="\/assets\/index-CEIYH7i8\.js"/);
   assert.match(source, /"cache-control": "no-store, no-cache, must-revalidate"/);
   assert.match(source, /window\.settings = \$\{settingsJson\}/);
+  assert.match(source, /id = "xboard-migration-menu"/);
+  assert.match(source, /nav\.appendChild\(link\)/);
+  assert.doesNotMatch(source, /position:fixed;left:16px;bottom:12px/);
 });
 
 test("admin UI and API follow the saved secure path", () => {
@@ -214,6 +217,7 @@ test("admin migration imports official SQLite data in bounded D1 batches", () =>
   assert.match(source, /INSERT OR REPLACE/);
   assert.match(source, /INSERT OR IGNORE/);
   assert.match(source, /transfer_used_total/);
+  assert.match(source, /\["v2_stat", "v2_stat_user", "v2_stat_server"\][\s\S]*?row\.record_type = "d"/);
   assert.match(source, /v2_server_machine/);
   assert.match(source, /password_algo = "bcrypt"/);
   assert.match(source, /x-migration-token/);
