@@ -22,8 +22,8 @@ test("admin shell references the current bundle without caching", () => {
   assert.match(source, /window\.settings = \$\{settingsJson\}/);
   assert.match(source, /id = "xboard-migration-menu"/);
   assert.match(source, /nav\.appendChild\(link\)/);
-  assert.match(source, /M19 17v6/);
-  assert.match(source, /M16 20l3 3l3 -3/);
+  assert.match(source, /M20 17v6/);
+  assert.match(source, /M17 20l3 3l3 -3/);
   assert.match(source, /localStorage\.getItem\("i18nextLng"\)/);
   assert.match(source, /"en-US": \{ text: "Data Migration"/);
   assert.match(source, /"ru-RU": \{ text: "Миграция данных"/);
