@@ -310,6 +310,13 @@ test("migration excludes service credentials that cannot move to Cloudflare", ()
   assert.match(source, /skipped_service_config/);
 });
 
+test("migration does not import or export application log records", () => {
+  const source = fs.readFileSync("src/migration.ts", "utf8");
+  const tableList = source.slice(source.indexOf("const MIGRATION_TABLES"), source.indexOf("const tableSet"));
+  assert.doesNotMatch(tableList, /"v2_log"/);
+  assert.match(fs.readFileSync("../../schema/d1.sql", "utf8"), /CREATE TABLE IF NOT EXISTS v2_log/);
+});
+
 test("migration export restores original SQLite value representations", () => {
   const source = fs.readFileSync("src/migration.ts", "utf8");
   assert.match(source, /name === "system_bootstrap_edge_version"/);

@@ -9,7 +9,7 @@ const migrationTables = [
   "v2_server_group", "v2_plan", "v2_user", "personal_access_tokens", "v2_server_machine",
   "v2_server_route", "v2_server", "v2_settings", "v2_notice", "v2_knowledge", "v2_ticket",
   "v2_ticket_message", "v2_mail_templates", "v2_invite_code", "v2_mail_log", "v2_plugins",
-  "v2_log", "failed_jobs", "v2_order", "v2_payment", "v2_coupon", "v2_commission_log",
+  "failed_jobs", "v2_order", "v2_payment", "v2_coupon", "v2_commission_log",
   "v2_gift_card_template", "v2_gift_card_code", "v2_gift_card_usage", "v2_stat",
   "v2_stat_user", "v2_stat_server", "v2_admin_audit_log", "v2_traffic_reset_logs",
   "v2_subscribe_templates", "v2_server_machine_load_history"
