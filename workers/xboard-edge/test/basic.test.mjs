@@ -323,6 +323,8 @@ test("request bodies preserve repeated form keys and urlencoded payloads", () =>
 test("V1 app config merges supported nodes into the official Clash app profile", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /\/rules\/app\.clash\.yaml/);
+  assert.match(source, /XBOARD_SUBSCRIPTION\.fetch/);
+  assert.match(source, /xboard-subscription\.internal\/api\/v1\/client\/subscribe/);
   assert.match(source, /supportedCiphers/);
   assert.match(source, /proxy\?\.type === "vmess" \|\| proxy\?\.type === "trojan"/);
   assert.match(source, /base\["proxy-groups"\]/);

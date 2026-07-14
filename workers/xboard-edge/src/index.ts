@@ -818,9 +818,10 @@ async function clientApi(request: Request, env: Env, path: string) {
   if (request.method === "GET" && path === "/api/v1/client/app/getConfig") {
     const baseResponse = await env.ASSETS.fetch(new Request(new URL("/rules/app.clash.yaml", request.url)));
     if (!baseResponse.ok) return fail("Client config template is unavailable", 500, 500);
-    const subscription = new URL(await subscribeUrl(request, env, String(user.token)));
+    const subscription = new URL("https://xboard-subscription.internal/api/v1/client/subscribe");
+    subscription.searchParams.set("token", String(user.token));
     subscription.searchParams.set("flag", "clash");
-    const response = await fetch(subscription, { headers: { "user-agent": request.headers.get("user-agent") || "Clash" } });
+    const response = await env.XBOARD_SUBSCRIPTION.fetch(new Request(subscription, { headers: { "user-agent": request.headers.get("user-agent") || "Clash" } }));
     if (!response.ok) return new Response(response.body, { status: response.status, headers: response.headers });
     const base = parseYaml(await baseResponse.text()) || {};
     const generated = parseYaml(await response.text()) || {};
