@@ -528,6 +528,25 @@ async function syncUserChange(env: Env, userId: number, oldGroupId?: number) {
   return sent;
 }
 
+async function syncUsersChange(env: Env, userIds: number[]) {
+  const ids = [...new Set(userIds.map(Number).filter(id => id > 0))].slice(0, 1000);
+  if (!ids.length) return 0;
+  const users = await env.XBOARD_DB.prepare(`SELECT id, group_id FROM v2_user WHERE id IN (${ids.map(() => "?").join(",")})`).bind(...ids).all<Row>();
+  const groupByUser = new Map((users.results || []).map(user => [Number(user.id), Number(user.group_id || 0)]));
+  const groups = new Set([...groupByUser.values()].filter(Boolean));
+  let sent = 0;
+  for (const node of await nodesForGroups(env, groups)) {
+    const nodeGroups = new Set(parseJson<unknown[]>(node.group_ids, []).map(Number));
+    const affected = ids.filter(id => nodeGroups.has(groupByUser.get(id) || 0)).map(id => ({ id }));
+    if (!affected.length) continue;
+    const target = await nodePushTarget(env, node);
+    const suffix = target.startsWith("machine:") ? { node_id: Number(node.id) } : {};
+    const result = await pushDo(env, target, "sync.user.delta", { action: "remove", users: affected, ...suffix });
+    sent += Number(result.sent || 0);
+  }
+  return sent;
+}
+
 async function syncAll(env: Env) {
   const result = await env.XBOARD_DB.prepare("SELECT * FROM v2_server WHERE enabled = 1").all<Row>();
   for (const node of result.results || []) {
@@ -819,6 +838,9 @@ export default {
       const input = await readInput(request);
       if (input.scope === "user" && Number(input.user_id) > 0) {
         const sent = await syncUserChange(env, Number(input.user_id), Number(input.old_group_id || 0));
+        return json({ data: true, sent });
+      } else if (input.scope === "users" && Array.isArray(input.user_ids)) {
+        const sent = await syncUsersChange(env, input.user_ids.map(Number));
         return json({ data: true, sent });
       } else if (input.node_id) {
         const node = await getNode(env, input.node_id);

@@ -405,6 +405,7 @@ async function ensureBootstrap(env: Env) {
     "ALTER TABLE v2_order ADD COLUMN commission_rate INTEGER",
     "ALTER TABLE v2_order ADD COLUMN commission_auto_check INTEGER",
     "ALTER TABLE v2_order ADD COLUMN commission_balance INTEGER",
+    "CREATE TABLE IF NOT EXISTS v2_traffic_pending_check (user_id INTEGER PRIMARY KEY, updated_at INTEGER NOT NULL)",
     "ALTER TABLE v2_order ADD COLUMN discount_amount INTEGER",
     "ALTER TABLE v2_order ADD COLUMN paid_at INTEGER",
     "ALTER TABLE v2_order ADD COLUMN callback_no TEXT",
@@ -498,6 +499,10 @@ async function ensureBootstrap(env: Env) {
     "CREATE INDEX IF NOT EXISTS idx_v2_stat_server_upload ON v2_stat_server(u)",
     "CREATE INDEX IF NOT EXISTS idx_v2_stat_server_download ON v2_stat_server(d)",
     "CREATE INDEX IF NOT EXISTS idx_v2_user_availability ON v2_user(banned, expired_at, group_id, transfer_enable, u, d)",
+    "CREATE INDEX IF NOT EXISTS idx_v2_stat_user_u ON v2_stat_user(u)",
+    "CREATE INDEX IF NOT EXISTS idx_v2_stat_user_d ON v2_stat_user(d)",
+    "CREATE INDEX IF NOT EXISTS idx_v2_commission_log_created_at ON v2_commission_log(created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_v2_commission_log_get_amount ON v2_commission_log(get_amount)",
     "CREATE INDEX IF NOT EXISTS idx_v2_user_t ON v2_user(t)",
     "CREATE INDEX IF NOT EXISTS idx_v2_user_online_count ON v2_user(online_count)",
     "CREATE INDEX IF NOT EXISTS idx_v2_user_created_at ON v2_user(created_at)",
@@ -2335,6 +2340,59 @@ function addOrderMonths(timestamp: number, months: number) {
   return Math.floor(date.getTime() / 1000);
 }
 
+const EDGE_SHANGHAI_OFFSET = 8 * 3600;
+function edgeShanghaiParts(ts: number) {
+  const date = new Date((ts + EDGE_SHANGHAI_OFFSET) * 1000);
+  return { year: date.getUTCFullYear(), month: date.getUTCMonth(), day: date.getUTCDate(), hour: date.getUTCHours(), minute: date.getUTCMinutes(), second: date.getUTCSeconds() };
+}
+function edgeShanghaiTimestamp(year: number, month: number, day: number, hour = 0, minute = 0, second = 0) {
+  return Math.floor(Date.UTC(year, month, day, hour, minute, second) / 1000) - EDGE_SHANGHAI_OFFSET;
+}
+function edgeDaysInMonth(year: number, month: number) { return new Date(Date.UTC(year, month + 1, 0)).getUTCDate(); }
+function edgeNextResetAt(expiredAt: number | null, method: number, from: number) {
+  if (expiredAt == null || method === 2) return null;
+  const current = edgeShanghaiParts(from); const expiry = edgeShanghaiParts(expiredAt);
+  if (method === 0) return edgeShanghaiTimestamp(current.year + (current.month === 11 ? 1 : 0), current.month === 11 ? 0 : current.month + 1, 1);
+  if (method === 1) {
+    let candidate = edgeShanghaiTimestamp(current.year, current.month, expiry.day, expiry.hour, expiry.minute, expiry.second);
+    if (candidate > from) return candidate;
+    const month = current.month === 11 ? 0 : current.month + 1; const year = current.year + (current.month === 11 ? 1 : 0);
+    return edgeShanghaiTimestamp(year, month, Math.min(expiry.day, edgeDaysInMonth(year, month)), expiry.hour, expiry.minute, expiry.second);
+  }
+  if (method === 3) return edgeShanghaiTimestamp(current.year + 1, 0, 1);
+  if (method === 4) {
+    const candidate = edgeShanghaiTimestamp(current.year, expiry.month, expiry.day, expiry.hour, expiry.minute, expiry.second);
+    if (candidate > from) return candidate;
+    const year = current.year + 1;
+    return edgeShanghaiTimestamp(year, expiry.month, Math.min(expiry.day, edgeDaysInMonth(year, expiry.month)), expiry.hour, expiry.minute, expiry.second);
+  }
+  return null;
+}
+
+async function orderCommission(env: Env, user: Record<string, any>, totalAmount: number) {
+  const inviteUserId = nullableNumber(user.invite_user_id);
+  if (!inviteUserId || totalAmount <= 0) return { inviteUserId: null, commissionBalance: 0 };
+  const inviter = await env.XBOARD_DB.prepare("SELECT id, commission_type, commission_rate FROM v2_user WHERE id = ?").bind(inviteUserId).first<Record<string, any>>();
+  if (!inviter) return { inviteUserId, commissionBalance: 0 };
+  let commissionType = Number(inviter.commission_type || 0);
+  if (commissionType === 0) commissionType = Number(pickSetting(await settings(env.XBOARD_DB), "commission_first_time_enable", 1)) ? 2 : 1;
+  if (commissionType === 2) {
+    const valid = await env.XBOARD_DB.prepare("SELECT id FROM v2_order WHERE user_id = ? AND status NOT IN (0, 2) LIMIT 1").bind(user.id).first();
+    if (valid) return { inviteUserId, commissionBalance: 0 };
+  }
+  const all = await settings(env.XBOARD_DB);
+  const rate = Number(inviter.commission_rate || pickSetting(all, "invite_commission", 10));
+  return { inviteUserId, commissionBalance: Math.trunc(totalAmount * rate / 100) };
+}
+
+async function cancelOrder(env: Env, order: Record<string, any>, ts: number) {
+  const refund = Math.max(0, Number(order.balance_amount || 0));
+  const statements = [];
+  if (refund) statements.push(env.XBOARD_DB.prepare("UPDATE v2_user SET balance = COALESCE(balance, 0) + (SELECT COALESCE(balance_amount, 0) FROM v2_order WHERE id = ? AND status = 0), updated_at = ? WHERE id = ?").bind(order.id, ts, order.user_id));
+  statements.push(env.XBOARD_DB.prepare("UPDATE v2_order SET status = 2, updated_at = ? WHERE id = ? AND status = 0").bind(ts, order.id));
+  await env.XBOARD_DB.batch(statements);
+}
+
 async function adminOrder(request: Request, env: Env, route: string): Promise<Response | null> {
   if (!route.startsWith("/order/")) return null;
   const input = request.method === "POST" ? await body<Record<string, any>>(request.clone()) : {} as Record<string, any>;
@@ -2354,9 +2412,10 @@ async function adminOrder(request: Request, env: Env, route: string): Promise<Re
     const pending = await env.XBOARD_DB.prepare("SELECT id FROM v2_order WHERE user_id=? AND CAST(status AS INTEGER) IN (0,1) LIMIT 1").bind(user.id).first();
     if (pending) return fail("该用户还有待支付的订单，无法分配", 400, 400);
     const orderType = period === "reset_traffic" ? 4 : user.plan_id && Number(user.plan_id) !== planId ? 3 : (Number(user.plan_id) === planId && Number(user.expired_at || 0) > now()) ? 2 : 1;
+    const commission = await orderCommission(env, user, Math.trunc(totalAmount));
     const tradeNo = token(16); const ts = now();
-    await env.XBOARD_DB.prepare("INSERT INTO v2_order(user_id,plan_id,period,trade_no,status,total_amount,type,commission_status,invite_user_id,created_at,updated_at) VALUES (?,?,?,?,0,?,?,0,?,?,?)")
-      .bind(user.id, planId, period, tradeNo, Math.trunc(totalAmount), orderType, user.invite_user_id || null, ts, ts).run();
+    await env.XBOARD_DB.prepare("INSERT INTO v2_order(user_id,plan_id,period,trade_no,status,total_amount,type,commission_status,invite_user_id,commission_balance,created_at,updated_at) VALUES (?,?,?,?,0,?,?,0,?,?,?,?)")
+      .bind(user.id, planId, period, tradeNo, Math.trunc(totalAmount), orderType, commission.inviteUserId, commission.commissionBalance, ts, ts).run();
     return ok(tradeNo);
   }
   if (route === "/order/detail") {
@@ -2372,7 +2431,7 @@ async function adminOrder(request: Request, env: Env, route: string): Promise<Re
   }
   if (Number(order.status) !== 0) return fail("只能对待支付的订单进行操作", 400, 400);
   if (route === "/order/cancel") {
-    await env.XBOARD_DB.prepare("UPDATE v2_order SET status=2,updated_at=? WHERE trade_no=?").bind(now(), tradeNo).run();
+    await cancelOrder(env, order, now());
     return ok(true);
   }
   if (route === "/order/paid") {
@@ -2380,17 +2439,33 @@ async function adminOrder(request: Request, env: Env, route: string): Promise<Re
     const user = await env.XBOARD_DB.prepare("SELECT * FROM v2_user WHERE id=?").bind(order.user_id).first<Record<string, any>>();
     if (!plan || !user) return fail("订单关联的用户或订阅不存在", 400, 400202);
     const period = String(order.period || ""); const ts = now();
+    const statements: D1PreparedStatement[] = [];
+    let resetTraffic = false;
+    let expiredAt: number | null = user.expired_at == null ? null : Number(user.expired_at);
     if (period === "reset_traffic") {
-      await env.XBOARD_DB.prepare("UPDATE v2_user SET u=0,d=0,updated_at=? WHERE id=?").bind(ts, user.id).run();
+      resetTraffic = true;
     } else {
       const months: Record<string, number> = { monthly: 1, quarterly: 3, half_yearly: 6, yearly: 12, two_yearly: 24, three_yearly: 36 };
-      const expiredAt = period === "onetime" ? null : addOrderMonths(Math.max(ts, Number(user.expired_at || 0)), months[period] || 0);
+      const expiryBase = Number(order.type) === 3 ? ts : Math.max(ts, Number(user.expired_at || 0));
+      expiredAt = period === "onetime" ? null : addOrderMonths(expiryBase, months[period] || 0);
       if (period !== "onetime" && !months[period]) return fail("无效的套餐周期", 400, 400);
-      const resetTraffic = Number(order.type) !== 2;
-      await env.XBOARD_DB.prepare("UPDATE v2_user SET plan_id=?,group_id=?,transfer_enable=?,speed_limit=?,device_limit=?,expired_at=?,u=?,d=?,updated_at=? WHERE id=?")
-        .bind(plan.id, plan.group_id, Number(plan.transfer_enable || 0) * 1073741824, plan.speed_limit ?? null, plan.device_limit ?? null, expiredAt, resetTraffic ? 0 : Number(user.u || 0), resetTraffic ? 0 : Number(user.d || 0), ts, user.id).run();
+      resetTraffic = period === "onetime" || user.expired_at == null || Number(order.type) === 1;
     }
-    await env.XBOARD_DB.prepare("UPDATE v2_order SET status=3,paid_at=?,callback_no='manual_operation',updated_at=? WHERE trade_no=?").bind(ts, ts, tradeNo).run();
+    const method = plan.reset_traffic_method === null || plan.reset_traffic_method === undefined ? Number(pickSetting(await settings(env.XBOARD_DB), "reset_traffic_method", 0)) : Number(plan.reset_traffic_method);
+    const nextReset = resetTraffic ? edgeNextResetAt(expiredAt, method, ts) : user.next_reset_at ?? null;
+    if (period === "reset_traffic") {
+      statements.push(env.XBOARD_DB.prepare("UPDATE v2_user SET u=0,d=0,last_reset_at=?,next_reset_at=?,reset_count=COALESCE(reset_count,0)+1,updated_at=? WHERE id=?").bind(ts, nextReset, ts, user.id));
+    } else {
+      statements.push(env.XBOARD_DB.prepare("UPDATE v2_user SET plan_id=?,group_id=?,transfer_enable=?,speed_limit=?,device_limit=?,expired_at=?,u=?,d=?,last_reset_at=?,next_reset_at=?,reset_count=COALESCE(reset_count,0)+?,updated_at=? WHERE id=?")
+        .bind(plan.id, plan.group_id, Number(plan.transfer_enable || 0) * 1073741824, plan.speed_limit ?? null, plan.device_limit ?? null, expiredAt, resetTraffic ? 0 : Number(user.u || 0), resetTraffic ? 0 : Number(user.d || 0), resetTraffic ? ts : user.last_reset_at ?? null, nextReset, resetTraffic ? 1 : 0, ts, user.id));
+    }
+    if (resetTraffic) {
+      const resetTypes: Record<number, string> = { 0: "first_day_month", 1: "monthly", 3: "first_day_year", 4: "yearly" };
+      statements.push(env.XBOARD_DB.prepare("INSERT INTO v2_traffic_reset_logs(user_id,reset_type,old_u,old_d,old_upload,old_download,old_total,new_upload,new_download,new_total,trigger_source,metadata,reset_time,created_at) VALUES (?,?,?,?,?,?,?,0,0,0,'order',?,?,?)")
+        .bind(user.id, resetTypes[method] || "manual", Number(user.u || 0), Number(user.d || 0), Number(user.u || 0), Number(user.d || 0), Number(user.u || 0) + Number(user.d || 0), JSON.stringify({ order_id: order.id, trade_no: tradeNo }), ts, ts));
+    }
+    statements.push(env.XBOARD_DB.prepare("UPDATE v2_order SET status=3,paid_at=?,callback_no='manual_operation',updated_at=? WHERE trade_no=?").bind(ts, ts, tradeNo));
+    await env.XBOARD_DB.batch(statements);
     await bump(env.XBOARD_KV, `user_version:${order.user_id}`);
     return ok(true);
   }
@@ -2831,13 +2906,28 @@ async function adminApi(request: Request, env: Env, path: string) {
   if (path.includes("/user/ban")) {
     const input = await body<Record<string, any>>(request.clone());
     const ids = parseJsonArray(input.user_ids || input.ids || input.id);
-    if (ids.length) {
+    const scope = String(input.scope || (ids.length ? "selected" : parseJsonArray(input.filter).length ? "filtered" : "all"));
+    if (scope === "selected" && ids.length) {
       for (const id of ids) {
         await env.XBOARD_DB.prepare("UPDATE v2_user SET banned = 1, updated_at = ? WHERE id = ?").bind(now(), Number(id)).run();
         await env.XBOARD_DB.prepare("DELETE FROM personal_access_tokens WHERE tokenable_id = ?").bind(Number(id)).run();
       }
-    } else if (String(input.scope || "") === "all") {
-      await env.XBOARD_DB.prepare("UPDATE v2_user SET banned = 1, updated_at = ? WHERE is_admin = 0").bind(now()).run();
+    } else if (scope === "filtered") {
+      const fields: Record<string, string> = { id: "id", email: "email", plan_id: "plan_id", group_id: "group_id", banned: "banned", is_admin: "is_admin", is_staff: "is_staff", created_at: "created_at", expired_at: "expired_at" };
+      const clauses: string[] = []; const bindings: any[] = [];
+      for (const filter of parseJsonArray(input.filter)) {
+        const field = fields[String(filter?.id || "")]; const value = filter?.value;
+        if (!field || value === undefined || value === null || value === "") continue;
+        if (Array.isArray(value) && value.length) { clauses.push(`${field} IN (${value.map(() => "?").join(",")})`); bindings.push(...value); continue; }
+        const match = String(value).match(/^(eq|neq|gt|gte|lt|lte):(.*)$/s);
+        if (match) { const operators: Record<string, string> = { eq: "=", neq: "!=", gt: ">", gte: ">=", lt: "<", lte: "<=" }; clauses.push(`${field} ${operators[match[1]]} ?`); bindings.push(match[2]); }
+        else { clauses.push(`${field} LIKE ?`); bindings.push(`%${String(value)}%`); }
+      }
+      if (!clauses.length) return fail("筛选条件不能为空", 422, 422);
+      await env.XBOARD_DB.prepare(`UPDATE v2_user SET banned = 1, updated_at = ? WHERE ${clauses.join(" AND ")}`).bind(now(), ...bindings).run();
+      await env.XBOARD_DB.prepare(`DELETE FROM personal_access_tokens WHERE tokenable_id IN (SELECT id FROM v2_user WHERE ${clauses.join(" AND ")})`).bind(...bindings).run();
+    } else if (scope === "all") {
+      await env.XBOARD_DB.prepare("UPDATE v2_user SET banned = 1, updated_at = ?").bind(now()).run();
       await env.XBOARD_DB.prepare("DELETE FROM personal_access_tokens WHERE tokenable_id IN (SELECT id FROM v2_user WHERE banned = 1)").run();
     } else {
       return fail("user_ids不能为空", 422, 422);
@@ -3311,10 +3401,10 @@ async function userApi(request: Request, env: Env, path: string) {
     if (request.method === "POST" && route === "/order/cancel") {
       const tradeNo = String(input.trade_no || "");
       if (!tradeNo) return fail("参数无效", 422, 422);
-      const order = await env.XBOARD_DB.prepare("SELECT status FROM v2_order WHERE user_id = ? AND trade_no = ?").bind(userId, tradeNo).first<{ status: number }>();
+      const order = await env.XBOARD_DB.prepare("SELECT * FROM v2_order WHERE user_id = ? AND trade_no = ?").bind(userId, tradeNo).first<Record<string, any>>();
       if (!order) return fail("订单不存在", 400, 400);
       if (Number(order.status) !== 0) return fail("只能取消待支付订单", 400, 400);
-      await env.XBOARD_DB.prepare("UPDATE v2_order SET status = 2, updated_at = ? WHERE user_id = ? AND trade_no = ?").bind(now(), userId, tradeNo).run();
+      await cancelOrder(env, order, now());
       return ok(true);
     }
     if (request.method === "POST" && route === "/order/save") {
@@ -3363,8 +3453,14 @@ async function userApi(request: Request, env: Env, path: string) {
       const type = period === "reset_traffic" ? 4
         : Number((user as any).plan_id) > 0 && Number((user as any).plan_id) !== planId && ((user as any).expired_at === null || Number((user as any).expired_at) > ts) ? 3
         : Number((user as any).plan_id) === planId && ((user as any).expired_at === null || Number((user as any).expired_at) > ts) ? 2 : 1;
-      const statements = [env.XBOARD_DB.prepare("INSERT INTO v2_order(user_id, plan_id, period, trade_no, status, total_amount, discount_amount, coupon_id, type, invite_user_id, created_at, updated_at) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)")
-        .bind(userId, planId, period, tradeNo, totalAmount, discountAmount, couponId, type, totalAmount > 0 ? (user as any).invite_user_id || null : null, ts, ts)];
+      if (type === 3 && !Number(pickSetting(await settings(env.XBOARD_DB), "plan_change_enable", 1))) return fail("目前不允许更改订阅，请联系客服或提交工单操作", 400, 400);
+      const currentUser = await env.XBOARD_DB.prepare("SELECT * FROM v2_user WHERE id = ?").bind(userId).first<Record<string, any>>() || user as Record<string, any>;
+      const commission = await orderCommission(env, currentUser, totalAmount);
+      const balanceAmount = Math.min(Math.max(0, Number(currentUser.balance || 0)), totalAmount);
+      totalAmount -= balanceAmount;
+      const statements = [env.XBOARD_DB.prepare("INSERT INTO v2_order(user_id, plan_id, period, trade_no, status, total_amount, balance_amount, discount_amount, coupon_id, type, invite_user_id, commission_balance, created_at, updated_at) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        .bind(userId, planId, period, tradeNo, totalAmount, balanceAmount, discountAmount, couponId, type, commission.inviteUserId, commission.commissionBalance, ts, ts)];
+      if (balanceAmount) statements.push(env.XBOARD_DB.prepare("UPDATE v2_user SET balance = balance - ?, updated_at = ? WHERE id = ? AND balance >= ?").bind(balanceAmount, ts, userId, balanceAmount));
       if (couponUpdate) statements.push(couponUpdate);
       await env.XBOARD_DB.batch(statements);
       return ok(tradeNo);

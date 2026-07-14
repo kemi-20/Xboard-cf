@@ -59,7 +59,7 @@ async function patchWrangler(worker, accountId, databaseId, kvId) {
 const account = await discoverAccount();
 const database = await ensureD1(account.id, "xboard-db");
 const kv = await ensureKv(account.id, "xboard-kv");
-const queueNames = ["traffic-events", "mail-events", "telegram-events", "stat-events", "node-sync-events"];
+const queueNames = ["traffic-events", "mail-events"];
 for (const queueName of queueNames) await ensureQueue(account.id, queueName);
 
 for (const worker of ["xboard-edge", "xboard-subscription", "xboard-server", "xboard-jobs", "xboard-cron"]) {

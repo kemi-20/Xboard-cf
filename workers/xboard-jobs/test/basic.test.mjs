@@ -30,4 +30,14 @@ test("mail templates override fallbacks and Resend credentials stay protocol-spe
   assert.doesNotMatch(source, /setting\(env, "email_password"\)/);
   assert.match(source, /replace\(\/\[<>\]\/g, ""\)/);
   assert.match(source, /const html = row[\s\S]*?\? renderedContent/);
+  assert.match(source, /remindExpire/);
+  assert.match(source, /remindTraffic/);
+  assert.match(source, /legacyAliases/);
+  assert.match(source, /recipients\.map\(email/);
+});
+
+test("traffic events retain the reported users for the exceeded-traffic check", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /INSERT INTO v2_traffic_pending_check/);
+  assert.match(source, /ON CONFLICT\(user_id\) DO UPDATE/);
 });

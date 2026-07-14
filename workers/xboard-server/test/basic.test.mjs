@@ -49,3 +49,10 @@ test("websocket device state follows the official per-IP contract", () => {
   assert.match(source, /UPDATE v2_user SET online_count = \?/);
   assert.match(source, /Internal sync token is not configured/);
 });
+
+test("traffic-exceeded user removals are batched per node", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /async function syncUsersChange/);
+  assert.match(source, /input\.scope === "users"/);
+  assert.match(source, /action: "remove", users: affected/);
+});

@@ -22,11 +22,13 @@ async function resolveMailContent(env: Env, payload: any) {
   const defaults: Record<string, { subject: string; content: string }> = {
     verify: { subject: "{{name}} - 邮箱验证码", content: "您的验证码是：{{code}}。返回 {{url}}" },
     notify: { subject: "{{name}} - 站点通知", content: "{{content}}\n\n{{url}}" },
-    remind_expire: { subject: "{{name}} - 服务即将到期", content: "您的服务即将到期，请及时续费。{{url}}" },
-    remind_traffic: { subject: "{{name}} - 流量使用提醒", content: "您的流量使用量已接近上限。{{url}}" }
+    remindExpire: { subject: "{{name}} - 服务即将到期", content: "您的服务即将到期，请及时续费。{{url}}" },
+    remindTraffic: { subject: "{{name}} - 流量使用提醒", content: "您的流量使用量已接近上限。{{url}}" }
   };
   const name = String(payload.template_name || "notify");
-  const row = await env.XBOARD_DB.prepare("SELECT subject, content FROM v2_mail_templates WHERE name = ?").bind(name).first<{ subject: string; content: string }>();
+  const legacyAliases: Record<string, string> = { remindExpire: "remind_expire", remindTraffic: "remind_traffic", remind_expire: "remindExpire", remind_traffic: "remindTraffic" };
+  let row = await env.XBOARD_DB.prepare("SELECT subject, content FROM v2_mail_templates WHERE name = ?").bind(name).first<{ subject: string; content: string }>();
+  if (!row && legacyAliases[name]) row = await env.XBOARD_DB.prepare("SELECT subject, content FROM v2_mail_templates WHERE name = ?").bind(legacyAliases[name]).first<{ subject: string; content: string }>();
   const template = row || defaults[name] || defaults.notify;
   const vars = payload.vars || {};
   const subject = render(String(template.subject || ""), vars) || render(String(payload.subject || ""), vars);
@@ -96,6 +98,7 @@ async function traffic(env: Env, event: any) {
     const ts = now();
     await runOnce(env, `${event.event_id}:user:${uid}`, "traffic:user", row, [
       env.XBOARD_DB.prepare("UPDATE v2_user SET u = u + ?, d = d + ?, t = ?, updated_at = ? WHERE id = ?").bind(u, d, ts, ts, uid),
+      env.XBOARD_DB.prepare("INSERT INTO v2_traffic_pending_check(user_id, updated_at) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET updated_at = excluded.updated_at").bind(uid, ts),
       env.XBOARD_DB.prepare("INSERT INTO v2_stat_user(user_id, server_id, server_type, u, d, rate, server_rate, record_type, record_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'd', ?, ?, ?) ON CONFLICT(user_id, server_id, server_type, record_at) DO UPDATE SET u = u + excluded.u, d = d + excluded.d, rate = excluded.rate, server_rate = excluded.server_rate, updated_at = excluded.updated_at")
         .bind(uid, event.server_id || 0, event.server_type || "unknown", u, d, rate, rate, recordAt, ts, ts)
     ]);
@@ -152,10 +155,11 @@ async function mail(env: Env, event: any) {
   let resendId = "";
   try { resendId = String(JSON.parse(responseText)?.id || ""); } catch {}
   const ts = now();
-  await runOnce(env, event.event_id, "mail", { ...event, resend_id: resendId }, [
+  const recipients: string[] = Array.isArray(payload.to) ? payload.to.map(String) : [String(payload.to)];
+  await runOnce(env, event.event_id, "mail", { ...event, resend_id: resendId }, recipients.map(email =>
     env.XBOARD_DB.prepare("INSERT INTO v2_mail_log(email, subject, template_name, error, created_at, updated_at) VALUES (?, ?, ?, NULL, ?, ?)")
-      .bind(String(payload.to), String(payload.subject), String(payload.template_name || "notify"), ts, ts)
-  ]);
+      .bind(email, String(payload.subject), String(payload.template_name || "notify"), ts, ts)
+  ));
 }
 
 async function telegram(env: Env, event: any) {

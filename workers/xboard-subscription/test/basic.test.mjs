@@ -107,6 +107,26 @@ test("client output filters protocols using upstream allowlists", () => {
   assert.match(meta, /Trojan/);
 });
 
+test("client feature filters and protocol-specific allowlists match upstream", () => {
+  const request = new Request("https://sub.example/s/token", { headers: { "user-agent": "stash/3.0.0" } });
+  const servers = [
+    { type: "trojan", name: "Reality", protocol_settings: { tls: 2, network: "tcp" } },
+    { type: "vmess", name: "Upgrade", protocol_settings: { network: "httpupgrade" } },
+    { type: "vless", name: "VLESS", protocol_settings: { tls: 2, network: "ws" } }
+  ];
+  assert.deepEqual(__test.filterByClientCompatibility("stash", request, servers), []);
+  assert.equal(__test.versionAtLeast("1.19.9", "1.19.9"), true);
+  assert.equal(__test.versionAtLeast("1.19.8", "1.19.9"), false);
+  assert.ok(__test.regexValue("~(HK|香港)~i") instanceof RegExp);
+
+  const user = { uuid: "uuid", u: 0, d: 0, transfer_enable: 1 };
+  const ss2022 = [{ type: "shadowsocks", name: "SS2022", host: "example.com", port: 443, protocol_settings: { cipher: "2022-blake3-aes-256-gcm" } }];
+  const clash = __test.output("clash", {}, { clash: "proxies: []\nproxy-groups: []\nrules: []\n" }, user, ss2022, new Request("https://sub.example/s/token?flag=clash"), "token");
+  assert.doesNotMatch(clash, /SS2022/);
+  const singbox = __test.filterByClientCompatibility("singbox", new Request("https://sub.example/s/token?flag=sing-box/1.12.0"), [{ type: "vless", protocol_settings: { network: "xhttp" } }]);
+  assert.equal(singbox.length, 0);
+});
+
 test("invalid type filters behave like upstream and do not hide all nodes", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /filter\(value => validServerTypes\.has\(value\)\)/);

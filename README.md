@@ -84,9 +84,6 @@ KV 绑定：XBOARD_KV
 Queues：
 traffic-events
 mail-events
-telegram-events
-stat-events
-node-sync-events
 
 Durable Object：NodeHub
 Static Assets 绑定：ASSETS

@@ -126,6 +126,99 @@ function clientOf(request: Request): Client {
   return "plain";
 }
 
+function clientDetails(request: Request, fallbackType?: Client) {
+  const raw = (new URL(request.url).searchParams.get("flag") || request.headers.get("user-agent") || "").toLowerCase();
+  const flags = ["clashmetaforandroid", "quantumult-x", "quantumultx", "shadowrocket", "shadowsocks", "surfboard", "sing-box", "hiddify", "v2rayng", "v2rayn", "passwall", "ssrplus", "sagernet", "flclash", "nekobox", "nekoray", "mihomo", "verge", "stash", "surge", "loon", "meta", "sfm", "clash"];
+  let name: string | null = null;
+  let version: string | null = null;
+  const direct = raw.match(/([a-z0-9_-]+)[/\s]+v?(\d+(?:\.\d+){0,2})/i);
+  if (direct && flags.includes(direct[1])) { name = direct[1]; version = direct[2]; }
+  if (!name) name = flags.find(flag => raw.includes(flag)) || null;
+  if (!version && name) version = raw.match(new RegExp(`${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[/\\s]+v?(\\d+(?:\\.\\d+){0,2})`, "i"))?.[1] || null;
+  if (!version) version = raw.match(/\/v?(\d+(?:\.\d+){0,2})/)?.[1] || null;
+  return { type: fallbackType || clientOf(request), name, version, raw };
+}
+
+function versionAtLeast(actual: string | null, required: string) {
+  const left = String(actual || "0").split(".").map(value => Number(value) || 0);
+  const right = String(required || "0").split(".").map(value => Number(value) || 0);
+  for (let index = 0; index < Math.max(left.length, right.length); index++) {
+    if ((left[index] || 0) !== (right[index] || 0)) return (left[index] || 0) > (right[index] || 0);
+  }
+  return true;
+}
+
+function serverValue(server: any, path: string) {
+  return path.split(".").reduce((value, key) => value?.[key], server);
+}
+
+function meetsMappedRequirement(server: any, path: string, versions: Record<string, string>, clientVersion: string | null, strict = false) {
+  const actual = serverValue(server, path);
+  if (actual === null || actual === undefined) return !strict;
+  const required = versions[String(actual)];
+  if (required === undefined) return !strict;
+  return required === "0.0.0" || versionAtLeast(clientVersion, required);
+}
+
+function filterByClientCompatibility(client: Client, request: Request, servers: any[]) {
+  const info = clientDetails(request, client);
+  const name = info.name || (client === "singbox" ? "sing-box" : client === "clashmeta" ? "meta" : client);
+  return servers.filter(server => {
+    if (client === "clashmeta") {
+      const networks: Record<string, string[]> = {
+        vless: ["tcp", "ws", "grpc", "http", "h2", "httpupgrade", "xhttp"],
+        vmess: ["tcp", "ws", "grpc", "http", "h2", "httpupgrade"],
+        trojan: ["tcp", "ws", "grpc", "httpupgrade"]
+      };
+      if (networks[server.type] && !networks[server.type].includes(String(serverValue(server, "protocol_settings.network") || "tcp"))) return false;
+      const hysteriaVersions: Record<string, [string, string]> = { nekobox: ["2", "1.2.7"], clashmetaforandroid: ["2", "2.9.0"], nekoray: ["2", "3.24"], verge: ["2", "1.3.8"], flclash: ["2", "0.8.0"] };
+      const requirement = hysteriaVersions[name];
+      if (info.version && server.type === "hysteria" && requirement && String(serverValue(server, "protocol_settings.version")) === requirement[0] && !versionAtLeast(info.version, requirement[1])) return false;
+      if (info.version && ["meta", "verge", "flclash", "nekobox", "clashmetaforandroid"].includes(name)) {
+        const ech = server.type === "anytls" ? serverValue(server, "protocol_settings.tls.ech.enabled") : serverValue(server, "protocol_settings.tls_settings.ech.enabled");
+        if (Number(ech) === 1 && !versionAtLeast(info.version, "1.19.9")) return false;
+      }
+    }
+    if (client === "stash") {
+      if (server.type === "trojan" && Number(serverValue(server, "protocol_settings.tls")) === 2) return false;
+      if (server.type === "vmess" && serverValue(server, "protocol_settings.network") === "httpupgrade") return false;
+      if (info.version) {
+        const rules: Record<string, [string, Record<string, string>]> = {
+          vless: ["protocol_settings.tls", { "2": "3.1.0" }],
+          hysteria: ["protocol_settings.version", { "1": "2.0.0", "2": "2.5.0" }],
+          shadowsocks: ["protocol_settings.cipher", { "2022-blake3-aes-128-gcm": "3.0.0", "2022-blake3-aes-256-gcm": "3.0.0", "2022-blake3-chacha20-poly1305": "3.0.0" }]
+        };
+        const rule = rules[server.type];
+        if (rule && !meetsMappedRequirement(server, rule[0], rule[1], info.version)) return false;
+        if (server.type === "vless" && !meetsMappedRequirement(server, "protocol_settings.flow", { "xtls-rprx-vision": "3.1.0" }, info.version)) return false;
+      }
+    }
+    if (!info.version) return true;
+    if (client === "plain" && server.type === "hysteria") {
+      const minimum = name === "v2rayng" ? "1.9.5" : name === "v2rayn" ? "6.31" : null;
+      if (minimum && Number(serverValue(server, "protocol_settings.version")) === 2 && !versionAtLeast(info.version, minimum)) return false;
+    }
+    if (client === "loon") {
+      if (server.type === "hysteria" && Number(serverValue(server, "protocol_settings.version")) === 2 && !versionAtLeast(info.version, "637")) return false;
+      if (server.type === "trojan" && !meetsMappedRequirement(server, "protocol_settings.tls", { "0": "3.2.1", "1": "3.2.1", "2": "999.9.9" }, info.version)) return false;
+    }
+    if (client === "surge" && server.type === "hysteria" && Number(serverValue(server, "protocol_settings.version")) === 2 && !versionAtLeast(info.version, "2398")) return false;
+    if (client === "shadowrocket") {
+      if (server.type === "hysteria" && Number(serverValue(server, "protocol_settings.version")) === 2 && !versionAtLeast(info.version, "1993")) return false;
+      if (server.type === "trojan" && !["tcp", "ws", "grpc", "h2", "httpupgrade"].includes(String(serverValue(server, "protocol_settings.network") || "tcp"))) return false;
+    }
+    if (client === "singbox" && name === "sing-box") {
+      if (["vless", "vmess", "trojan"].includes(server.type) && serverValue(server, "protocol_settings.network") === "xhttp") return false;
+      if (server.type === "vless" && !meetsMappedRequirement(server, "protocol_settings.tls", { "2": "1.6.0" }, info.version)) return false;
+      if (server.type === "vless" && !meetsMappedRequirement(server, "protocol_settings.flow", { "xtls-rprx-vision": "1.5.0" }, info.version)) return false;
+      if (server.type === "hysteria" && !meetsMappedRequirement(server, "protocol_settings.version", { "2": "1.5.0" }, info.version)) return false;
+      const ech = serverValue(server, server.type === "hysteria" || server.type === "tuic" || server.type === "anytls" ? "protocol_settings.tls.ech.enabled" : "protocol_settings.tls_settings.ech.enabled");
+      if (Number(ech) === 1 && !versionAtLeast(info.version, server.type === "anytls" ? "1.12.0" : "1.5.0")) return false;
+    }
+    return true;
+  });
+}
+
 function protocolPrefix(server: any) {
   if (server.type === "hysteria") return Number(server.protocol_settings?.version || 1) === 2 ? "[Hy2]" : "[Hy]";
   const prefixes: Config = { vless: "[vless]", shadowsocks: "[ss]", vmess: "[vmess]", trojan: "[trojan]", tuic: "[tuic]", socks: "[socks]", anytls: "[anytls]", http: "[http]" };
@@ -344,9 +437,13 @@ function applyClashExtras(base: Config, ps: any) {
 }
 
 function regexValue(value: unknown) {
-  if (typeof value !== "string" || value.length < 2 || !value.startsWith("/") || value.lastIndexOf("/") === 0) return null;
-  const end = value.lastIndexOf("/");
-  try { return new RegExp(value.slice(1, end), value.slice(end + 1)); } catch { return null; }
+  if (typeof value !== "string" || value.length < 3 || /[a-zA-Z0-9\\]/.test(value[0])) return null;
+  const closing: Record<string, string> = { "(": ")", "[": "]", "{": "}", "<": ">" };
+  const delimiter = closing[value[0]] || value[0];
+  const end = value.lastIndexOf(delimiter);
+  if (end <= 0) return null;
+  const flags = value.slice(end + 1).replace(/[^dgimsuvy]/g, "");
+  try { return new RegExp(value.slice(1, end), flags); } catch { return null; }
 }
 
 function yamlProfile(client: Client, template: string, config: Config, user: any, servers: any[], request: Request) {
@@ -696,7 +793,7 @@ function loonLine(user: any, server: any) {
     if (tls) parts.push("over-tls=true", `skip-cert-verify=${(tls === 2 ? ps.reality_settings?.allow_insecure : ps.tls_settings?.allow_insecure) ? "true" : "false"}`);
     else if (server.type === "vless") parts.push("over-tls=false");
     const serverName = tls === 2 ? ps.reality_settings?.server_name : ps.tls_settings?.server_name;
-    if (serverName) parts.push(`${server.type === "trojan" ? "tls-name" : "sni"}=${serverName}`);
+    if (serverName) parts.push(`${["vmess", "trojan"].includes(server.type) ? "tls-name" : "sni"}=${serverName}`);
     if (tls === 2 && ps.reality_settings?.public_key) parts.push(`public-key=${ps.reality_settings.public_key}`);
     if (tls === 2 && ps.reality_settings?.short_id) parts.push(`short-id=${ps.reality_settings.short_id}`);
     if (server.type === "vless" && ps.flow) parts.push(`flow=${ps.flow}`);
@@ -758,14 +855,26 @@ async function templates(env: Env) {
 
 function output(client: Client, config: Config, templateMap: Config, user: any, servers: any[], request: Request, token: string) {
   servers = servers.filter(server => allowedProtocols[client].has(server.type));
-  if (client === "clash") servers = servers.filter(server => !["vmess", "trojan"].includes(server.type) || ["tcp", "ws", "grpc"].includes(String(server.protocol_settings?.network || "tcp")));
+  servers = filterByClientCompatibility(client, request, servers);
+  if (client === "clash") {
+    const clashCiphers = new Set(["aes-128-gcm", "aes-192-gcm", "aes-256-gcm", "chacha20-ietf-poly1305"]);
+    servers = servers.filter(server => server.type !== "shadowsocks" || clashCiphers.has(String(server.protocol_settings?.cipher || "")))
+      .filter(server => !["vmess", "trojan"].includes(server.type) || ["tcp", "ws", "grpc"].includes(String(server.protocol_settings?.network || "tcp")));
+  }
   if (client === "clashmeta") servers = servers.filter(server => server.type !== "vmess" || ["tcp", "ws", "grpc", "http", "h2", "httpupgrade"].includes(String(server.protocol_settings?.network || "tcp")))
     .filter(server => server.type !== "trojan" || ["tcp", "ws", "grpc", "httpupgrade"].includes(String(server.protocol_settings?.network || "tcp")));
   if (client === "surge") {
     const surgeCiphers = new Set(["aes-128-gcm", "aes-192-gcm", "aes-256-gcm", "chacha20-ietf-poly1305", "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm"]);
     servers = servers.filter(server => server.type !== "shadowsocks" || surgeCiphers.has(String(server.protocol_settings?.cipher || "")));
   }
-  if (client === "singbox") servers = servers.filter(server => !(server.type === "vless" && server.protocol_settings?.network === "h2"));
+  if (client === "surfboard") {
+    const surfboardCiphers = new Set(["aes-128-gcm", "aes-192-gcm", "aes-256-gcm", "chacha20-ietf-poly1305", "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305"]);
+    servers = servers.filter(server => server.type !== "shadowsocks" || surfboardCiphers.has(String(server.protocol_settings?.cipher || "")));
+  }
+  if (client === "singbox") {
+    const vlessNetworks = new Set(["tcp", "ws", "grpc", "http", "quic", "httpupgrade"]);
+    servers = servers.filter(server => server.type !== "vless" || vlessNetworks.has(String(server.protocol_settings?.network || "tcp")));
+  }
   if (["clash", "clashmeta", "stash"].includes(client)) return yamlProfile(client, String(templateMap[client] || templateMap.clash || ""), config, user, servers, request);
   if (client === "singbox") return singboxProfile(String(templateMap.singbox || ""), user, servers, request.headers.get("user-agent") || "");
   if (client === "shadowsocks") return shadowsocksProfile(user, servers);
@@ -865,7 +974,7 @@ function matchesConfiguredSubscribePath(pathname: string, configuredPath: unknow
   return token.length > 0 && !token.includes("/");
 }
 
-export const __test = { clientOf, decorateServers, general, generalUri, yamlProfile, clashProxy, singboxOutbound, singboxProfile, adaptSingboxConfig, shadowsocksProfile, textTemplateProfile, proxyLine, shadowrocketLine, quantumultXLine, loonLine, serverPassword, randomizedPort, replaceByPattern, subscriptionUrl, output, responseHeaders, matchesConfiguredSubscribePath };
+export const __test = { clientOf, clientDetails, versionAtLeast, filterByClientCompatibility, regexValue, decorateServers, general, generalUri, yamlProfile, clashProxy, singboxOutbound, singboxProfile, adaptSingboxConfig, shadowsocksProfile, textTemplateProfile, proxyLine, shadowrocketLine, quantumultXLine, loonLine, serverPassword, randomizedPort, replaceByPattern, subscriptionUrl, output, responseHeaders, matchesConfiguredSubscribePath };
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {

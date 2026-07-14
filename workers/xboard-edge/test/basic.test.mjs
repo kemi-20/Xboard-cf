@@ -425,7 +425,13 @@ test("admin orders are persisted and exposed through the official route set", ()
   for (const route of ["fetch", "assign", "detail", "update", "cancel", "paid"]) {
     assert.match(source, new RegExp(`route === "/order/${route}"`));
   }
-  assert.match(source, /INSERT INTO v2_order\(user_id,plan_id,period,trade_no,status,total_amount,type,commission_status,invite_user_id,created_at,updated_at\)/);
+  assert.match(source, /INSERT INTO v2_order\(user_id,plan_id,period,trade_no,status,total_amount,type,commission_status,invite_user_id,commission_balance,created_at,updated_at\)/);
+  assert.match(source, /balance_amount/);
+  assert.match(source, /async function cancelOrder/);
+  assert.match(source, /commission_first_time_enable/);
+  assert.match(source, /period === "onetime" \|\| user\.expired_at == null \|\| Number\(order\.type\) === 1/);
+  assert.match(source, /INSERT INTO v2_traffic_reset_logs/);
+  assert.match(source, /next_reset_at/);
   assert.match(source, /SELECT o\.\*, p\.name AS plan_name FROM v2_order o LEFT JOIN v2_plan p/);
   assert.match(source, /const orderResponse = await adminOrder/);
   assert.match(source, /month_price: "monthly"/);

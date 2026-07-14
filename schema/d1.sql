@@ -387,6 +387,10 @@ CREATE TABLE IF NOT EXISTS v2_job_logs (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS v2_traffic_pending_check (
+  user_id INTEGER PRIMARY KEY,
+  updated_at INTEGER NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS v2_order (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -547,3 +551,7 @@ CREATE INDEX IF NOT EXISTS idx_v2_user_online_count ON v2_user(online_count);
 CREATE INDEX IF NOT EXISTS idx_v2_user_created_at ON v2_user(created_at);
 CREATE INDEX IF NOT EXISTS idx_v2_server_sort ON v2_server(sort);
 CREATE INDEX IF NOT EXISTS idx_v2_stat_user_record_user ON v2_stat_user(record_at, user_id);
+CREATE INDEX IF NOT EXISTS idx_v2_stat_user_u ON v2_stat_user(u);
+CREATE INDEX IF NOT EXISTS idx_v2_stat_user_d ON v2_stat_user(d);
+CREATE INDEX IF NOT EXISTS idx_v2_commission_log_created_at ON v2_commission_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_v2_commission_log_get_amount ON v2_commission_log(get_amount);

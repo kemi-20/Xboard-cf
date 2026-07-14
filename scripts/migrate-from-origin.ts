@@ -1,1 +1,1 @@
-console.log("Migration helper placeholder. Export MySQL data to JSON/CSV, then insert into D1 preserving original table names.");
+throw new Error("This legacy CLI migration helper is not implemented. Use Admin -> System Management -> Data Migration, which provides validation, backup, rollback, and SQLite compatibility mapping.");

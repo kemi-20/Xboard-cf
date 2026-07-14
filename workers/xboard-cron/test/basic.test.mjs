@@ -12,6 +12,8 @@ test("scheduled reminders enqueue the official expiry and traffic notifications"
   assert.match(source, /remind_mail_enable/);
   assert.match(source, /remind_expire/);
   assert.match(source, /remind_traffic/);
+  assert.match(source, /template_name: "remindExpire"/);
+  assert.match(source, /template_name: "remindTraffic"/);
   assert.match(source, /mail:remind-expire/);
   assert.match(source, /mail:remind-traffic/);
   assert.match(source, /MAIL_EVENTS\.sendBatch/);
@@ -29,8 +31,12 @@ test("cron implements the official order, ticket, commission and traffic checks"
   assert.match(source, /check:traffic-exceeded/);
   assert.match(source, /XBOARD_SERVER\.fetch/);
   assert.match(source, /const recordDay = day - 86400/);
-  assert.match(source, /FROM v2_stat_server WHERE record_at >= \? AND record_at < \?/);
+  assert.match(source, /FROM v2_stat_server WHERE created_at >= \? AND created_at < \?/);
   assert.match(source, /transfer_used_total = \?/);
+  for (const field of ["order_total", "paid_count", "paid_total", "commission_count", "commission_total", "register_count", "invite_count"]) assert.match(source, new RegExp(field));
+  assert.match(source, /v2_traffic_reset_logs/);
+  assert.match(source, /v2_traffic_pending_check/);
+  assert.match(source, /scope: "users"/);
   assert.match(source, /WHERE status = 0 AND created_at <= \?/);
   assert.match(source, /WHERE status = 1 ORDER BY id ASC LIMIT 200/);
   assert.match(source, /UPDATE v2_order SET status = 3/);

@@ -37,8 +37,7 @@ function nextResetAt(user: any, systemMethod: number, from = now()) {
     return shanghaiTimestamp(nextYear, nextMonth, 1);
   }
   if (method === 1) {
-    const currentDay = Math.min(expiry.day, daysInMonth(current.year, current.month));
-    let candidate = shanghaiTimestamp(current.year, current.month, currentDay, expiry.hour, expiry.minute, expiry.second);
+    let candidate = shanghaiTimestamp(current.year, current.month, expiry.day, expiry.hour, expiry.minute, expiry.second);
     if (candidate > from) return candidate;
     const month = current.month === 11 ? 0 : current.month + 1;
     const year = current.year + (current.month === 11 ? 1 : 0);
@@ -47,8 +46,7 @@ function nextResetAt(user: any, systemMethod: number, from = now()) {
   }
   if (method === 3) return shanghaiTimestamp(current.year + 1, 0, 1);
   if (method === 4) {
-    const currentDay = Math.min(expiry.day, daysInMonth(current.year, expiry.month));
-    let candidate = shanghaiTimestamp(current.year, expiry.month, currentDay, expiry.hour, expiry.minute, expiry.second);
+    let candidate = shanghaiTimestamp(current.year, expiry.month, expiry.day, expiry.hour, expiry.minute, expiry.second);
     if (candidate > from) return candidate;
     const year = current.year + 1;
     return shanghaiTimestamp(year, expiry.month, Math.min(expiry.day, daysInMonth(year, expiry.month)), expiry.hour, expiry.minute, expiry.second);
@@ -84,12 +82,12 @@ async function sendReminders(env: Env, ts: number, day: number) {
     for (const user of page) {
       const vars = { name: config.app_name || "XBoard", url: config.app_url || "" };
       if (Number(user.remind_expire) && user.expired_at !== null && Number(user.expired_at) > ts && Number(user.expired_at) - 86400 < ts) {
-        events.push({ body: { event_id: `mail:remind-expire:${day}:${user.id}`, type: "mail", payload: { to: user.email, template_name: "remind_expire", vars } } });
+        events.push({ body: { event_id: `mail:remind-expire:${day}:${user.id}`, type: "mail", payload: { to: user.email, template_name: "remindExpire", vars } } });
       }
       const total = Number(user.transfer_enable || 0);
       const ratio = total > 0 ? (Number(user.u || 0) + Number(user.d || 0)) / total : 0;
       if (Number(user.remind_traffic) && ratio >= 0.8 && ratio < 1) {
-        events.push({ body: { event_id: `mail:remind-traffic:${day}:${user.id}`, type: "mail", payload: { to: user.email, template_name: "remind_traffic", vars } } });
+        events.push({ body: { event_id: `mail:remind-traffic:${day}:${user.id}`, type: "mail", payload: { to: user.email, template_name: "remindTraffic", vars } } });
       }
     }
     for (let start = 0; start < events.length; start += 100) await env.MAIL_EVENTS.sendBatch(events.slice(start, start + 100));
@@ -161,14 +159,20 @@ async function statistics(env: Env, ts: number, day: number) {
   const last = await optionalKvGet(env, "schedule:last_run:xboard:statistics");
   if (last && dayStart(Number(last)) >= day) return;
   const users = await env.XBOARD_DB.prepare("SELECT COUNT(*) AS user_count FROM v2_user").first<any>();
-  const traffic = await env.XBOARD_DB.prepare("SELECT COALESCE(SUM(u + d), 0) AS transfer_used FROM v2_stat_server WHERE record_at >= ? AND record_at < ?").bind(recordDay, day).first<any>();
+  const traffic = await env.XBOARD_DB.prepare("SELECT COALESCE(SUM(u + d), 0) AS transfer_used FROM v2_stat_server WHERE created_at >= ? AND created_at < ?").bind(recordDay, day).first<any>();
+  const orders = await env.XBOARD_DB.prepare("SELECT COUNT(*) AS order_count, COALESCE(SUM(total_amount), 0) AS order_total FROM v2_order WHERE created_at >= ? AND created_at < ?").bind(recordDay, day).first<any>();
+  const paid = await env.XBOARD_DB.prepare("SELECT COUNT(*) AS paid_count, COALESCE(SUM(total_amount), 0) AS paid_total FROM v2_order WHERE paid_at >= ? AND paid_at < ? AND status NOT IN (0, 2)").bind(recordDay, day).first<any>();
+  const commissions = await env.XBOARD_DB.prepare("SELECT COUNT(*) AS commission_count, COALESCE(SUM(get_amount), 0) AS commission_total FROM v2_commission_log WHERE created_at >= ? AND created_at < ?").bind(recordDay, day).first<any>();
+  const registrations = await env.XBOARD_DB.prepare("SELECT COUNT(*) AS register_count, COALESCE(SUM(CASE WHEN invite_user_id IS NOT NULL THEN 1 ELSE 0 END), 0) AS invite_count FROM v2_user WHERE created_at >= ? AND created_at < ?").bind(recordDay, day).first<any>();
   const userCount = Number(users?.user_count || 0);
   const transferUsed = Number(traffic?.transfer_used || 0);
   const existing = await env.XBOARD_DB.prepare("SELECT id FROM v2_stat WHERE record_at = ? ORDER BY id ASC LIMIT 1").bind(recordDay).first<any>();
   if (existing) {
-    await env.XBOARD_DB.prepare("UPDATE v2_stat SET user_count = ?, transfer_used = ?, transfer_used_total = ?, record_type = 'd', updated_at = ? WHERE id = ?").bind(userCount, transferUsed, transferUsed, ts, existing.id).run();
+    await env.XBOARD_DB.prepare("UPDATE v2_stat SET user_count = ?, order_count = ?, order_total = ?, paid_count = ?, paid_total = ?, commission_count = ?, commission_total = ?, register_count = ?, invite_count = ?, transfer_used = ?, transfer_used_total = ?, record_type = 'd', updated_at = ? WHERE id = ?")
+      .bind(userCount, Number(orders?.order_count || 0), Number(orders?.order_total || 0), Number(paid?.paid_count || 0), Number(paid?.paid_total || 0), Number(commissions?.commission_count || 0), Number(commissions?.commission_total || 0), Number(registrations?.register_count || 0), Number(registrations?.invite_count || 0), transferUsed, transferUsed, ts, existing.id).run();
   } else {
-    await env.XBOARD_DB.prepare("INSERT INTO v2_stat(record_at, record_type, user_count, order_count, transfer_used, transfer_used_total, created_at, updated_at) VALUES (?, 'd', ?, 0, ?, ?, ?, ?)").bind(recordDay, userCount, transferUsed, transferUsed, ts, ts).run();
+    await env.XBOARD_DB.prepare("INSERT INTO v2_stat(record_at, record_type, user_count, order_count, order_total, paid_count, paid_total, commission_count, commission_total, register_count, invite_count, transfer_used, transfer_used_total, created_at, updated_at) VALUES (?, 'd', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(recordDay, userCount, Number(orders?.order_count || 0), Number(orders?.order_total || 0), Number(paid?.paid_count || 0), Number(paid?.paid_total || 0), Number(commissions?.commission_count || 0), Number(commissions?.commission_total || 0), Number(registrations?.register_count || 0), Number(registrations?.invite_count || 0), transferUsed, transferUsed, ts, ts).run();
   }
   await optionalKvPut(env, "schedule:last_run:xboard:statistics", String(ts));
 }
@@ -207,11 +211,16 @@ async function openProcessingOrder(env: Env, order: Record<string, any>, ts: num
   }
 
   const balance = Number(user.balance || 0) + Number(order.surplus_credit || 0);
+  const systemMethod = Number(await setting(env, "reset_traffic_method", "1"));
+  let resetTraffic = false;
+  let nextReset: number | null = user.next_reset_at == null ? null : Number(user.next_reset_at);
   if (period === "reset_traffic") {
-    statements.push(env.XBOARD_DB.prepare("UPDATE v2_user SET u = 0, d = 0, balance = ?, updated_at = ? WHERE id = ?").bind(balance, ts, user.id));
+    resetTraffic = true;
+    nextReset = nextResetAt({ ...user, reset_traffic_method: plan.reset_traffic_method }, systemMethod, ts);
+    statements.push(env.XBOARD_DB.prepare("UPDATE v2_user SET u = 0, d = 0, balance = ?, last_reset_at = ?, next_reset_at = ?, reset_count = COALESCE(reset_count, 0) + 1, updated_at = ? WHERE id = ?").bind(balance, ts, nextReset, ts, user.id));
   } else {
     const transferEnable = Number(plan.transfer_enable || 0) * 1073741824;
-    const resetTraffic = period === "onetime" || user.expired_at == null || Number(order.type) === 1;
+    resetTraffic = period === "onetime" || user.expired_at == null || Number(order.type) === 1;
     let expiredAt: number | null = null;
     if (period !== "onetime") {
       const months: Record<string, number> = { monthly: 1, quarterly: 3, half_yearly: 6, yearly: 12, two_yearly: 24, three_yearly: 36 };
@@ -219,8 +228,16 @@ async function openProcessingOrder(env: Env, order: Record<string, any>, ts: num
       const base = Number(order.type) === 3 ? ts : Math.max(ts, Number(user.expired_at || 0));
       expiredAt = addOrderMonths(base, months[period]);
     }
-    statements.push(env.XBOARD_DB.prepare(`UPDATE v2_user SET plan_id = ?, group_id = ?, transfer_enable = ?, speed_limit = ?, device_limit = ?, expired_at = ?, u = ?, d = ?, balance = ?, updated_at = ? WHERE id = ?`)
-      .bind(plan.id, plan.group_id, transferEnable, plan.speed_limit ?? null, plan.device_limit ?? null, expiredAt, resetTraffic ? 0 : Number(user.u || 0), resetTraffic ? 0 : Number(user.d || 0), balance, ts, user.id));
+    if (resetTraffic) nextReset = nextResetAt({ ...user, expired_at: expiredAt, reset_traffic_method: plan.reset_traffic_method }, systemMethod, ts);
+    statements.push(env.XBOARD_DB.prepare(`UPDATE v2_user SET plan_id = ?, group_id = ?, transfer_enable = ?, speed_limit = ?, device_limit = ?, expired_at = ?, u = ?, d = ?, balance = ?, last_reset_at = ?, next_reset_at = ?, reset_count = COALESCE(reset_count, 0) + ?, updated_at = ? WHERE id = ?`)
+      .bind(plan.id, plan.group_id, transferEnable, plan.speed_limit ?? null, plan.device_limit ?? null, expiredAt, resetTraffic ? 0 : Number(user.u || 0), resetTraffic ? 0 : Number(user.d || 0), balance, resetTraffic ? ts : user.last_reset_at ?? null, nextReset, resetTraffic ? 1 : 0, ts, user.id));
+  }
+  if (resetTraffic) {
+    const method = plan.reset_traffic_method === null || plan.reset_traffic_method === undefined ? systemMethod : Number(plan.reset_traffic_method);
+    const resetTypes: Record<number, string> = { 0: "first_day_month", 1: "monthly", 3: "first_day_year", 4: "yearly" };
+    statements.push(env.XBOARD_DB.prepare(`INSERT INTO v2_traffic_reset_logs(user_id, reset_type, old_u, old_d, old_upload, old_download, old_total, new_upload, new_download, new_total, trigger_source, metadata, reset_time, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 'order', ?, ?, ?)`)
+      .bind(user.id, resetTypes[method] || "manual", Number(user.u || 0), Number(user.d || 0), Number(user.u || 0), Number(user.d || 0), Number(user.u || 0) + Number(user.d || 0), JSON.stringify({ order_id: order.id, trade_no: order.trade_no }), ts, ts));
   }
   statements.push(env.XBOARD_DB.prepare("UPDATE v2_order SET status = 3, updated_at = ? WHERE id = ? AND status = 1").bind(ts, order.id));
   await env.XBOARD_DB.batch(statements);
@@ -250,15 +267,31 @@ async function checkOrders(env: Env, ts: number) {
 async function checkTrafficExceeded(env: Env) {
   if (!await optionalKvGet(env, "traffic:pending_check")) return;
   try { await env.XBOARD_KV.delete("traffic:pending_check"); } catch {}
-  const users = await env.XBOARD_DB.prepare("SELECT id FROM v2_user WHERE banned = 0 AND transfer_enable > 0 AND u + d >= transfer_enable").all<{ id: number }>();
+  let pendingIds: number[] = [];
+  let users: { results?: { id: number }[] };
+  try {
+    const pending = await env.XBOARD_DB.prepare("SELECT u.id, u.banned, u.transfer_enable, u.u, u.d FROM v2_traffic_pending_check p JOIN v2_user u ON u.id = p.user_id ORDER BY p.updated_at ASC LIMIT 1000").all<any>();
+    pendingIds = (pending.results || []).map(row => Number(row.id));
+    users = { results: (pending.results || []).filter(row => !Number(row.banned) && Number(row.transfer_enable) > 0 && Number(row.u || 0) + Number(row.d || 0) >= Number(row.transfer_enable)).map(row => ({ id: Number(row.id) })) };
+  } catch {
+    users = await env.XBOARD_DB.prepare("SELECT id FROM v2_user WHERE banned = 0 AND transfer_enable > 0 AND u + d >= transfer_enable").all<{ id: number }>();
+  }
   const token = await setting(env, "internal_sync_token", await setting(env, "server_token"));
-  for (const user of users.results || []) {
+  const ids = (users.results || []).map(user => Number(user.id));
+  if (ids.length) {
     try {
       await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/sync", {
         method: "POST",
         headers: { "content-type": "application/json", "x-xboard-internal-token": token },
-        body: JSON.stringify({ scope: "user", user_id: Number(user.id) })
+        body: JSON.stringify({ scope: "users", user_ids: ids })
       });
+    } catch {}
+  }
+  if (pendingIds.length) {
+    try {
+      await env.XBOARD_DB.prepare(`DELETE FROM v2_traffic_pending_check WHERE user_id IN (${pendingIds.map(() => "?").join(",")})`).bind(...pendingIds).run();
+      const remaining = await env.XBOARD_DB.prepare("SELECT user_id FROM v2_traffic_pending_check LIMIT 1").first();
+      if (remaining) await optionalKvPut(env, "traffic:pending_check", String(now()));
     } catch {}
   }
 }

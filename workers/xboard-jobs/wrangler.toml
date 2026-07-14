@@ -18,12 +18,3 @@ queue = "traffic-events"
 [[queues.consumers]]
 queue = "mail-events"
 
-[[queues.consumers]]
-queue = "telegram-events"
-
-[[queues.consumers]]
-queue = "stat-events"
-
-[[queues.consumers]]
-queue = "node-sync-events"
-
