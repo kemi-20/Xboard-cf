@@ -181,18 +181,21 @@ async function inspectRedis(file) {
 
 async function inspect() {
   const sqliteFile = $("#sqlite-file").files[0];
-  const redisFile = $("#redis-file").files[0];
-  if (!sqliteFile || !redisFile) throw new Error("请同时选择 SQLite3 和 Redis 备份文件");
-  state.sqliteFile = sqliteFile; state.redisFile = redisFile;
-  $("#inspect").disabled = true; $("#file-status").textContent = "正在读取两份备份";
+  const redisFile = $("#redis-file").files[0] || null;
+  if (!sqliteFile) throw new Error("请选择 SQLite3 数据库文件");
+  state.sqliteFile = sqliteFile; state.redisFile = redisFile; state.redisEntries = [];
+  $("#inspect").disabled = true; $("#file-status").textContent = redisFile ? "正在读取 SQLite 与 Redis 备份" : "正在读取 SQLite 备份";
   try {
     const sqliteCounts = await inspectSqlite(sqliteFile);
-    const redisCount = await inspectRedis(redisFile);
+    const redisCount = redisFile ? await inspectRedis(redisFile) : 0;
     state.sqliteTotal = Object.values(sqliteCounts).reduce((sum, count) => sum + Number(count), 0);
-    state.counts = { ...sqliteCounts, redis_useful_keys: redisCount };
+    state.counts = redisFile ? { ...sqliteCounts, redis_useful_keys: redisCount } : { ...sqliteCounts };
     state.total = state.sqliteTotal + redisCount;
-    $("#preflight-content").innerHTML = `<p class="success">联合校验通过：SQLite ${state.sqliteTotal.toLocaleString()} 行，Redis ${redisCount.toLocaleString()} 个有效键。</p><div class="warning"><strong>以下服务配置无法迁移</strong>原版 SMTP/邮件驱动设置和支付渠道、支付插件配置不会导入。迁移完成后，请在新后台的邮件设置中手动配置 Resend API Key、发件人邮箱和发件人名称。邮件模板、订单等可审计业务历史仍会保留，但真实支付功能不会启用。</div><p class="muted">队列任务、Horizon 监控、调度锁、旧会话、验证码和限流计数不会导入。</p>${renderCounts(state.counts)}`;
-    $("#preflight").hidden = false; $("#file-status").textContent = `${sqliteFile.name} + ${redisFile.name}`; setStep(2);
+    const sourceSummary = redisFile
+      ? `<p class="success">联合校验通过：SQLite ${state.sqliteTotal.toLocaleString()} 行，Redis ${redisCount.toLocaleString()} 个有效键。</p>`
+      : `<p class="success">SQLite 校验通过：${state.sqliteTotal.toLocaleString()} 行。</p><div class="warning"><strong>未选择 Redis 备份</strong>核心业务数据可以正常迁移。节点在线状态、近期负载、Metrics、旧 Session 和其他临时缓存不会保留；节点重新连接后会自动重新生成运行状态。</div>`;
+    $("#preflight-content").innerHTML = `${sourceSummary}<div class="warning"><strong>以下服务配置无法迁移</strong>原版 SMTP/邮件驱动设置和支付渠道、支付插件配置不会导入。迁移完成后，请在新后台的邮件设置中手动配置 Resend API Key、发件人邮箱和发件人名称。邮件模板、订单等可审计业务历史仍会保留，但真实支付功能不会启用。</div><p class="muted">队列任务、Horizon 监控、调度锁、旧会话、验证码和限流计数不会导入。</p>${renderCounts(state.counts)}`;
+    $("#preflight").hidden = false; $("#file-status").textContent = redisFile ? `${sqliteFile.name} + ${redisFile.name}` : `${sqliteFile.name}（未选择 Redis）`; setStep(2);
   } finally { $("#inspect").disabled = false; }
 }
 
@@ -229,10 +232,11 @@ function updateProgress(label) { $("#progress-label").textContent = label; $("#p
 async function migrate() {
   $("#migrate").disabled = true; $("#running").hidden = false; setStep(3); state.done = 0; $("#log").textContent = "";
   try {
-    const started = await api("/start", { method: "POST", body: JSON.stringify({ source_type: "xboard", source_name: `${state.sqliteFile.name} + ${state.redisFile.name}`, source_size: state.sqliteFile.size + state.redisFile.size, source_counts: state.counts, mode: $("#mode").value }) });
+    const hasRedis = Boolean(state.redisFile);
+    const started = await api("/start", { method: "POST", body: JSON.stringify({ source_type: hasRedis ? "xboard" : "sqlite", source_name: hasRedis ? `${state.sqliteFile.name} + ${state.redisFile.name}` : state.sqliteFile.name, source_size: state.sqliteFile.size + (state.redisFile?.size || 0), source_counts: state.counts, mode: $("#mode").value }) });
     state.runId = started.run_id; state.migrationToken = started.migration_token; log(`任务 ${state.runId} 已创建，策略 ${started.mode}`);
     await migrateSqlite();
-    await migrateRedis();
+    if (hasRedis) await migrateRedis();
     const report = await api("/finish", { method: "POST", body: JSON.stringify({ run_id: state.runId }) });
     updateProgress("迁移完成"); setStep(4); $("#result").hidden = false;
     $("#report").innerHTML = `<p class="success">任务 ${state.runId} 已完成。</p>${report.warnings?.length ? `<p class="error">${report.warnings.join("<br>")}</p>` : "<p>源数据接收数量校验通过。</p>"}${report.target_counts ? renderCounts(report.target_counts) : ""}`;

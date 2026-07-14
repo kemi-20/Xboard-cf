@@ -26,8 +26,8 @@
       <section class="panel">
         <h2>迁移源</h2>
         <div class="grid">
-          <div class="field"><label for="sqlite-file">SQLite3 数据库</label><input id="sqlite-file" type="file" accept=".db,.sqlite,.sqlite3"></div>
-          <div class="field"><label for="redis-file">Redis RDB / JSON</label><input id="redis-file" type="file" accept=".rdb,.json,application/json"></div>
+          <div class="field"><label for="sqlite-file">SQLite3 数据库（必选）</label><input id="sqlite-file" type="file" accept=".db,.sqlite,.sqlite3" required></div>
+          <div class="field"><label for="redis-file">Redis RDB / JSON（可选）</label><input id="redis-file" type="file" accept=".rdb,.json,application/json"></div>
           <div class="field"><label for="mode">冲突策略</label><select id="mode"><option value="overwrite">完整切换（保留原版主键关系）</option><option value="merge">合并并保留 D1 现有记录</option></select></div>
         </div>
         <div class="actions"><button class="button primary" id="inspect">开始预检</button><span id="file-status" class="muted"></span></div>

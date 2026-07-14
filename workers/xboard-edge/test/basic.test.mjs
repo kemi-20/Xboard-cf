@@ -228,9 +228,13 @@ test("migration UI parses SQLite and Redis backups locally", () => {
   const index = fs.readFileSync("src/index.ts", "utf8");
   assert.match(page, /SQLite3/);
   assert.match(page, /Redis RDB \/ JSON/);
+  assert.match(page, /SQLite3 数据库（必选）/);
+  assert.match(page, /Redis RDB \/ JSON（可选）/);
   assert.match(page, /sqlite-file/);
   assert.match(page, /redis-file/);
-  assert.match(app, /source_type: "xboard"/);
+  assert.match(app, /source_type: hasRedis \? "xboard" : "sqlite"/);
+  assert.match(app, /if \(hasRedis\) await migrateRedis\(\)/);
+  assert.match(app, /未选择 Redis 备份/);
   assert.match(app, /initSqlJs/);
   assert.match(app, /REDIS\\d\{4\}/);
   assert.match(app, /usefulRedisKey/);

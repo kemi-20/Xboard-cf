@@ -166,14 +166,14 @@ npx wrangler d1 execute xboard-db --remote --config workers/xboard-edge/wrangler
 https://你的域名/admin/migration
 ```
 
-如果修改过后台路径，请把 `admin` 换成实际路径。一次迁移必须同时选择原版的两份备份：
+如果修改过后台路径，请把 `admin` 换成实际路径。SQLite3 是必选的正式业务数据库；Redis 是可选的运行状态备份：
 
 ```text
-xboard.db   SQLite3 正式业务数据
-dump.rdb    Redis 运行状态（也支持规范化 Redis JSON）
+xboard.db   SQLite3 正式业务数据（必选）
+dump.rdb    Redis 运行状态（可选，也支持规范化 Redis JSON）
 ```
 
-浏览器会在本地解析两份文件，不会把整个数据库文件上传到第三方。SQLite 数据按最多 100 行一批写入 D1；Redis 只迁移节点心跳、推送时间、在线人数、负载、Metrics、待检查流量用户和旧调度时间。以下瞬时数据会自动跳过：
+浏览器会在本地解析所选文件，不会把整个数据库文件上传到第三方。SQLite 数据按最多 100 行一批写入 D1；选择 Redis 时，只迁移节点心跳、推送时间、在线人数、负载、Metrics、待检查流量用户和旧调度时间。未选择 Redis 不影响用户、套餐、节点配置、订单、设置和历史统计等核心业务数据；节点重新连接后会重新生成在线状态和负载。以下瞬时数据始终会自动跳过：
 
 ```text
 Laravel Horizon 和旧 Queue 任务
