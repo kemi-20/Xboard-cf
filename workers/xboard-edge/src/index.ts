@@ -3388,10 +3388,12 @@ async function adminUi(request: Request, env: Env, securePath: string) {
           const nav = document.querySelector("aside nav");
           // Reserved for a future native plugin/payment implementation. Keep routes and code, hide only the unsupported menus.
           nav?.querySelectorAll('a[href]').forEach(menu => {
-            const pathname = new URL(menu.href, location.origin).pathname;
-            if (pathname.endsWith("/config/plugin") || pathname.endsWith("/config/payment")) {
-              menu.dataset.xboardReservedMenu = "true";
-              menu.style.display = "none";
+            const target = new URL(menu.href, location.href);
+            const route = target.hash.replace(/^#/, "") || target.pathname;
+            if (route === "/config/plugin" || route === "/config/payment") {
+              const item = menu.closest("li") || menu;
+              item.dataset.xboardReservedMenu = "true";
+              item.style.display = "none";
             }
           });
           const migrationLabels = {

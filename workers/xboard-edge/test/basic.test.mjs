@@ -320,9 +320,11 @@ test("migration excludes service credentials that cannot move to Cloudflare", ()
 test("unsupported plugin and payment menus stay reserved but hidden", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /Reserved for a future native plugin\/payment implementation/);
-  assert.match(source, /pathname\.endsWith\("\/config\/plugin"\)/);
-  assert.match(source, /pathname\.endsWith\("\/config\/payment"\)/);
-  assert.match(source, /menu\.style\.display = "none"/);
+  assert.match(source, /target\.hash\.replace\(\/\^#\//);
+  assert.match(source, /route === "\/config\/plugin"/);
+  assert.match(source, /route === "\/config\/payment"/);
+  assert.match(source, /menu\.closest\("li"\) \|\| menu/);
+  assert.match(source, /item\.style\.display = "none"/);
   assert.match(source, /api\.telegram\.org\/bot\$\{botToken\}/);
 });
 
