@@ -269,6 +269,16 @@ test("VMess and Trojan complex transports survive Clash, Surge and Shadowrocket 
   assert.match(shadowrocket, /obfs=websocket/);
 });
 
+test("Shadowrocket Hysteria uses the upstream peer parameter", () => {
+  const user = { uuid: "00000000-0000-4000-8000-000000000000" };
+  const server = { type: "hysteria", name: "Hy2", host: "hy.example.com", port: 443, password: "secret", protocol_settings: { version: 2, tls: { server_name: "sni.example.com", allow_insecure: true }, obfs: { open: true, type: "salamander", password: "obfs-secret" } } };
+  const line = __test.shadowrocketLine(user, server);
+  assert.match(line, /peer=sni\.example\.com/);
+  assert.doesNotMatch(line, /[?&]sni=/);
+  assert.match(line, /obfs=salamander/);
+  assert.match(line, /obfs-password=obfs-secret/);
+});
+
 test("Sing-box selectors honor include, exclude and fallback and protocol-specific fields", () => {
   const user = { uuid: "00000000-0000-4000-8000-000000000000" };
   const servers = [

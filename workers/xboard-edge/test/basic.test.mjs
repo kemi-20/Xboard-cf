@@ -509,3 +509,36 @@ test("admin user updates reject non-numeric numeric fields", () => {
   assert.match(source, /const numericKeys = \["transfer_enable"/);
   assert.match(source, /Number\.isFinite\(Number\(value\)\)/);
 });
+
+test("user knowledge, server availability and invite commission match upstream contracts", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /function userIsAvailable/);
+  assert.match(source, /transfer_enable \|\| 0\) - Number\(user\.u \|\| 0\) - Number\(user\.d \|\| 0\) > 0/);
+  assert.match(source, /language IS NULL/);
+  assert.match(source, /SELECT \$\{selected\} FROM v2_knowledge/);
+  assert.match(source, /phpUrlEncode\(subscription\)/);
+  assert.match(source, /SUM\(COALESCE\(get_amount, amount, 0\)\).*invite_user_id/);
+  assert.match(source, /commission_distribution_l1/);
+  assert.match(source, /COALESCE\(get_amount, amount, 0\) > 0/);
+  assert.match(source, /crypto\.subtle\.digest\("SHA-1"/);
+  assert.match(source, /coupon\.ended_at !== null/);
+});
+
+test("API responses use the same open CORS policy as upstream Laravel", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /pathname\.startsWith\("\/api\/"\)/);
+  assert.match(source, /request\.method === "OPTIONS"/);
+  assert.match(source, /access-control-allow-origin", "\*"/);
+  assert.match(source, /access-control-allow-methods", "\*"/);
+  assert.match(source, /access-control-allow-headers", "\*"/);
+});
+
+test("V2 client app config exposes the complete upstream structure", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const start = source.indexOf('path === "/api/v2/client/app/getConfig"');
+  const section = source.slice(start, source.indexOf('return json({ message: "Not Found"', start));
+  for (const key of ["app_info", "features", "ui_config", "business_rules", "server_config", "security_config", "payment_config", "notification_config", "cache_config", "last_updated", "config_hash"]) {
+    assert.match(section, new RegExp(key));
+  }
+  assert.match(section, /md5\(JSON\.stringify\(config\)\)/);
+});

@@ -490,7 +490,20 @@ function shadowrocketLine(user: any, server: any) {
     else if (ps.network === "ws") params.plugin = `obfs-local;obfs=websocket;obfs-host=${ps.network_settings?.headers?.Host || ""};obfs-uri=${ps.network_settings?.path || ""}`;
     return `trojan://${password}@${address}:${server.port}?${query(params)}&tfo=1#${name}\r\n`;
   }
-  if (server.type === "hysteria") return `${generalUri(user, server)}\r\n`;
+  if (server.type === "hysteria") {
+    const version = Number(ps.version || 1);
+    const params: Config = { peer: ps.tls?.server_name, insecure: ps.tls?.allow_insecure, fastopen: 1 };
+    if (server.ports) params.mport = server.ports;
+    if (version === 2) {
+      params.obfs = ps.obfs?.open ? ps.obfs?.type : "none";
+      if (ps.obfs?.open) params["obfs-password"] = ps.obfs?.password;
+      if (ps.hop_interval !== undefined) params.keepalive = ps.hop_interval;
+      return `hysteria2://${password}@${address}:${server.port}?${query(params)}#${name}\r\n`;
+    }
+    Object.assign(params, { protocol: "udp", auth: password, upmbps: ps.bandwidth?.up, downmbps: ps.bandwidth?.down });
+    if (ps.obfs?.open) Object.assign(params, { obfs: "xplus", obfsParam: ps.obfs?.password });
+    return `hysteria://${address}:${server.port}?${query(params)}#${name}\r\n`;
+  }
   if (server.type === "tuic") {
     const params: Config = { alpn: ps.alpn, sni: ps.tls?.server_name, insecure: ps.tls?.allow_insecure, congestion_control: ps.congestion_control || "cubic" };
     if (Number(ps.version) === 4) params.token = password; else Object.assign(params, { uuid: password, password });

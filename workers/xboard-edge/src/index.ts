@@ -915,12 +915,13 @@ async function clientApi(request: Request, env: Env, path: string) {
     return new Response(stringifyYaml(base), { headers: { "content-type": "text/yaml; charset=utf-8" } });
   }
   if (request.method === "GET" && path === "/api/v2/client/app/getConfig") {
-    return ok({
+    const whitelistSuffix = pickSetting(all, "email_whitelist_suffix", 0);
+    const config: Record<string, any> = {
       app_info: {
         app_name: pickSetting(all, "app_name", "XB加速器"),
         app_description: pickSetting(all, "app_description", "专业的网络加速服务"),
-        app_url: pickSetting(all, "app_url", ""),
-        logo: pickSetting(all, "logo", ""),
+        app_url: pickSetting(all, "app_url", "https://app.example.com"),
+        logo: pickSetting(all, "logo", "https://example.com/logo.png"),
         version: pickSetting(all, "app_version", "1.0.0")
       },
       features: {
@@ -938,8 +939,64 @@ async function clientApi(request: Request, env: Env, path: string) {
         enable_speed_test: Boolean(pickSetting(all, "app_enable_speed_test", true)),
         enable_server_ping: Boolean(pickSetting(all, "app_enable_server_ping", true))
       },
+      ui_config: {
+        theme: {
+          primary_color: pickSetting(all, "app_primary_color", "#00C851"), secondary_color: pickSetting(all, "app_secondary_color", "#007E33"),
+          accent_color: pickSetting(all, "app_accent_color", "#FF6B35"), background_color: pickSetting(all, "app_background_color", "#F5F5F5"),
+          text_color: pickSetting(all, "app_text_color", "#333333")
+        },
+        home_screen: {
+          show_speed_test: Boolean(pickSetting(all, "app_show_speed_test", true)), show_traffic_chart: Boolean(pickSetting(all, "app_show_traffic_chart", true)),
+          show_server_ping: Boolean(pickSetting(all, "app_show_server_ping", true)), default_server_sort: pickSetting(all, "app_default_server_sort", "ping"),
+          show_connection_status: Boolean(pickSetting(all, "app_show_connection_status", true))
+        },
+        server_list: {
+          show_country_flags: Boolean(pickSetting(all, "app_show_country_flags", true)), show_ping_values: Boolean(pickSetting(all, "app_show_ping_values", true)),
+          show_traffic_usage: Boolean(pickSetting(all, "app_show_traffic_usage", true)), group_by_country: Boolean(pickSetting(all, "app_group_by_country", false)),
+          show_server_status: Boolean(pickSetting(all, "app_show_server_status", true))
+        }
+      },
+      business_rules: {
+        min_password_length: Number(pickSetting(all, "app_min_password_length", 8)), max_login_attempts: Number(pickSetting(all, "app_max_login_attempts", 5)),
+        session_timeout_minutes: Number(pickSetting(all, "app_session_timeout_minutes", 30)), auto_disconnect_after_minutes: Number(pickSetting(all, "app_auto_disconnect_after_minutes", 60)),
+        max_concurrent_connections: Number(pickSetting(all, "app_max_concurrent_connections", 3)), traffic_warning_threshold: Number(pickSetting(all, "app_traffic_warning_threshold", 0.8)),
+        subscription_reminder_days: pickSetting(all, "app_subscription_reminder_days", [7, 3, 1]), connection_timeout_seconds: Number(pickSetting(all, "app_connection_timeout_seconds", 10)),
+        health_check_interval_seconds: Number(pickSetting(all, "app_health_check_interval_seconds", 30))
+      },
+      server_config: {
+        default_kernel: pickSetting(all, "app_default_kernel", "clash"), auto_select_fastest: Boolean(pickSetting(all, "app_auto_select_fastest", true)),
+        fallback_servers: pickSetting(all, "app_fallback_servers", ["server1", "server2"]), enable_auto_switch: Boolean(pickSetting(all, "app_enable_auto_switch", true)),
+        switch_threshold_ms: Number(pickSetting(all, "app_switch_threshold_ms", 1000))
+      },
+      security_config: {
+        tos_url: pickSetting(all, "tos_url", "https://example.com/tos"), privacy_policy_url: pickSetting(all, "app_privacy_policy_url", "https://example.com/privacy"),
+        is_email_verify: Number(pickSetting(all, "email_verify", 1)), is_invite_force: Number(pickSetting(all, "invite_force", 0)),
+        email_whitelist_suffix: Array.isArray(whitelistSuffix) ? Number(whitelistSuffix.length > 0) : Number(whitelistSuffix), is_captcha: Number(pickSetting(all, "captcha_enable", 1)),
+        captcha_type: pickSetting(all, "captcha_type", "recaptcha"), recaptcha_site_key: pickSetting(all, "recaptcha_site_key", "6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI"),
+        recaptcha_v3_site_key: pickSetting(all, "recaptcha_v3_site_key", "6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI"),
+        recaptcha_v3_score_threshold: Number(pickSetting(all, "recaptcha_v3_score_threshold", 0.5)), turnstile_site_key: pickSetting(all, "turnstile_site_key", "0x4AAAAAAAABkMYinukE8nzUg")
+      },
+      payment_config: {
+        currency: pickSetting(all, "currency", "CNY"), currency_symbol: pickSetting(all, "currency_symbol", "¥"),
+        withdraw_methods: pickSetting(all, "app_withdraw_methods", ["alipay", "wechat", "bank"]), min_withdraw_amount: Number(pickSetting(all, "app_min_withdraw_amount", 100)),
+        withdraw_fee_rate: Number(pickSetting(all, "app_withdraw_fee_rate", 0.01))
+      },
+      notification_config: {
+        enable_push_notifications: Boolean(pickSetting(all, "app_enable_push_notifications", true)), enable_email_notifications: Boolean(pickSetting(all, "app_enable_email_notifications", true)),
+        enable_sms_notifications: Boolean(pickSetting(all, "app_enable_sms_notifications", false)),
+        notification_schedule: {
+          traffic_warning: Boolean(pickSetting(all, "app_notification_traffic_warning", true)), subscription_expiry: Boolean(pickSetting(all, "app_notification_subscription_expiry", true)),
+          server_maintenance: Boolean(pickSetting(all, "app_notification_server_maintenance", true)), promotional_offers: Boolean(pickSetting(all, "app_notification_promotional_offers", false))
+        }
+      },
+      cache_config: {
+        config_cache_duration: Number(pickSetting(all, "app_config_cache_duration", 3600)), server_list_cache_duration: Number(pickSetting(all, "app_server_list_cache_duration", 1800)),
+        user_info_cache_duration: Number(pickSetting(all, "app_user_info_cache_duration", 900))
+      },
       last_updated: now()
-    });
+    };
+    config.config_hash = md5(JSON.stringify(config));
+    return ok(config);
   }
   return json({ message: "Not Found" }, 404);
 }
@@ -1243,7 +1300,7 @@ async function optionalKvPutTtl(env: Env, key: string, value: string, expiration
   try { await env.XBOARD_KV.put(key, value, { expirationTtl }); } catch { /* Verification mail can still be queued when KV is temporarily unavailable. */ }
 }
 
-async function adminServerRows(env: Env) {
+async function adminServerRows(env: Env): Promise<Record<string, any>[]> {
   const [serverResult, machineResult] = await Promise.all([
     env.XBOARD_DB.prepare("SELECT * FROM v2_server ORDER BY sort ASC, id ASC LIMIT 1000").all<Record<string, any>>(),
     env.XBOARD_DB.prepare("SELECT * FROM v2_server_machine ORDER BY id ASC LIMIT 1000").all<Record<string, any>>()
@@ -1415,6 +1472,17 @@ function boolNumber(value: unknown, fallback = 1) {
   if (value === true || value === "true") return 1;
   if (value === false || value === "false") return 0;
   return Number(value) ? 1 : 0;
+}
+
+function userIsAvailable(user: Record<string, any>) {
+  return !Number(user.banned)
+    && user.plan_id !== null && user.plan_id !== undefined
+    && (user.expired_at === null || user.expired_at === undefined || Number(user.expired_at) > now())
+    && Number(user.transfer_enable || 0) - Number(user.u || 0) - Number(user.d || 0) > 0;
+}
+
+function phpUrlEncode(value: string) {
+  return encodeURIComponent(value).replace(/%20/g, "+").replace(/~/g, "%7E");
 }
 
 function normalizeServerInput(input: Record<string, any>) {
@@ -2984,14 +3052,22 @@ async function userApi(request: Request, env: Env, path: string) {
     const all = await settings(env.XBOARD_DB);
     const codes = await env.XBOARD_DB.prepare("SELECT id, code, status, pv, created_at, updated_at FROM v2_invite_code WHERE user_id = ? AND status = 0 ORDER BY id DESC").bind((user as any).id).all();
     const invited = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE invite_user_id = ${Number((user as any).id)}`);
-    const commission = await firstNumber(env, `SELECT COALESCE(SUM(amount), 0) AS c FROM v2_commission_log WHERE user_id = ${Number((user as any).id)}`);
-    const pendingCommission = await firstNumber(env, `SELECT COALESCE(SUM(commission_balance), 0) AS c FROM v2_order WHERE status = 3 AND commission_status = 0 AND invite_user_id = ${Number((user as any).id)}`);
+    const commission = await firstNumber(env, `SELECT COALESCE(SUM(COALESCE(get_amount, amount, 0)), 0) AS c FROM v2_commission_log WHERE invite_user_id = ${Number((user as any).id)}`);
+    let pendingCommission = await firstNumber(env, `SELECT COALESCE(SUM(commission_balance), 0) AS c FROM v2_order WHERE status = 3 AND commission_status = 0 AND invite_user_id = ${Number((user as any).id)}`);
+    if (Number(pickSetting(all, "commission_distribution_enable", 0))) {
+      pendingCommission = Math.trunc(pendingCommission * Number(pickSetting(all, "commission_distribution_l1", 0)) / 100);
+    }
     const rate = Number((user as any).commission_rate || pickSetting(all, "invite_commission", 10));
     return ok({ codes: codes.results || [], stat: [invited, commission, pendingCommission, rate, Number((user as any).commission_balance || 0)] });
   }
   if (request.method === "GET" && route === "/invite/details") {
-    const result = await env.XBOARD_DB.prepare("SELECT * FROM v2_commission_log WHERE user_id = ? ORDER BY id DESC LIMIT 100").bind((user as any).id).all();
-    return json({ data: result.results || [], total: (result.results || []).length });
+    const url = new URL(request.url);
+    const current = Math.max(1, Number(url.searchParams.get("current") || 1));
+    const pageSize = Math.max(10, Math.min(100, Number(url.searchParams.get("page_size") || 10)));
+    const result = await env.XBOARD_DB.prepare("SELECT id, order_amount, trade_no, COALESCE(get_amount, amount, 0) AS get_amount, created_at FROM v2_commission_log WHERE invite_user_id = ? AND COALESCE(get_amount, amount, 0) > 0 ORDER BY created_at DESC LIMIT ? OFFSET ?")
+      .bind((user as any).id, pageSize, (current - 1) * pageSize).all();
+    const total = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_commission_log WHERE invite_user_id = ${Number((user as any).id)} AND COALESCE(get_amount, amount, 0) > 0`);
+    return json({ data: result.results || [], total });
   }
   if (request.method === "GET" && route === "/comm/config") {
     const all = await settings(env.XBOARD_DB);
@@ -3186,7 +3262,7 @@ async function userApi(request: Request, env: Env, path: string) {
         const ts = now();
         if (!coupon || !Number(coupon.show)) return fail("优惠券无效", 400, 400);
         if (coupon.limit_use !== null && Number(coupon.limit_use) <= 0) return fail("优惠券已用完", 400, 400);
-        if (Number(coupon.started_at || 0) > ts || Number(coupon.ended_at || 0) < ts) return fail("优惠券不在有效期内", 400, 400);
+        if (Number(coupon.started_at || 0) > ts || (coupon.ended_at !== null && coupon.ended_at !== undefined && Number(coupon.ended_at) < ts)) return fail("优惠券不在有效期内", 400, 400);
         const limitedPlans = parseJsonArray(coupon.limit_plan_ids).map(Number);
         if (limitedPlans.length && !limitedPlans.includes(planId)) return fail("优惠券不适用于该套餐", 400, 400);
         const limitedPeriods = parseJsonArray(coupon.limit_period).map(String);
@@ -3233,11 +3309,20 @@ async function userApi(request: Request, env: Env, path: string) {
     return ok(id ? available.find(row => Number((row as any).id) === id) || null : available);
   }
   if (path.includes("/server/fetch")) {
-    const available = !Number((user as any).banned)
-      && Number((user as any).transfer_enable || 0) > 0
-      && ((user as any).expired_at === null || Number((user as any).expired_at) > now());
+    const available = userIsAvailable(user as Record<string, any>);
     if (!available) return ok([]);
-    return ok((await adminServerRows(env)).filter(row => Number((row as any).show ?? 1) === 1 && parseJsonArray((row as any).group_ids).map(Number).includes(Number((user as any).group_id || 0))));
+    const servers = (await adminServerRows(env))
+      .filter(row => Number((row as any).show ?? 1) === 1 && parseJsonArray((row as any).group_ids).map(Number).includes(Number((user as any).group_id || 0)))
+      .map(row => ({
+        id: row.id, type: row.type, version: row.version ?? null, name: row.name, rate: Number(row.rate ?? 1),
+        tags: row.tags, is_online: Number(row.is_online || 0), cache_key: row.cache_key, last_check_at: row.last_check_at
+      }));
+    const digest = await crypto.subtle.digest("SHA-1", new TextEncoder().encode(JSON.stringify(servers.map(row => row.cache_key))));
+    const etag = `"${Array.from(new Uint8Array(digest)).map(value => value.toString(16).padStart(2, "0")).join("")}"`;
+    if ((request.headers.get("if-none-match") || "").split(",").map(value => value.trim()).includes(etag)) return new Response(null, { status: 304, headers: { etag } });
+    const response = ok(servers);
+    response.headers.set("etag", etag);
+    return response;
   }
   if (path.includes("/notice/fetch")) return ok((await rows(env.XBOARD_DB, "v2_notice", 50) as any[]).filter(row => Number(row.show ?? 1) === 1));
   if (path.includes("/knowledge/fetch")) {
@@ -3245,17 +3330,22 @@ async function userApi(request: Request, env: Env, path: string) {
     const id = nullableNumber(url.searchParams.get("id"));
     const language = url.searchParams.get("language");
     const keyword = String(url.searchParams.get("keyword") || "").trim();
+    if (url.searchParams.has("id") && !id) return fail("id 字段格式有误", 422, 422);
+    if (language !== null && language.length > 10) return fail("language 字段长度不能超过10", 422, 422);
+    if (keyword.length > 255) return fail("keyword 字段长度不能超过255", 422, 422);
     const clauses = ["show = 1"];
     const bindings: unknown[] = [];
     if (id) { clauses.push("id = ?"); bindings.push(id); }
-    if (language !== null) { clauses.push("language = ?"); bindings.push(language); }
-    if (keyword) { clauses.push("(title LIKE ? OR body LIKE ?)"); bindings.push(`%${keyword}%`, `%${keyword}%`); }
-    const result = await env.XBOARD_DB.prepare(`SELECT * FROM v2_knowledge WHERE ${clauses.join(" AND ")} ORDER BY sort ASC, id ASC`).bind(...bindings).all<Record<string, any>>();
+    else {
+      clauses.push(language === null ? "language IS NULL" : "language = ?");
+      if (language !== null) bindings.push(language);
+      if (keyword) { clauses.push("(title LIKE ? OR body LIKE ?)"); bindings.push(`%${keyword}%`, `%${keyword}%`); }
+    }
+    const selected = id ? "*" : "id, category, title, updated_at, body";
+    const result = await env.XBOARD_DB.prepare(`SELECT ${selected} FROM v2_knowledge WHERE ${clauses.join(" AND ")} ORDER BY sort ASC, id ASC`).bind(...bindings).all<Record<string, any>>();
     const allSettings = await settings(env.XBOARD_DB);
     const subscription = await subscribeUrl(request, env, String((user as any).token || ""));
-    const available = !Number((user as any).banned)
-      && Number((user as any).transfer_enable || 0) > 0
-      && ((user as any).expired_at === null || Number((user as any).expired_at) > now());
+    const available = userIsAvailable(user as Record<string, any>);
     const safeBase64 = btoa(subscription).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
     const processRow = (row: Record<string, any>): Record<string, any> => {
       let content = String(row.body || "");
@@ -3263,9 +3353,9 @@ async function userApi(request: Request, env: Env, path: string) {
       content = content
         .replaceAll("{{siteName}}", String(pickSetting(allSettings, "app_name", "XBoard")))
         .replaceAll("{{subscribeUrl}}", subscription)
-        .replaceAll("{{urlEncodeSubscribeUrl}}", encodeURIComponent(subscription))
+        .replaceAll("{{urlEncodeSubscribeUrl}}", phpUrlEncode(subscription))
         .replaceAll("{{safeBase64SubscribeUrl}}", safeBase64);
-      return { ...row, body: content };
+      return { id: row.id, category: row.category, title: row.title, ...(row.body !== undefined ? { body: content } : {}), updated_at: row.updated_at };
     };
     const knowledge = (result.results || []).map(processRow);
     if (id) return knowledge[0] ? ok(knowledge[0]) : fail("Article does not exist", 500, 500);
@@ -3470,8 +3560,7 @@ function isAdminDistAlias(pathname: string) {
   return adminUserPaths.some(path => pathname === path || pathname.startsWith(`${path}/`));
 }
 
-export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+async function edgeFetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     if (isNodeProtocolPath(url.pathname, request.method)) return env.XBOARD_SERVER.fetch(request);
     if (url.pathname === "/api/v1/client/subscribe" || url.pathname.startsWith("/s/") || url.pathname.startsWith("/sub/")) return env.XBOARD_SUBSCRIPTION.fetch(request);
@@ -3541,5 +3630,21 @@ export default {
     if (url.pathname.startsWith("/api/v1/user") || url.pathname.startsWith("/api/v2/user")) return userApi(request, env, url.pathname);
     if (url.pathname === "/") return new Response("200", { status: 200, headers: { "content-type": "text/plain; charset=utf-8" } });
     return json({ message: "Not Found" }, 404);
+}
+
+function corsResponse(response: Response) {
+  const headers = new Headers(response.headers);
+  headers.set("access-control-allow-origin", "*");
+  headers.set("access-control-allow-methods", "*");
+  headers.set("access-control-allow-headers", "*");
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const apiRequest = new URL(request.url).pathname.startsWith("/api/");
+    if (apiRequest && request.method === "OPTIONS") return corsResponse(new Response(null, { status: 204 }));
+    const response = await edgeFetch(request, env, ctx);
+    return apiRequest ? corsResponse(response) : response;
   }
 };
