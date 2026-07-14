@@ -1,7 +1,13 @@
-import type { D1Database, D1PreparedStatement, MessageBatch } from "./types";
+import type { D1Database, D1PreparedStatement, KVNamespace, MessageBatch } from "./types";
 import { now, ok } from "./compat";
 
-export interface Env { XBOARD_DB: D1Database; RESEND_API_KEY?: string; RESEND_API_URL?: string; TELEGRAM_BOT_TOKEN?: string; }
+export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; RESEND_API_KEY?: string; RESEND_API_URL?: string; TELEGRAM_BOT_TOKEN?: string; }
+
+const SHANGHAI_OFFSET = 8 * 3600;
+
+function dayStart(ts = now()) {
+  return Math.floor((ts + SHANGHAI_OFFSET) / 86400) * 86400 - SHANGHAI_OFFSET;
+}
 
 async function setting(env: Env, name: string) {
   const row = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = ?").bind(name).first<{ value: string }>();
@@ -9,11 +15,10 @@ async function setting(env: Env, name: string) {
 }
 
 function render(source: string, vars: Record<string, unknown>) {
-  return source.replace(/\{\{\s*([^}]+?)\s*\}\}/g, (_match, key: string) => String(vars[key] ?? ""));
+  return source.replace(/\{\{\s*([^}|]+?)(?:\|([^}]*))?\s*\}\}/g, (_match, key: string, fallback: string | undefined) => String(vars[key.trim()] ?? fallback?.trim() ?? ""));
 }
 
 async function resolveMailContent(env: Env, payload: any) {
-  if (payload.html || payload.text) return payload;
   const defaults: Record<string, { subject: string; content: string }> = {
     verify: { subject: "{{name}} - 邮箱验证码", content: "您的验证码是：{{code}}。返回 {{url}}" },
     notify: { subject: "{{name}} - 站点通知", content: "{{content}}\n\n{{url}}" },
@@ -24,8 +29,12 @@ async function resolveMailContent(env: Env, payload: any) {
   const row = await env.XBOARD_DB.prepare("SELECT subject, content FROM v2_mail_templates WHERE name = ?").bind(name).first<{ subject: string; content: string }>();
   const template = row || defaults[name] || defaults.notify;
   const vars = payload.vars || {};
-  const text = render(String(template.content), vars);
-  return { ...payload, subject: payload.subject || render(String(template.subject), vars), text, html: `<div style="font-family:Arial,sans-serif;white-space:pre-wrap;line-height:1.6">${text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")}</div>` };
+  const subject = render(String(template.subject || ""), vars) || render(String(payload.subject || ""), vars);
+  const text = row || (!payload.html && !payload.text) ? render(String(template.content), vars) : render(String(payload.text || ""), vars);
+  const html = row || (!payload.html && !payload.text)
+    ? `<div style="font-family:Arial,sans-serif;white-space:pre-wrap;line-height:1.6">${text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")}</div>`
+    : payload.html ? render(String(payload.html), vars) : undefined;
+  return { ...payload, subject, text: text || undefined, html };
 }
 
 async function alreadyDone(env: Env, eventId: string) {
@@ -62,8 +71,9 @@ async function runOnce(env: Env, eventId: string, type: string, payload: unknown
 
 async function traffic(env: Env, event: any) {
   const rows = Array.isArray(event.payload) ? event.payload : Array.isArray(event.payload?.data) ? event.payload.data : [event.payload];
-  const rate = Number(event.rate || 1);
-  const recordAt = Math.floor(now() / 86400) * 86400;
+  const parsedRate = Number(event.rate);
+  const rate = Number.isFinite(parsedRate) ? parsedRate : 1;
+  const recordAt = dayStart();
   let serverU = 0;
   let serverD = 0;
   let userU = 0;
@@ -82,7 +92,7 @@ async function traffic(env: Env, event: any) {
     userD += d;
     const ts = now();
     await runOnce(env, `${event.event_id}:user:${uid}`, "traffic:user", row, [
-      env.XBOARD_DB.prepare("UPDATE v2_user SET u = u + ?, d = d + ?, updated_at = ? WHERE id = ?").bind(u, d, ts, uid),
+      env.XBOARD_DB.prepare("UPDATE v2_user SET u = u + ?, d = d + ?, t = COALESCE(t, 0) + ?, updated_at = ? WHERE id = ?").bind(u, d, u + d, ts, uid),
       env.XBOARD_DB.prepare("INSERT INTO v2_stat_user(user_id, server_id, server_type, u, d, rate, server_rate, record_type, record_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'd', ?, ?, ?) ON CONFLICT(user_id, server_id, server_type, record_at) DO UPDATE SET u = u + excluded.u, d = d + excluded.d, rate = excluded.rate, server_rate = excluded.server_rate, updated_at = excluded.updated_at")
         .bind(uid, event.server_id || 0, event.server_type || "unknown", u, d, rate, rate, recordAt, ts, ts)
     ]);
@@ -104,15 +114,18 @@ async function traffic(env: Env, event: any) {
       .bind(recordAt, userU + userD, ts, ts, recordAt));
   }
   await runOnce(env, event.event_id, "traffic", event, aggregate);
+  try {
+    await env.XBOARD_KV.put("traffic:pending_check", String(ts), { expirationTtl: 3600 });
+  } catch {}
 }
 
 async function mail(env: Env, event: any) {
   if (await alreadyDone(env, event.event_id)) return;
   const payload = await resolveMailContent(env, event.payload || {});
-  const apiKey = env.RESEND_API_KEY || await setting(env, "resend_api_key") || await setting(env, "email_password");
+  const apiKey = env.RESEND_API_KEY || await setting(env, "resend_api_key");
   const endpoint = (env.RESEND_API_URL || await setting(env, "resend_api_url") || "https://api.resend.com").replace(/\/$/, "");
   const fromAddress = await setting(env, "resend_from_address") || await setting(env, "email_from_address");
-  const fromName = await setting(env, "resend_from_name") || await setting(env, "app_name") || "XBoard";
+  const fromName = (await setting(env, "resend_from_name") || await setting(env, "app_name") || "XBoard").trim().replace(/[<>]/g, "");
   if (!apiKey) throw new Error("Resend API Key 未配置");
   if (!fromAddress) throw new Error("Resend 发件人地址未配置");
   if (!payload.to || !payload.subject || (!payload.html && !payload.text)) throw new Error("邮件任务参数不完整");
@@ -124,8 +137,8 @@ async function mail(env: Env, event: any) {
       "idempotency-key": String(event.event_id)
     },
     body: JSON.stringify({
-      from: `${fromName} <${fromAddress}>`,
-      to: [String(payload.to)],
+      from: fromName ? `${fromName} <${fromAddress}>` : fromAddress,
+      to: Array.isArray(payload.to) ? payload.to.map(String) : [String(payload.to)],
       subject: String(payload.subject),
       html: payload.html ? String(payload.html) : undefined,
       text: payload.text ? String(payload.text) : undefined
@@ -142,12 +155,42 @@ async function mail(env: Env, event: any) {
   ]);
 }
 
+async function telegram(env: Env, event: any) {
+  const payload = event.payload || {};
+  const botToken = env.TELEGRAM_BOT_TOKEN || await setting(env, "telegram_bot_token");
+  const chatId = payload.chat_id || payload.chatId || await setting(env, "telegram_discuss_id");
+  if (!botToken || !chatId || !payload.text) throw new Error("Telegram 任务参数不完整");
+  const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, text: String(payload.text), parse_mode: payload.parse_mode, disable_web_page_preview: payload.disable_web_page_preview })
+  });
+  if (!response.ok) throw new Error(`Telegram ${response.status}: ${(await response.text()).slice(0, 500)}`);
+  await runOnce(env, event.event_id, "telegram", event, []);
+}
+
+async function stat(env: Env, event: any) {
+  const payload = event.payload || {};
+  const recordAt = Number(payload.record_at || dayStart());
+  const existing = await env.XBOARD_DB.prepare("SELECT id FROM v2_stat WHERE record_at = ? ORDER BY id ASC LIMIT 1").bind(recordAt).first<any>();
+  const ts = now();
+  const statements = existing
+    ? [env.XBOARD_DB.prepare("UPDATE v2_stat SET user_count = COALESCE(?, user_count), order_count = COALESCE(?, order_count), transfer_used = COALESCE(?, transfer_used), updated_at = ? WHERE id = ?").bind(payload.user_count ?? null, payload.order_count ?? null, payload.transfer_used ?? null, ts, existing.id)]
+    : [env.XBOARD_DB.prepare("INSERT INTO v2_stat(record_at, user_count, order_count, transfer_used, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)").bind(recordAt, Number(payload.user_count || 0), Number(payload.order_count || 0), Number(payload.transfer_used || 0), ts, ts)];
+  await runOnce(env, event.event_id, "stat", event, statements);
+}
+
 async function handle(env: Env, event: any) {
   if (!event?.event_id) throw new Error("Queue event is missing event_id");
   if (event.type === "traffic") await traffic(env, event);
   else if (event.type === "mail") await mail(env, event);
+  else if (event.type === "telegram") await telegram(env, event);
+  else if (event.type === "stat") await stat(env, event);
+  else if (event.type === "node_sync") throw new Error("node_sync 必须由 xboard-server Service Binding 处理，不能静默丢弃");
   else await runOnce(env, event.event_id, event.type || "unknown", event, []);
 }
+
+export const __test = { dayStart, render };
 
 export default {
   async fetch() { return ok({ service: "xboard-jobs", time: now() }); },

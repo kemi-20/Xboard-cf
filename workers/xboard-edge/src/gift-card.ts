@@ -78,7 +78,7 @@ async function userEligibility(db: D1Database, card: AnyRow, user: AnyRow) {
   }
   const active = !Number(user.banned) && (user.expired_at === null || Number(user.expired_at) > now()) && user.plan_id !== null;
   if (type === 2 && active) return { can_redeem: false, reason: "您不满足此礼品卡的使用条件" };
-  if (conditions.new_user_only && Number(user.created_at) < now() - Number(conditions.new_user_max_days || 7) * 86400) {
+  if (conditions.new_user_only && Number(user.created_at) < now() - Number(conditions.new_user_max_days ?? 7) * 86400) {
     return { can_redeem: false, reason: "您不满足此礼品卡的使用条件" };
   }
   if (conditions.paid_user_only) {
@@ -126,9 +126,46 @@ function actualRewards(card: AnyRow) {
   const activeBonus = special.festival_bonus !== undefined && special.start_time !== undefined && special.end_time !== undefined
     && now() >= Number(special.start_time) && now() <= Number(special.end_time);
   if (activeBonus && Number(special.festival_bonus) > 1) {
-    rewards = Object.fromEntries(Object.entries(rewards).map(([key, value]) => [key, typeof value === "number" ? Math.trunc(value * Number(special.festival_bonus)) : value]));
+    const scalable = new Set(["balance", "transfer_enable", "expire_days", "plan_validity_days", "device_limit"]);
+    rewards = Object.fromEntries(Object.entries(rewards).map(([key, value]) => [key,
+      scalable.has(key) && typeof value === "number" ? Math.trunc(value * Number(special.festival_bonus)) : value]));
   }
   return rewards;
+}
+
+const SHANGHAI_OFFSET = 8 * 3600;
+
+function shanghaiParts(ts: number) {
+  const date = new Date((ts + SHANGHAI_OFFSET) * 1000);
+  return { year: date.getUTCFullYear(), month: date.getUTCMonth(), day: date.getUTCDate(), hour: date.getUTCHours(), minute: date.getUTCMinutes(), second: date.getUTCSeconds() };
+}
+
+function shanghaiTimestamp(year: number, month: number, day: number, hour = 0, minute = 0, second = 0) {
+  return Math.floor(Date.UTC(year, month, day, hour, minute, second) / 1000) - SHANGHAI_OFFSET;
+}
+
+function daysInMonth(year: number, month: number) {
+  return new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+}
+
+function calculateNextReset(expiredAt: unknown, method: number, from: number) {
+  if (expiredAt === null || expiredAt === undefined || Number(expiredAt) <= 0 || method === 2) return null;
+  const current = shanghaiParts(from);
+  const expiry = shanghaiParts(Number(expiredAt));
+  if (method === 0) return shanghaiTimestamp(current.year + (current.month === 11 ? 1 : 0), (current.month + 1) % 12, 1);
+  if (method === 1) {
+    const candidate = shanghaiTimestamp(current.year, current.month, Math.min(expiry.day, daysInMonth(current.year, current.month)), expiry.hour, expiry.minute, expiry.second);
+    if (candidate > from) return candidate;
+    const year = current.year + (current.month === 11 ? 1 : 0), month = (current.month + 1) % 12;
+    return shanghaiTimestamp(year, month, Math.min(expiry.day, daysInMonth(year, month)), expiry.hour, expiry.minute, expiry.second);
+  }
+  if (method === 3) return shanghaiTimestamp(current.year + 1, 0, 1);
+  if (method === 4) {
+    const candidate = shanghaiTimestamp(current.year, expiry.month, Math.min(expiry.day, daysInMonth(current.year, expiry.month)), expiry.hour, expiry.minute, expiry.second);
+    if (candidate > from) return candidate;
+    return shanghaiTimestamp(current.year + 1, expiry.month, Math.min(expiry.day, daysInMonth(current.year + 1, expiry.month)), expiry.hour, expiry.minute, expiry.second);
+  }
+  return null;
 }
 
 function festivalMultiplier(card: AnyRow) {
@@ -147,28 +184,31 @@ async function planInfo(db: D1Database, planId: unknown) {
 async function redeem(db: D1Database, card: AnyRow, user: AnyRow, request: Request) {
   const rewards = actualRewards(card);
   const ts = now();
-  const updates: Record<string, unknown> = {};
-  if (Number(rewards.balance || 0) > 0) updates.balance = Number(user.balance || 0) + Number(rewards.balance);
-  if (Number(rewards.transfer_enable || 0) > 0) updates.transfer_enable = Number(user.transfer_enable || 0) + Number(rewards.transfer_enable);
-  if (Number(rewards.device_limit || 0) > 0) updates.device_limit = Number(user.device_limit || 0) + Number(rewards.device_limit);
+  const assignments: string[] = [];
+  const updateValues: unknown[] = [];
+  if (Number(rewards.balance || 0) > 0) { assignments.push("balance = COALESCE(balance, 0) + ?"); updateValues.push(Number(rewards.balance)); }
+  if (Number(rewards.transfer_enable || 0) > 0) { assignments.push("transfer_enable = COALESCE(transfer_enable, 0) + ?"); updateValues.push(Number(rewards.transfer_enable)); }
+  if (Number(rewards.device_limit || 0) > 0) { assignments.push("device_limit = COALESCE(device_limit, 0) + ?"); updateValues.push(Number(rewards.device_limit)); }
+  let resetMethod: number | null = null;
+  let nextReset: number | null = null;
   if (rewards.reset_package && user.plan_id) {
-    updates.u = 0;
-    updates.d = 0;
-    updates.reset_count = Number(user.reset_count || 0) + 1;
-    updates.last_reset_at = ts;
+    const plan = await db.prepare("SELECT reset_traffic_method FROM v2_plan WHERE id = ?").bind(user.plan_id).first<AnyRow>();
+    const setting = await db.prepare("SELECT value FROM v2_settings WHERE name = 'reset_traffic_method'").first<{ value: string }>();
+    resetMethod = plan?.reset_traffic_method === null || plan?.reset_traffic_method === undefined ? Number(setting?.value ?? 1) : Number(plan.reset_traffic_method);
+    nextReset = calculateNextReset(user.expired_at, resetMethod, ts + 1);
+    assignments.push("u = 0", "d = 0", "reset_count = COALESCE(reset_count, 0) + 1", "last_reset_at = ?", "next_reset_at = ?");
+    updateValues.push(ts, nextReset);
   }
   if (rewards.plan_id !== undefined) {
     const plan = await db.prepare("SELECT * FROM v2_plan WHERE id = ?").bind(rewards.plan_id).first<AnyRow>();
     if (plan) {
-      updates.plan_id = plan.id;
-      updates.group_id = plan.group_id;
-      updates.transfer_enable = Number(plan.transfer_enable || 0) * 1073741824;
-      updates.speed_limit = plan.speed_limit;
-      updates.device_limit = plan.device_limit;
-      if (Number(rewards.plan_validity_days || 0) > 0) updates.expired_at = Math.max(Number(user.expired_at || ts), ts) + Number(rewards.plan_validity_days) * 86400;
+      assignments.push("plan_id = ?", "group_id = ?", "transfer_enable = ?", "speed_limit = ?", "device_limit = ?");
+      updateValues.push(plan.id, plan.group_id, Number(plan.transfer_enable || 0) * 1073741824, plan.speed_limit, plan.device_limit);
+      if (Number(rewards.plan_validity_days || 0) > 0) { assignments.push("expired_at = ?"); updateValues.push(Math.max(Number(user.expired_at || ts), ts) + Number(rewards.plan_validity_days) * 86400); }
     }
   } else if (Number(rewards.expire_days || 0) > 0) {
-    updates.expired_at = Math.max(Number(user.expired_at || ts), ts) + Number(rewards.expire_days) * 86400;
+    assignments.push("expired_at = ?");
+    updateValues.push(Math.max(Number(user.expired_at || ts), ts) + Number(rewards.expire_days) * 86400);
   }
 
   let inviteRewards: AnyRow | null = null;
@@ -182,28 +222,36 @@ async function redeem(db: D1Database, card: AnyRow, user: AnyRow, request: Reque
       if (balance > 0) inviteRewards.balance = balance;
       if (transfer > 0) inviteRewards.transfer_enable = transfer;
       if (!Object.keys(inviteRewards).length) inviteRewards = null;
-      if (inviteRewards) {
-        await db.prepare("UPDATE v2_user SET balance = balance + ?, transfer_enable = transfer_enable + ?, updated_at = ? WHERE id = ?")
-          .bind(balance, transfer, ts, inviter.id).run();
-      }
     }
   }
 
-  const set = Object.keys(updates).map(key => `${key} = ?`);
-  if (set.length) await db.prepare(`UPDATE v2_user SET ${set.join(", ")}, updated_at = ? WHERE id = ?`).bind(...Object.values(updates), ts, user.id).run();
-  if (rewards.reset_package && user.plan_id) {
-    await db.prepare("INSERT INTO v2_traffic_reset_logs(user_id, reset_type, old_u, old_d, metadata, reset_time, created_at) VALUES (?, 'gift_card', ?, ?, ?, ?, ?)")
-      .bind(user.id, Number(user.u || 0), Number(user.d || 0), JSON.stringify({ source: "gift_card", trigger_source: "gift_card" }), ts, ts).run();
-  }
-  const nextUsage = Number(card.usage_count || 0) + 1;
-  await db.prepare("UPDATE v2_gift_card_code SET status = 1, user_id = ?, used_at = ?, usage_count = ?, actual_rewards = ?, updated_at = ? WHERE id = ?")
-    .bind(user.id, ts, nextUsage, Number(card.template_type) === 3 ? encodeJson(rewards) : card.actual_rewards, ts, card.id).run();
   const plan = user.plan_id ? await db.prepare("SELECT sort FROM v2_plan WHERE id = ?").bind(user.plan_id).first<{ sort: number }>() : null;
-  await db.prepare(`INSERT INTO v2_gift_card_usage(code_id, template_id, user_id, invite_user_id, rewards_given, invite_rewards,
+  const nonce = randomString(32);
+  const guard = "EXISTS (SELECT 1 FROM v2_gift_card_code WHERE id = ? AND redemption_nonce = ?)";
+  const statements = [db.prepare(`UPDATE v2_gift_card_code SET status = CASE WHEN usage_count + 1 >= max_usage THEN 1 ELSE 0 END,
+    user_id = ?, used_at = ?, usage_count = usage_count + 1, actual_rewards = ?, redemption_nonce = ?, updated_at = ?
+    WHERE id = ? AND status NOT IN (2, 3) AND usage_count < max_usage AND (expires_at IS NULL OR expires_at >= ?)`)
+    .bind(user.id, ts, Number(card.template_type) === 3 ? encodeJson(rewards) : card.actual_rewards, nonce, ts, card.id, ts)];
+  if (assignments.length) statements.push(db.prepare(`UPDATE v2_user SET ${assignments.join(", ")}, updated_at = ? WHERE id = ? AND ${guard}`)
+    .bind(...updateValues, ts, user.id, card.id, nonce));
+  if (inviteRewards && user.invite_user_id) statements.push(db.prepare(`UPDATE v2_user SET balance = COALESCE(balance, 0) + ?,
+    transfer_enable = COALESCE(transfer_enable, 0) + ?, updated_at = ? WHERE id = ? AND ${guard}`)
+    .bind(Number(inviteRewards.balance || 0), Number(inviteRewards.transfer_enable || 0), ts, user.invite_user_id, card.id, nonce));
+  if (rewards.reset_package && user.plan_id) {
+    const resetTypes: Record<number, string> = { 0: "first_day_month", 1: "monthly", 3: "first_day_year", 4: "yearly" };
+    statements.push(db.prepare(`INSERT INTO v2_traffic_reset_logs(user_id, reset_type, old_u, old_d, old_upload, old_download,
+      old_total, new_upload, new_download, new_total, trigger_source, metadata, reset_time, created_at)
+      SELECT ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 'gift_card', ?, ?, ? WHERE ${guard}`)
+      .bind(user.id, resetTypes[Number(resetMethod)] || "manual", Number(user.u || 0), Number(user.d || 0), Number(user.u || 0),
+        Number(user.d || 0), Number(user.u || 0) + Number(user.d || 0), JSON.stringify({ trigger_source: "gift_card", next_reset_at: nextReset }), ts, ts, card.id, nonce));
+  }
+  statements.push(db.prepare(`INSERT INTO v2_gift_card_usage(code_id, template_id, user_id, invite_user_id, rewards_given, invite_rewards,
     user_level_at_use, plan_id_at_use, multiplier_applied, ip_address, user_agent, notes, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`)
+    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ? WHERE ${guard}`)
     .bind(card.id, card.template_id, user.id, user.invite_user_id, encodeJson(rewards), encodeJson(inviteRewards), plan?.sort ?? null,
-      user.plan_id, festivalMultiplier(card), request.headers.get("cf-connecting-ip"), request.headers.get("user-agent"), ts, ts).run();
+      user.plan_id, festivalMultiplier(card), request.headers.get("cf-connecting-ip"), request.headers.get("user-agent"), ts, ts, card.id, nonce));
+  const results = await db.batch(statements);
+  if (Number((results[0]?.meta as any)?.changes || 0) !== 1) throw new Error("兑换码已被使用或已失效");
   return { rewards, invite_rewards: inviteRewards, template_name: card.template_name };
 }
 
@@ -230,6 +278,8 @@ async function createTemplate(request: Request, db: D1Database, adminId: number)
   if (![1, 2, 3].includes(Number(input.type))) return fail("无效的礼品卡类型", 422, 422);
   if (!input.rewards || typeof input.rewards !== "object") return fail("奖励配置不能为空", 422, 422);
   if (input.theme_color && !/^#[0-9A-Fa-f]{6}$/.test(String(input.theme_color))) return fail("主题色格式不正确", 422, 422);
+  if (input.background_image && (String(input.background_image).length > 255 || !/^https?:\/\//i.test(String(input.background_image)))) return fail("背景图片地址格式不正确", 422, 422);
+  if (input.icon && String(input.icon).length > 255) return fail("图标长度不能超过255个字符", 422, 422);
   const ts = now();
   const result = await db.prepare(`INSERT INTO v2_gift_card_template(name, description, type, status, conditions, rewards, limits,
     special_config, icon, background_image, theme_color, sort, admin_id, created_at, updated_at)
@@ -246,6 +296,10 @@ async function updateTemplate(request: Request, db: D1Database) {
   const id = Number(input.id);
   const existing = await db.prepare("SELECT * FROM v2_gift_card_template WHERE id = ?").bind(id).first<AnyRow>();
   if (!existing) return fail("模板不存在", 404, 404);
+  if (input.type !== undefined && ![1, 2, 3].includes(Number(input.type))) return fail("无效的礼品卡类型", 422, 422);
+  if (input.theme_color && !/^#[0-9A-Fa-f]{6}$/.test(String(input.theme_color))) return fail("主题色格式不正确", 422, 422);
+  if (input.background_image && (String(input.background_image).length > 255 || !/^https?:\/\//i.test(String(input.background_image)))) return fail("背景图片地址格式不正确", 422, 422);
+  if (input.icon && String(input.icon).length > 255) return fail("图标长度不能超过255个字符", 422, 422);
   const allowed = ["name", "description", "type", "status", "conditions", "rewards", "limits", "special_config", "icon", "background_image", "theme_color", "sort"];
   const entries = allowed.filter(key => input[key] !== undefined).map(key => [key, ["conditions", "rewards", "limits", "special_config"].includes(key) ? encodeJson(input[key]) : key === "status" ? (asBoolean(input[key]) ? 1 : 0) : input[key]] as const);
   if (entries.length) await db.prepare(`UPDATE v2_gift_card_template SET ${entries.map(([key]) => `${key} = ?`).join(", ")}, updated_at = ? WHERE id = ?`)
@@ -280,7 +334,15 @@ async function generateCodes(request: Request, db: D1Database) {
   const expiresAt = input.expires_hours ? now() + Number(input.expires_hours) * 3600 : null;
   const maxUsage = Math.min(1000, Math.max(1, Number(input.max_usage || 1)));
   const codes = new Set<string>();
-  while (codes.size < count) codes.add(generatedCode(prefix));
+  while (codes.size < count) {
+    while (codes.size < count) codes.add(generatedCode(prefix));
+    const candidates = [...codes];
+    for (let start = 0; start < candidates.length; start += 100) {
+      const chunk = candidates.slice(start, start + 100);
+      const found = await db.prepare(`SELECT code FROM v2_gift_card_code WHERE code IN (${chunk.map(() => "?").join(",")})`).bind(...chunk).all<{ code: string }>();
+      for (const row of found.results || []) codes.delete(row.code);
+    }
+  }
   const values = [...codes];
   for (let start = 0; start < values.length; start += 50) {
     const chunk = values.slice(start, start + 50);
@@ -364,6 +426,8 @@ async function updateCode(request: Request, db: D1Database) {
   const input = await requestInput(request);
   const code = await db.prepare("SELECT * FROM v2_gift_card_code WHERE id = ?").bind(input.id).first<AnyRow>();
   if (!code) return fail("礼品卡不存在", 404, 404);
+  if (input.max_usage !== undefined && (!Number.isInteger(Number(input.max_usage)) || Number(input.max_usage) < 1 || Number(input.max_usage) > 1000)) return fail("最大使用次数必须在1到1000之间", 422, 422);
+  if (input.status !== undefined && ![0, 1, 2, 3].includes(Number(input.status))) return fail("无效的礼品卡状态", 422, 422);
   const entries = ["expires_at", "max_usage", "status"].filter(key => input[key] !== undefined).map(key => [key, input[key]] as const);
   if (entries.length) await db.prepare(`UPDATE v2_gift_card_code SET ${entries.map(([key]) => `${key} = ?`).join(", ")}, updated_at = ? WHERE id = ?`).bind(...entries.map(([, value]) => value), now(), code.id).run();
   const fresh = await db.prepare("SELECT * FROM v2_gift_card_code WHERE id = ?").bind(code.id).first<AnyRow>();

@@ -15,4 +15,17 @@ test("scheduled reminders enqueue the official expiry and traffic notifications"
   assert.match(source, /mail:remind-expire/);
   assert.match(source, /mail:remind-traffic/);
   assert.match(source, /MAIL_EVENTS\.sendBatch/);
+  assert.match(source, /WHERE id > \?[\s\S]*ORDER BY id ASC LIMIT 500/);
+});
+
+test("cron implements the official order, ticket, commission and traffic checks", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /check:order/);
+  assert.match(source, /check:ticket/);
+  assert.match(source, /check:commission/);
+  assert.match(source, /commission_auto_check_enable/);
+  assert.match(source, /commission_distribution_l1/);
+  assert.match(source, /v2_commission_log/);
+  assert.match(source, /check:traffic-exceeded/);
+  assert.match(source, /XBOARD_SERVER\.fetch/);
 });

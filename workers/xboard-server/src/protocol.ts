@@ -192,7 +192,7 @@ export function availableUser(row: Row): Row {
 }
 
 export function parseTraffic(input: unknown): Array<{ user_id: number; u: number; d: number }> {
-  if (!input || typeof input !== "object" || Array.isArray(input)) return [];
+  if (!input || typeof input !== "object") return [];
   const output: Array<{ user_id: number; u: number; d: number }> = [];
   for (const [key, value] of Object.entries(input as Row)) {
     if (!Array.isArray(value) || value.length !== 2) continue;

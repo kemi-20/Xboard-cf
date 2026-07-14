@@ -16,6 +16,9 @@ id = "KV_NAMESPACE_ID"
 binding = "MAIL_EVENTS"
 queue = "mail-events"
 
+[[services]]
+binding = "XBOARD_SERVER"
+service = "xboard-server"
+
 [triggers]
 crons = ["* * * * *", "10 0 * * *"]
-

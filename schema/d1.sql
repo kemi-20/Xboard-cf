@@ -14,10 +14,14 @@ CREATE TABLE IF NOT EXISTS v2_user (
   transfer_enable INTEGER NOT NULL DEFAULT 0,
   u INTEGER NOT NULL DEFAULT 0,
   d INTEGER NOT NULL DEFAULT 0,
+  t INTEGER NOT NULL DEFAULT 0,
   banned INTEGER NOT NULL DEFAULT 0,
   is_admin INTEGER NOT NULL DEFAULT 0,
   is_staff INTEGER NOT NULL DEFAULT 0,
   last_login_at INTEGER DEFAULT NULL,
+  last_login_ip TEXT DEFAULT NULL,
+  online_count INTEGER NOT NULL DEFAULT 0,
+  last_online_at INTEGER DEFAULT NULL,
   expired_at INTEGER DEFAULT NULL,
   balance INTEGER NOT NULL DEFAULT 0,
   commission_balance INTEGER NOT NULL DEFAULT 0,
@@ -162,6 +166,8 @@ CREATE TABLE IF NOT EXISTS v2_settings (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL UNIQUE,
   value TEXT,
+  `group` TEXT,
+  type TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -318,6 +324,13 @@ CREATE TABLE IF NOT EXISTS v2_traffic_reset_logs (
   reset_type TEXT NOT NULL,
   old_u INTEGER NOT NULL DEFAULT 0,
   old_d INTEGER NOT NULL DEFAULT 0,
+  old_upload INTEGER NOT NULL DEFAULT 0,
+  old_download INTEGER NOT NULL DEFAULT 0,
+  old_total INTEGER NOT NULL DEFAULT 0,
+  new_upload INTEGER NOT NULL DEFAULT 0,
+  new_download INTEGER NOT NULL DEFAULT 0,
+  new_total INTEGER NOT NULL DEFAULT 0,
+  trigger_source TEXT,
   metadata TEXT,
   reset_time INTEGER NOT NULL,
   created_at INTEGER NOT NULL
@@ -400,7 +413,7 @@ CREATE TABLE IF NOT EXISTS v2_gift_card_template (
 CREATE TABLE IF NOT EXISTS v2_gift_card_code (
   id INTEGER PRIMARY KEY AUTOINCREMENT, template_id INTEGER NOT NULL, code TEXT NOT NULL UNIQUE, batch_id TEXT,
   status INTEGER NOT NULL DEFAULT 0, user_id INTEGER, used_at INTEGER, expires_at INTEGER, actual_rewards TEXT,
-  usage_count INTEGER NOT NULL DEFAULT 0, max_usage INTEGER NOT NULL DEFAULT 1, metadata TEXT,
+  usage_count INTEGER NOT NULL DEFAULT 0, max_usage INTEGER NOT NULL DEFAULT 1, metadata TEXT, redemption_nonce TEXT,
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS v2_gift_card_usage (
@@ -414,10 +427,19 @@ CREATE INDEX IF NOT EXISTS idx_gift_template_type_status ON v2_gift_card_templat
 CREATE INDEX IF NOT EXISTS idx_gift_code_template_id ON v2_gift_card_code(template_id);
 CREATE INDEX IF NOT EXISTS idx_gift_code_status ON v2_gift_card_code(status);
 CREATE INDEX IF NOT EXISTS idx_gift_code_batch_id ON v2_gift_card_code(batch_id);
+CREATE INDEX IF NOT EXISTS idx_gift_code_expires_at ON v2_gift_card_code(expires_at);
+CREATE INDEX IF NOT EXISTS idx_gift_code_lookup ON v2_gift_card_code(code, status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_gift_usage_code_id ON v2_gift_card_usage(code_id);
+CREATE INDEX IF NOT EXISTS idx_gift_usage_invite_user_id ON v2_gift_card_usage(invite_user_id);
 CREATE INDEX IF NOT EXISTS idx_gift_usage_user_usage ON v2_gift_card_usage(user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_gift_usage_template_stats ON v2_gift_card_usage(template_id, created_at);
 
 CREATE INDEX IF NOT EXISTS idx_v2_user_token ON v2_user(token);
+CREATE INDEX IF NOT EXISTS idx_v2_user_next_reset_at ON v2_user(next_reset_at);
+CREATE INDEX IF NOT EXISTS idx_v2_user_online ON v2_user(last_online_at, online_count);
+CREATE INDEX IF NOT EXISTS idx_traffic_reset_user_time ON v2_traffic_reset_logs(user_id, reset_time);
+CREATE INDEX IF NOT EXISTS idx_notice_sort ON v2_notice(sort);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_server_type_code ON v2_server(type, code) WHERE code IS NOT NULL AND code != '';
 CREATE INDEX IF NOT EXISTS idx_v2_user_email ON v2_user(email);
 CREATE INDEX IF NOT EXISTS idx_v2_server_enabled ON v2_server(enabled, show);
 CREATE INDEX IF NOT EXISTS idx_v2_stat_user_record ON v2_stat_user(record_at);

@@ -21,3 +21,11 @@ test("traffic statistics persist the official server_rate field", () => {
   assert.match(source, /server_rate, record_type/);
   assert.match(source, /server_rate = excluded\.server_rate/);
 });
+
+test("mail templates override fallbacks and Resend credentials stay protocol-specific", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.doesNotMatch(source, /if \(payload\.html \|\| payload\.text\) return payload/);
+  assert.match(source, /render\(String\(template\.subject \|\| ""\), vars\) \|\| render\(String\(payload\.subject \|\| ""\), vars\)/);
+  assert.doesNotMatch(source, /setting\(env, "email_password"\)/);
+  assert.match(source, /replace\(\/\[<>\]\/g, ""\)/);
+});

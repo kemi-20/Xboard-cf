@@ -98,15 +98,24 @@ async function getNode(env: Env, identifier: unknown, type?: string | null): Pro
 
 async function getMachine(env: Env, id: unknown, token: unknown): Promise<Row | null> {
   if (!Number.isInteger(Number(id)) || !token) return null;
-  return await env.XBOARD_DB.prepare("SELECT * FROM v2_server_machine WHERE id = ? AND token = ?").bind(Number(id), String(token)).first<Row>();
+  const machine = await env.XBOARD_DB.prepare("SELECT * FROM v2_server_machine WHERE id = ?").bind(Number(id)).first<Row>();
+  return machine && equalText(String(machine.token || ""), String(token)) ? machine : null;
+}
+
+function equalText(actual: string, expected: string) {
+  const a = new TextEncoder().encode(actual), b = new TextEncoder().encode(expected);
+  let different = a.length ^ b.length;
+  const length = Math.max(a.length, b.length);
+  for (let index = 0; index < length; index++) different |= (a[index] || 0) ^ (b[index] || 0);
+  return different === 0;
 }
 
 async function authenticateV1(env: Env, input: Row, forcedType?: string): Promise<AuthContext | Response> {
   if (!input.token) return validationFailure("token");
   if (!input.node_id) return validationFailure("node_id");
   const configured = await setting(env, "server_token");
-  if (String(input.token) !== configured) return validationFailure("token", "Invalid token");
-  const requestedType = normalizeNodeType(input.node_type ?? forcedType);
+  if (!equalText(String(input.token), configured)) return validationFailure("token", "Invalid token");
+  const requestedType = normalizeNodeType(forcedType ?? input.node_type);
   if (!isValidNodeType(requestedType)) return validationFailure("node_type", "Invalid node type specified");
   const node = await getNode(env, input.node_id, requestedType);
   if (!node) return apiFailure("Server does not exist");
@@ -132,7 +141,7 @@ async function authenticateV2(env: Env, input: Row, handshake = false): Promise<
   }
   if (!input.token) return validationFailure("token");
   const configured = await setting(env, "server_token");
-  if (String(input.token) !== configured) return validationFailure("token", "Invalid token");
+  if (!equalText(String(input.token), configured)) return validationFailure("token", "Invalid token");
   if (!handshake && !input.node_id) return validationFailure("node_id");
   if (!input.node_id) return { input };
   const node = await getNode(env, input.node_id);
@@ -194,7 +203,8 @@ async function optionalKvPut(env: Env, key: string, value: string, options?: { e
 }
 
 function currentRate(node: Row) {
-  const fallback = Number(node.rate || 1);
+  const parsedFallback = Number(node.rate);
+  const fallback = Number.isFinite(parsedFallback) ? parsedFallback : 1;
   if (!Number(node.rate_time_enable)) return fallback;
   const parts = new Intl.DateTimeFormat("en-GB", {
     timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", hourCycle: "h23"
@@ -203,7 +213,9 @@ function currentRate(node: Row) {
   const minute = parts.find(part => part.type === "minute")?.value || "00";
   const time = `${hour}:${minute}`;
   const range = parseJson<Row[]>(node.rate_time_ranges, []).find(item => time >= String(item.start || "") && time <= String(item.end || ""));
-  return range ? Number(range.rate) : fallback;
+  if (!range) return fallback;
+  const parsed = Number(range.rate);
+  return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 async function enqueueTraffic(env: Env, node: Row, raw: unknown) {
@@ -225,9 +237,17 @@ async function updateUserDeviceIndex(env: Env, nodeId: number, previous: Row, ne
     const aggregate = parseJson<Row>(await env.XBOARD_KV.get(key), {});
     if (Array.isArray(next[userId])) aggregate[String(nodeId)] = next[userId];
     else delete aggregate[String(nodeId)];
-    if (Object.keys(aggregate).length) await env.XBOARD_KV.put(key, JSON.stringify(aggregate), { expirationTtl: 86400 });
+    if (Object.keys(aggregate).length) await env.XBOARD_KV.put(key, JSON.stringify(aggregate), { expirationTtl: 300 });
     else await env.XBOARD_KV.delete(key);
   }
+}
+
+function normalizeDeviceIp(value: unknown) {
+  const ip = String(value || "");
+  const ipv6 = ip.match(/^\[(.+)\]:\d+$/);
+  if (ipv6) return ipv6[1];
+  const ipv4 = ip.match(/^(\d+\.\d+\.\d+\.\d+):\d+$/);
+  return ipv4 ? ipv4[1] : ip;
 }
 
 async function processAlive(env: Env, nodeId: number, data: unknown) {
@@ -235,17 +255,28 @@ async function processAlive(env: Env, nodeId: number, data: unknown) {
   const key = `node:devices:${nodeId}`;
   const previous = parseJson<Row>(await env.XBOARD_KV.get(key), {});
   const next: Row = {};
-  for (const [userId, ips] of Object.entries(data as Row)) if (/^\d+$/.test(userId) && Array.isArray(ips)) next[userId] = ips.map(String);
+  for (const [userId, ips] of Object.entries(data as Row)) {
+    if (/^\d+$/.test(userId) && Array.isArray(ips)) next[userId] = Array.from(new Set(ips.map(normalizeDeviceIp).filter(Boolean)));
+  }
   await updateUserDeviceIndex(env, nodeId, previous, next);
-  await env.XBOARD_KV.put(key, JSON.stringify(next), { expirationTtl: 86400 });
+  await env.XBOARD_KV.put(key, JSON.stringify(next), { expirationTtl: 300 });
+  const affected = new Set([...Object.keys(previous), ...Object.keys(next)]);
+  for (const userId of affected) {
+    const nodes = parseJson<Row>(await env.XBOARD_KV.get(`user:devices:${userId}`), {});
+    const count = new Set(Object.values(nodes).flatMap(value => Array.isArray(value) ? value.map(normalizeDeviceIp).filter(Boolean) : [])).size;
+    await env.XBOARD_DB.prepare("UPDATE v2_user SET online_count = ?, last_online_at = ?, updated_at = ? WHERE id = ?")
+      .bind(count, now(), now(), Number(userId)).run();
+  }
   return true;
 }
 
 async function aggregateDevices(env: Env, users: Row[]) {
   const output: Row = {};
   for (const user of users) {
+    if (Number(user.device_limit || 0) <= 0) continue;
     const nodes = parseJson<Row>(await env.XBOARD_KV.get(`user:devices:${user.id}`), {});
-    output[String(user.id)] = Array.from(new Set(Object.values(nodes).flatMap(value => Array.isArray(value) ? value.map(String) : [])));
+    const count = new Set(Object.values(nodes).flatMap(value => Array.isArray(value) ? value.map(normalizeDeviceIp).filter(Boolean) : [])).size;
+    if (count > 0) output[String(user.id)] = count;
   }
   return output;
 }
@@ -575,9 +606,10 @@ export class NodeHub {
       }
     } else {
       const configured = await setting(this.env, "server_token");
-      const node = input.token === configured ? await getNode(this.env, input.node_id) : null;
+      const tokenValid = equalText(String(input.token || ""), configured);
+      const node = tokenValid ? await getNode(this.env, input.node_id) : null;
       if (!node) {
-        this.accept(server, ["invalid"]); server.send(wsMessage("error", { message: input.token === configured ? "node not found" : "invalid token" })); server.close(1008, "authentication failed");
+        this.accept(server, ["invalid"]); server.send(wsMessage("error", { message: tokenValid ? "node not found" : "invalid token" })); server.close(1008, "authentication failed");
         return new Response(null, { status: 101, webSocket: client } as any);
       }
       identity = { mode: "node", node_id: Number(node.id), node_ids: [Number(node.id)] };
@@ -689,7 +721,7 @@ routes.set("POST /api/v2/server/report", async (_request, env, input) => {
   await touchNode(env, node);
   if (input.traffic && typeof input.traffic === "object") await enqueueTraffic(env, node, input.traffic);
   if (input.alive && typeof input.alive === "object") await processAlive(env, Number(node.id), input.alive);
-  if (input.online && typeof input.online === "object") await env.XBOARD_KV.put(`node:connections:${node.id}`, JSON.stringify(input.online), { expirationTtl: Math.max(300, Number(await setting(env, "server_push_interval", "60")) * 3) });
+  if (input.online && typeof input.online === "object") await optionalKvPut(env, `node:connections:${node.id}`, JSON.stringify(input.online), { expirationTtl: Math.max(300, Number(await setting(env, "server_push_interval", "60")) * 3) });
   if (input.status && typeof input.status === "object") await processStatus(env, node, input.status);
   if (input.metrics && typeof input.metrics === "object") await processMetrics(env, node, input.metrics);
   return json({ data: true });
@@ -728,7 +760,7 @@ export default {
         name = `machine:${machine.id}`;
       } else {
         const configured = await setting(env, "server_token");
-        if (!input.token || String(input.token) !== configured) return websocketError("invalid token");
+        if (!input.token || !equalText(String(input.token), configured)) return websocketError("invalid token");
         const node = await getNode(env, input.node_id);
         if (!node) return websocketError("node not found");
         if (Number(node.machine_id) > 0) await disconnectDo(env, `machine:${node.machine_id}`);

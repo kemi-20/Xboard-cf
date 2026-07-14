@@ -6,11 +6,25 @@ export const json = (data: unknown, status = 200) => new Response(JSON.stringify
 export const ok = (data: unknown = true) => json({ data });
 export const fail = (message = "Error", status = 400, code = 400) => json({ message, errors: message, code }, status);
 export async function body<T = Record<string, unknown>>(request: Request): Promise<T> {
-  const type = request.headers.get("content-type") || "";
+  const type = (request.headers.get("content-type") || "").toLowerCase();
   if (type.includes("application/json")) return await request.json() as T;
-  const form = await request.formData();
   const out: Record<string, unknown> = {};
-  form.forEach((value, key) => { out[key] = value; });
+  const append = (key: string, value: unknown) => {
+    if (!(key in out)) out[key] = value;
+    else if (Array.isArray(out[key])) (out[key] as unknown[]).push(value);
+    else out[key] = [out[key], value];
+  };
+  if (type.includes("application/x-www-form-urlencoded")) {
+    new URLSearchParams(await request.text()).forEach((value, key) => append(key, value));
+    return out as T;
+  }
+  if (type.includes("multipart/form-data")) {
+    const form = await request.formData();
+    form.forEach((value, key) => append(key, value));
+    return out as T;
+  }
+  const raw = await request.text();
+  if (raw) new URLSearchParams(raw).forEach((value, key) => append(key, value));
   return out as T;
 }
 export function uuid(): string {

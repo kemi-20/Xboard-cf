@@ -136,7 +136,7 @@ test("user editor defaults missing commission type safely", () => {
 test("admin user and node forms receive upstream-compatible boolean values", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   for (const field of ["banned", "is_admin", "is_staff", "remind_expire", "remind_traffic", "commission_auto_check"]) {
-    assert.match(source, new RegExp(`${field}: Boolean\\(Number\\(row\\.${field}`));
+    assert.match(source, new RegExp(`${field}: Boolean\\(boolNumber\\(row\\.${field}`));
   }
   assert.match(source, /rate_time_enable: Boolean\(Number\(server\.rate_time_enable/);
   assert.match(source, /protocol_settings: parseJsonObject\(server\.protocol_settings\)/);
@@ -203,8 +203,23 @@ test("login sessions fall back to D1 when KV writes fail", () => {
 test("bootstrap remains available when the KV daily write limit is exhausted", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /system_bootstrap_edge_version/);
-  assert.match(source, /await optionalKvPut\(env, "bootstrap:edge:v11"/);
-  assert.doesNotMatch(source, /await env\.XBOARD_KV\.put\("bootstrap:edge:v11"/);
+  assert.match(source, /await optionalKvPut\(env, "bootstrap:edge:v15"/);
+  assert.doesNotMatch(source, /await env\.XBOARD_KV\.put\("bootstrap:edge:v12"/);
+});
+
+test("plan traffic is converted from gigabytes to user bytes", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /SELECT transfer_enable FROM v2_plan[\s\S]*?\* 1073741824/);
+  assert.match(source, /Number\(plan\.transfer_enable \|\| 0\) \* 1073741824/);
+  assert.match(source, /v2_plan\.transfer_enable = v2_user\.transfer_enable/);
+});
+
+test("Resend settings persist through the official email field names", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /email_password: firstNonEmpty\(all\.email_password, all\.resend_api_key\)/);
+  assert.match(source, /email_from_address: firstNonEmpty\(all\.email_from_address, all\.resend_from_address\)/);
+  assert.match(source, /email_password: "resend_api_key", resend_api_key: "email_password"/);
+  assert.match(source, /email_from_address: "resend_from_address", resend_from_address: "email_from_address"/);
 });
 
 test("admin orders are persisted and exposed through the official route set", () => {
@@ -249,6 +264,9 @@ test("gift card APIs implement the official admin and user route set", () => {
   assert.match(source, /invite_reward_rate/);
   assert.match(source, /reset_package/);
   assert.match(source, /plan_validity_days/);
+  assert.match(source, /usage_count = usage_count \+ 1/);
+  assert.match(source, /redemption_nonce/);
+  assert.match(source, /await db\.batch\(statements\)/);
 });
 
 test("mail APIs enqueue Resend jobs instead of returning SMTP placeholders", () => {
@@ -293,4 +311,26 @@ test("quick login, withdrawals and ECH generation are implemented", () => {
   assert.match(source, /Commission Withdrawal Request/);
   assert.match(source, /BEGIN \$\{label\}/);
   assert.match(source, /name: "X25519"/);
+});
+
+test("request bodies preserve repeated form keys and urlencoded payloads", () => {
+  const source = fs.readFileSync("src/compat.ts", "utf8");
+  assert.match(source, /application\/x-www-form-urlencoded/);
+  assert.match(source, /Array\.isArray\(out\[key\]\)/);
+  assert.match(source, /new URLSearchParams\(await request\.text\(\)\)/);
+});
+
+test("V1 app config merges supported nodes into the official Clash app profile", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /\/rules\/app\.clash\.yaml/);
+  assert.match(source, /supportedCiphers/);
+  assert.match(source, /proxy\?\.type === "vmess" \|\| proxy\?\.type === "trojan"/);
+  assert.match(source, /base\["proxy-groups"\]/);
+  assert.match(source, /return new Response\(stringifyYaml\(base\)/);
+});
+
+test("user deletion removes ticket messages in the same D1 batch", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /DELETE FROM v2_ticket_message WHERE ticket_id IN \(SELECT id FROM v2_ticket WHERE user_id = \?\)/);
+  assert.doesNotMatch(source, /for \(const ticket of ticketIds\.results/);
 });

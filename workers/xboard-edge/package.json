@@ -10,5 +10,9 @@
   "devDependencies": {
     "typescript": "^5.9.2",
     "wrangler": "^4.53.0"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "yaml": "^2.8.1"
   }
 }

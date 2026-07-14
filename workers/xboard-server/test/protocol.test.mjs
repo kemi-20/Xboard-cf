@@ -58,6 +58,9 @@ test("filters traffic payload entries to the official two-counter format", () =>
   assert.deepEqual(parseTraffic({ "1": [10, 20], token: "x", "2": [30], "3": [-5, 8] }), [
     { user_id: 1, u: 10, d: 20 }, { user_id: 3, u: 0, d: 8 }
   ]);
+  assert.deepEqual(parseTraffic([null, [11, 22], [33, 44]]), [
+    { user_id: 1, u: 11, d: 22 }, { user_id: 2, u: 33, d: 44 }
+  ]);
 });
 
 test("returns only official user fields", () => {

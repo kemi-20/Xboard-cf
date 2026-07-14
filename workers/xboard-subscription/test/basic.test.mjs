@@ -28,7 +28,8 @@ test("subscription cache varies by filters and hostname", () => {
   assert.match(source, /searchParams\.get\("types"\)/);
   assert.match(source, /searchParams\.get\("filter"\)/);
   assert.match(source, /url\.hostname/);
-  assert.match(source, /subscribe:v2:\$\{token\}:\$\{client\}:\$\{variant\}/);
+  assert.match(source, /subscribe:v3:\$\{token\}:\$\{client\}:\$\{variant\}/);
+  assert.match(source, /templatesVersion/);
 });
 
 test("plain browser subscriptions display inline like upstream General", () => {
@@ -63,6 +64,25 @@ test("client matching and encoded formats follow upstream flags", () => {
     id: 1, remarks: "Node", server: "127.0.0.1", server_port: 8388,
     password: user.uuid, method: "aes-128-gcm"
   });
+});
+
+test("subscription preparation follows upstream expiry, group, dynamic-port and SS-2022 rules", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /user\.expired_at !== null/);
+  assert.match(source, /user\.plan_id === null/);
+  assert.match(source, /groups\.includes\(Number\(user\.group_id/);
+  const selected = __test.randomizedPort("2000-1000");
+  assert.ok(selected.port >= 1000 && selected.port <= 2000);
+  assert.equal(selected.ports, "2000-1000");
+  const password = __test.serverPassword({ type: "shadowsocks", created_at: 1700000000, protocol_settings: { cipher: "2022-blake3-aes-128-gcm" } }, { uuid: "00000000-0000-4000-8000-000000000000" }, new Map());
+  assert.match(password, /^[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+$/);
+});
+
+test("QuantumultX and Loon use their official line formats", () => {
+  const user = { uuid: "00000000-0000-4000-8000-000000000000" };
+  const server = { type: "shadowsocks", name: "Node", host: "127.0.0.1", port: 8388, password: "node-password", protocol_settings: { cipher: "aes-128-gcm" } };
+  assert.match(__test.quantumultXLine(user, server), /^shadowsocks=127\.0\.0\.1:8388,method=aes-128-gcm,password=node-password,/);
+  assert.match(__test.loonLine(user, server), /^Node=Shadowsocks,127\.0\.0\.1,8388,aes-128-gcm,node-password,/);
 });
 
 test("client output filters protocols using upstream allowlists", () => {
@@ -215,4 +235,52 @@ test("Sing-box VLESS output includes Reality, uTLS, transport and multiplex sett
   assert.equal(outbound.multiplex.enabled, true);
   assert.equal(outbound.multiplex.max_connections, 4);
   assert.equal(outbound.multiplex.brutal.down_mbps, 200);
+});
+
+test("VMess and Trojan complex transports survive Clash, Surge and Shadowrocket rendering", () => {
+  const user = { uuid: "00000000-0000-4000-8000-000000000000", u: 0, d: 0, transfer_enable: 1, expired_at: null };
+  const vmess = { type: "vmess", name: "VMess WS", host: "vmess.example.com", port: 443, protocol_settings: { tls: 1, tls_settings: { server_name: "cdn.example.com", allow_insecure: true }, network: "ws", network_settings: { path: "/ws", headers: { Host: "edge.example.com" } }, utls: { enabled: true, fingerprint: "chrome" }, multiplex: { enabled: true, protocol: "yamux" } } };
+  const clash = __test.clashProxy(user, vmess);
+  assert.equal(clash.network, "ws");
+  assert.equal(clash["ws-opts"].path, "/ws");
+  assert.equal(clash["ws-opts"].headers.Host, "edge.example.com");
+  assert.equal(clash["client-fingerprint"], "chrome");
+  assert.equal(clash.smux.enabled, true);
+  const surge = __test.proxyLine(user, vmess, "surge");
+  assert.match(surge, /tls=true/);
+  assert.match(surge, /ws=true/);
+  assert.match(surge, /ws-path=\/ws/);
+  const shadowrocket = __test.shadowrocketLine(user, vmess);
+  assert.match(shadowrocket, /^vmess:\/\//);
+  assert.match(shadowrocket, /obfs=websocket/);
+});
+
+test("Sing-box selectors honor include, exclude and fallback and protocol-specific fields", () => {
+  const user = { uuid: "00000000-0000-4000-8000-000000000000" };
+  const servers = [
+    { type: "hysteria", name: "HK Hysteria", host: "hk.example.com", port: 443, password: "secret", ports: "2000-3000", protocol_settings: { version: 2, bandwidth: { up: 100, down: 200 }, hop_interval: 15, tls: { server_name: "hk.example.com" }, obfs: { open: true, type: "salamander", password: "obfs" } } },
+    { type: "socks", name: "US Socks", host: "us.example.com", port: 1080, protocol_settings: { udp_over_tcp: true } }
+  ];
+  const rendered = JSON.parse(__test.singboxProfile(JSON.stringify({ outbounds: [
+    { type: "selector", tag: "HK", outbounds: [], include: "HK|香港" },
+    { type: "selector", tag: "JP", outbounds: [], include: "JP", fallback: "direct" },
+    { type: "direct", tag: "direct" }
+  ] }), user, servers));
+  assert.deepEqual(rendered.outbounds.find(item => item.tag === "HK").outbounds, ["HK Hysteria"]);
+  assert.deepEqual(rendered.outbounds.find(item => item.tag === "JP").outbounds, ["direct"]);
+  const hysteria = rendered.outbounds.find(item => item.tag === "HK Hysteria");
+  assert.equal(hysteria.type, "hysteria2");
+  assert.equal(hysteria.up_mbps, 100);
+  assert.deepEqual(hysteria.server_ports, ["2000:3000"]);
+  assert.equal(hysteria.obfs.type, "salamander");
+  const socks = rendered.outbounds.find(item => item.tag === "US Socks");
+  assert.equal(socks.version, "5");
+  assert.equal(socks.udp_over_tcp, true);
+});
+
+test("QuantumultX user agents and disabled template fallbacks match upstream behavior", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /flag\.includes\("quantumultx"\)/);
+  assert.doesNotMatch(source, /quantumult%20x/);
+  assert.match(source, /SELECT name, COALESCE\(content, ''\) AS content FROM v2_subscribe_templates WHERE enabled = 1/);
 });

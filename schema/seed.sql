@@ -2,6 +2,8 @@ INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES
 ('app_name', 'XBoard CF', unixepoch(), unixepoch()),
 ('app_description', 'XBoard Cloudflare-native panel', unixepoch(), unixepoch()),
 ('app_url', '', unixepoch(), unixepoch()),
+('stop_register', '0', unixepoch(), unixepoch()),
+('login_with_mail_link_enable', '0', unixepoch(), unixepoch()),
 ('logo', '', unixepoch(), unixepoch()),
 ('subscribe_url', '', unixepoch(), unixepoch()),
 ('subscribe_path', 's', unixepoch(), unixepoch()),
@@ -93,7 +95,6 @@ ON CONFLICT(email) DO UPDATE SET
   password = excluded.password,
   password_algo = excluded.password_algo,
   password_salt = excluded.password_salt,
-  transfer_enable = excluded.transfer_enable,
   is_admin = 1,
   is_staff = 1,
   plan_id = COALESCE(v2_user.plan_id, excluded.plan_id),
@@ -115,6 +116,8 @@ INSERT INTO v2_mail_templates(name, subject, content, enabled, created_at, updat
 ('verify', 'Email verification code', 'Your verification code is {{code}}.', 1, unixepoch(), unixepoch()),
 ('remind_expire', 'Service expiry reminder', 'Your service is about to expire.', 1, unixepoch(), unixepoch()),
 ('remind_traffic', 'Traffic usage reminder', 'Your traffic usage is high.', 1, unixepoch(), unixepoch())
+,
+('mailLogin', 'Quick login link', 'Use this link to sign in: {{link}}', 1, unixepoch(), unixepoch())
 ON CONFLICT(name) DO UPDATE SET
   subject = excluded.subject,
   content = excluded.content,
