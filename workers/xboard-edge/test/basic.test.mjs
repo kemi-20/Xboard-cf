@@ -21,10 +21,10 @@ test("admin shell references the current bundle without caching", () => {
   assert.match(source, /"cache-control": "no-store, no-cache, must-revalidate"/);
   assert.match(source, /window\.settings = \$\{settingsJson\}/);
   assert.match(source, /id = "xboard-migration-menu"/);
-  assert.match(source, /sample \? sample\.cloneNode\(true\)/);
-  assert.match(source, /nav\.lastElementChild !== link/);
-  assert.match(source, /closest\("\[data-collapsed\]"\)/);
-  assert.match(source, /collapsed \? "sr-only" : ""/);
+  assert.match(source, /=== "\/config\/knowledge"/);
+  assert.match(source, /knowledgeLink\?\.closest\("li"\) \|\| knowledgeLink/);
+  assert.match(source, /sourceItem\.insertAdjacentElement\("afterend", item\)/);
+  assert.doesNotMatch(source, /nav\.appendChild\(link\)/);
   assert.match(source, /M20 17v6/);
   assert.match(source, /M17 20l3 3l3 -3/);
   assert.match(source, /localStorage\.getItem\("i18nextLng"\)/);
@@ -45,6 +45,15 @@ test("admin UI and API follow the saved secure path", () => {
   assert.match(source, /securePath !== "admin" && securePath\.length < 8/);
   assert.match(source, /securePath !== "admin"/);
   assert.doesNotMatch(source, /url\.pathname === "\/admin" \|\| url\.pathname\.startsWith\("\/admin\/"\)/);
+});
+
+test("dashboard queue statistics honor the official time windows", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /status = 'failed' AND COALESCE\(updated_at, created_at\) >= \?/);
+  assert.match(source, /current - 10080 \* 60/);
+  assert.match(source, /WHERE created_at >= \?/);
+  assert.match(source, /current - 60 \* 60/);
+  assert.doesNotMatch(source, /SELECT status, COUNT\(\*\) AS count FROM v2_job_logs GROUP BY status/);
 });
 
 test("admin CRUD routes server resources to their own tables", () => {

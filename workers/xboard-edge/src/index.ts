@@ -2717,9 +2717,15 @@ async function adminApi(request: Request, env: Env, path: string) {
     return ok({ schedule: !!lastRun && now() - Number(lastRun) < 120, horizon: true, schedule_last_runtime: lastRun ? Number(lastRun) : null });
   }
   if (path.includes("/system/getQueueStats")) {
-    const result = await env.XBOARD_DB.prepare("SELECT status, COUNT(*) AS count FROM v2_job_logs GROUP BY status").all<Record<string, any>>();
-    const counts = Object.fromEntries((result.results || []).map(row => [String(row.status), Number(row.count || 0)]));
-    const failedJobs = counts.failed || 0; const recentJobs = Object.values(counts).reduce((sum: number, value: any) => sum + Number(value || 0), 0);
+    const current = now();
+    const [failed, recent] = await Promise.all([
+      env.XBOARD_DB.prepare("SELECT COUNT(*) AS count FROM v2_job_logs WHERE status = 'failed' AND COALESCE(updated_at, created_at) >= ?")
+        .bind(current - 10080 * 60).first<{ count: number }>(),
+      env.XBOARD_DB.prepare("SELECT COUNT(*) AS count FROM v2_job_logs WHERE created_at >= ?")
+        .bind(current - 60 * 60).first<{ count: number }>()
+    ]);
+    const failedJobs = Number(failed?.count || 0);
+    const recentJobs = Number(recent?.count || 0);
     return ok({ failedJobs, jobsPerMinute: 0, pausedMasters: 0, periods: { failedJobs: 10080, recentJobs: 60 }, processes: 1, queueWithMaxRuntime: null, queueWithMaxThroughput: null, recentJobs, status: true, wait: { "cloudflare-queues:default": 0 } });
   }
   if (path.includes("/system/getQueueWorkload")) {
@@ -3575,23 +3581,25 @@ async function adminUi(request: Request, env: Env, securePath: string) {
           const label = migrationLabels[language] || migrationLabels["en-US"];
           let link = nav?.querySelector("#xboard-migration-menu");
           if (nav && !link) {
-            const sample = nav.querySelector('a[href]:not(#xboard-migration-menu)');
-            const link = sample ? sample.cloneNode(true) : document.createElement("a");
-            link.id = "xboard-migration-menu";
-            link.href = href;
-            if (!sample) link.className = "inline-flex items-center whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground text-xs h-12 justify-start text-wrap rounded-none px-6";
-            link.innerHTML = '<div class="mr-2"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="tabler-icon tabler-icon-database-import"><path d="M4 6a8 3 0 1 0 16 0a8 3 0 1 0 -16 0"></path><path d="M4 6v12"></path><path d="M20 6v8"></path><path d="M4 12a8 3 0 0 0 16 0"></path><path d="M4 18c0 1.657 3.582 3 8 3c1.05 0 2.052-.076 2.25-.214"></path><path d="M20 17v6"></path><path d="M17 20l3 3l3 -3"></path></svg></div><span></span>';
-            nav.appendChild(link);
+            const knowledgeLink = Array.from(nav.querySelectorAll("a[href]")).find(menu => {
+              const target = new URL(menu.href, location.href);
+              return (target.hash.replace(/^#/, "") || target.pathname) === "/config/knowledge";
+            });
+            const sourceItem = knowledgeLink?.closest("li") || knowledgeLink;
+            if (sourceItem) {
+              const item = sourceItem.cloneNode(true);
+              link = item.matches("a") ? item : item.querySelector("a");
+              if (link) {
+                link.id = "xboard-migration-menu";
+                link.href = href;
+                const svg = link.querySelector("svg");
+                if (svg) svg.outerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="tabler-icon tabler-icon-database-import"><path d="M4 6a8 3 0 1 0 16 0a8 3 0 1 0 -16 0"></path><path d="M4 6v12"></path><path d="M20 6v8"></path><path d="M4 12a8 3 0 0 0 16 0"></path><path d="M4 18c0 1.657 3.582 3 8 3c1.05 0 2.052-.076 2.25-.214"></path><path d="M20 17v6"></path><path d="M17 20l3 3l3 -3"></path></svg>';
+                sourceItem.insertAdjacentElement("afterend", item);
+              }
+            }
           }
           link = nav?.querySelector("#xboard-migration-menu");
-          const sample = nav?.querySelector('a[href]:not(#xboard-migration-menu)');
-          if (link && sample && link.className !== sample.className) link.className = sample.className;
-          const collapsed = nav?.closest("[data-collapsed]")?.getAttribute("data-collapsed") === "true";
-          const icon = link?.querySelector("div");
-          if (icon && icon.className !== (collapsed ? "" : "mr-2")) icon.className = collapsed ? "" : "mr-2";
-          if (nav && link && nav.lastElementChild !== link) nav.appendChild(link);
           const text = link?.querySelector("span");
-          if (text && text.className !== (collapsed ? "sr-only" : "")) text.className = collapsed ? "sr-only" : "";
           if (link && link.title !== label.title) link.title = label.title;
           if (text && text.textContent !== label.text) text.textContent = label.text;
           updateFooterDate();
