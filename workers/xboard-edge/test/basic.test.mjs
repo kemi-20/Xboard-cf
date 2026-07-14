@@ -191,8 +191,15 @@ test("login sessions fall back to D1 when KV writes fail", () => {
 test("bootstrap remains available when the KV daily write limit is exhausted", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /system_bootstrap_edge_version/);
-  assert.match(source, /await optionalKvPut\(env, "bootstrap:edge:v9"/);
-  assert.doesNotMatch(source, /await env\.XBOARD_KV\.put\("bootstrap:edge:v9"/);
+  assert.match(source, /await optionalKvPut\(env, "bootstrap:edge:v10"/);
+  assert.doesNotMatch(source, /await env\.XBOARD_KV\.put\("bootstrap:edge:v10"/);
+});
+
+test("traffic history exposes the official server_rate field", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /server_rate: Number\(row\.server_rate \?\? row\.rate \?\? 1\) \|\| 1/);
+  assert.match(source, /ALTER TABLE v2_stat_user ADD COLUMN server_rate/);
+  assert.match(source, /UPDATE v2_stat_user SET server_rate = COALESCE\(rate, 1\)/);
 });
 
 test("node metrics fall back to D1 when KV writes are unavailable", () => {

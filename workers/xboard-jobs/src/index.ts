@@ -83,8 +83,8 @@ async function traffic(env: Env, event: any) {
     const ts = now();
     await runOnce(env, `${event.event_id}:user:${uid}`, "traffic:user", row, [
       env.XBOARD_DB.prepare("UPDATE v2_user SET u = u + ?, d = d + ?, updated_at = ? WHERE id = ?").bind(u, d, ts, uid),
-      env.XBOARD_DB.prepare("INSERT INTO v2_stat_user(user_id, server_id, server_type, u, d, rate, record_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(user_id, server_id, server_type, record_at) DO UPDATE SET u = u + excluded.u, d = d + excluded.d, rate = excluded.rate, updated_at = excluded.updated_at")
-        .bind(uid, event.server_id || 0, event.server_type || "unknown", u, d, rate, recordAt, ts, ts)
+      env.XBOARD_DB.prepare("INSERT INTO v2_stat_user(user_id, server_id, server_type, u, d, rate, server_rate, record_type, record_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'd', ?, ?, ?) ON CONFLICT(user_id, server_id, server_type, record_at) DO UPDATE SET u = u + excluded.u, d = d + excluded.d, rate = excluded.rate, server_rate = excluded.server_rate, updated_at = excluded.updated_at")
+        .bind(uid, event.server_id || 0, event.server_type || "unknown", u, d, rate, rate, recordAt, ts, ts)
     ]);
   }
 

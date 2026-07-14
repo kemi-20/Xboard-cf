@@ -283,12 +283,12 @@ FINAL,Proxy
 };
 
 async function ensureBootstrap(env: Env) {
-  const marker = await optionalKvGet(env, "bootstrap:edge:v9");
+  const marker = await optionalKvGet(env, "bootstrap:edge:v10");
   if (marker) return;
   try {
     const persisted = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = 'system_bootstrap_edge_version'").first<{ value: string }>();
-    if (persisted?.value === "v9") {
-      await optionalKvPut(env, "bootstrap:edge:v9", String(now()));
+    if (persisted?.value === "v10") {
+      await optionalKvPut(env, "bootstrap:edge:v10", String(now()));
       return;
     }
   } catch {
@@ -342,6 +342,8 @@ async function ensureBootstrap(env: Env) {
     "ALTER TABLE v2_server_machine_load_history ADD COLUMN net_out_speed REAL",
     "ALTER TABLE v2_server_machine_load_history ADD COLUMN recorded_at INTEGER",
     "ALTER TABLE v2_server_machine_load_history ADD COLUMN updated_at INTEGER",
+    "ALTER TABLE v2_stat_user ADD COLUMN server_rate REAL NOT NULL DEFAULT 1",
+    "ALTER TABLE v2_stat_user ADD COLUMN record_type TEXT NOT NULL DEFAULT 'd'",
     "ALTER TABLE v2_gift_card_template ADD COLUMN description TEXT",
     "ALTER TABLE v2_gift_card_template ADD COLUMN type INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE v2_gift_card_template ADD COLUMN status INTEGER NOT NULL DEFAULT 1",
@@ -365,6 +367,7 @@ async function ensureBootstrap(env: Env) {
     "ALTER TABLE v2_gift_card_usage ADD COLUMN notes TEXT"
   ];
   for (const sql of alters) await runSqlIgnore(env, sql);
+  await runSqlIgnore(env, "UPDATE v2_stat_user SET server_rate = COALESCE(rate, 1)");
   await runSqlIgnore(env, "CREATE INDEX IF NOT EXISTS idx_machine_load_recorded ON v2_server_machine_load_history(machine_id, recorded_at)");
   for (const sql of [
     "CREATE INDEX IF NOT EXISTS idx_gift_template_type_status ON v2_gift_card_template(type, status)",
@@ -423,8 +426,8 @@ async function ensureBootstrap(env: Env) {
     await runSqlIgnore(env, "INSERT INTO v2_subscribe_templates(name, type, content, template, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?) ON CONFLICT(name) DO UPDATE SET content = CASE WHEN v2_subscribe_templates.content IS NULL OR v2_subscribe_templates.content = '' THEN excluded.content ELSE v2_subscribe_templates.content END, template = CASE WHEN v2_subscribe_templates.template IS NULL OR v2_subscribe_templates.template = '' THEN excluded.template ELSE v2_subscribe_templates.template END, enabled = 1, updated_at = excluded.updated_at", [name, name, content, content, ts, ts]);
     await runSqlIgnore(env, "INSERT INTO v2_subscribe_templates(name, content, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET content = CASE WHEN v2_subscribe_templates.content IS NULL OR v2_subscribe_templates.content = '' THEN excluded.content ELSE v2_subscribe_templates.content END, updated_at = excluded.updated_at", [name, content, ts, ts]);
   }
-  await runSqlIgnore(env, "INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES ('system_bootstrap_edge_version', 'v9', ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at", [ts, ts]);
-  await optionalKvPut(env, "bootstrap:edge:v9", String(ts));
+  await runSqlIgnore(env, "INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES ('system_bootstrap_edge_version', 'v10', ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at", [ts, ts]);
+  await optionalKvPut(env, "bootstrap:edge:v10", String(ts));
 }
 
 async function firstNumber(env: Env, sql: string, fallback = 0) {
@@ -1796,7 +1799,15 @@ async function adminApi(request: Request, env: Env, path: string) {
     const pageSize = Math.min(100, Math.max(1, Number(input.pageSize || input.page_size || 10)));
     const result = await env.XBOARD_DB.prepare("SELECT * FROM v2_stat_user WHERE user_id = ? ORDER BY record_at DESC LIMIT ? OFFSET ?").bind(userId, pageSize, (page - 1) * pageSize).all();
     const total = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_stat_user WHERE user_id = ${userId}`);
-    return json({ data: result.results || [], total });
+    return json({
+      data: (result.results || []).map((row: any) => ({
+        ...row,
+        u: Number(row.u || 0),
+        d: Number(row.d || 0),
+        server_rate: Number(row.server_rate ?? row.rate ?? 1) || 1
+      })),
+      total
+    });
   }
   if (request.method === "GET" && route === "/stat/getRanking") {
     const result = await env.XBOARD_DB.prepare("SELECT id, email, u, d, (u + d) AS total FROM v2_user ORDER BY total DESC LIMIT 20").all();

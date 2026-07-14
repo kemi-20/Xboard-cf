@@ -15,3 +15,9 @@ test("mail events are delivered through the Resend HTTP API with idempotency", (
   assert.match(source, /"idempotency-key": String\(event\.event_id\)/);
   assert.match(source, /message\.retry\(\)/);
 });
+
+test("traffic statistics persist the official server_rate field", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /server_rate, record_type/);
+  assert.match(source, /server_rate = excluded\.server_rate/);
+});
