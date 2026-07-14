@@ -18,6 +18,7 @@ const state = {
   runId: null,
   migrationToken: null,
   snapshotComplete: false,
+  skipBackup: false,
   prepared: false,
   phase: "idle",
   table: null,
@@ -246,7 +247,7 @@ async function inspect() {
     const sourceSummary = redisFile
       ? `<p class="success">联合校验通过：SQLite ${state.sqliteTotal.toLocaleString()} 行，Redis ${redisCount.toLocaleString()} 个有效键。</p>`
       : `<p class="success">SQLite 校验通过：${state.sqliteTotal.toLocaleString()} 行。</p><div class="warning"><strong>未选择 Redis 备份</strong>核心业务数据可以正常迁移。节点在线状态、近期负载、Metrics、旧 Session 和其他临时缓存不会保留；节点重新连接后会自动重新生成运行状态。</div>`;
-    $("#preflight-content").innerHTML = `${sourceSummary}<div class="warning"><strong>以下内容不会迁移</strong>原版 SMTP/邮件驱动设置和 Resend 凭据不会导入，支付渠道、支付插件配置不会导入，所有旧主题配置也会忽略。迁移完成后仅启用默认 Xboard 主题，请在新后台手动配置 Resend API Key、发件人邮箱和发件人名称。</div><p class="muted">邮件模板、订单等可审计业务历史会保留；队列任务、Horizon 监控、调度锁、旧会话、验证码和限流计数不会导入。</p>${renderCounts(state.counts)}`;
+    $("#preflight-content").innerHTML = `${sourceSummary}<div class="warning"><strong>以下内容不会迁移</strong>原版 SMTP/邮件驱动设置和 Resend 凭据不会导入，所有插件、插件配置和支付渠道不会导入，所有旧主题配置也会忽略。Telegram 机器人由 Cloudflare 版本内置实现，不依赖原版插件。迁移完成后仅启用默认 Xboard 主题，请在新后台手动配置 Resend API Key、发件人邮箱和发件人名称。</div><p class="muted">邮件模板、订单等可审计业务历史会保留；队列任务、Horizon 监控、调度锁、旧会话、验证码和限流计数不会导入。</p>${renderCounts(state.counts)}`;
     $("#preflight").hidden = false;
     $("#file-status").textContent = redisFile ? `${sqliteFile.name} + ${redisFile.name}` : `${sqliteFile.name}（未选择 Redis）`;
     setStep(2);
@@ -382,7 +383,9 @@ function showFailure(error) {
   if (!state.snapshotComplete) {
     const note = document.createElement("p");
     note.className = "muted";
-    note.textContent = "错误发生在迁移前快照完成之前，目标业务数据尚未被清空或写入，无需还原。";
+    note.textContent = state.skipBackup
+      ? "本次迁移已选择跳过备份，无法一键还原；目标业务数据可能已经发生变化。"
+      : "错误发生在迁移前快照完成之前，目标业务数据尚未被清空或写入，无需还原。";
     $("#report").append(note);
   }
   log(`失败: ${error.message}`, "error");
@@ -390,7 +393,7 @@ function showFailure(error) {
 
 async function migrate() {
   $("#migrate").disabled = true; $("#running").hidden = false; $("#result").hidden = true; setStep(3);
-  state.done = 0; state.runId = null; state.migrationToken = null; state.snapshotComplete = false; state.prepared = false; state.phase = "start"; state.table = null; state.offset = 0;
+  state.done = 0; state.runId = null; state.migrationToken = null; state.snapshotComplete = false; state.skipBackup = $("#skip-backup").checked; state.prepared = false; state.phase = "start"; state.table = null; state.offset = 0;
   $("#log").textContent = ""; $("#progress").classList.remove("failed"); $("#rollback").hidden = true; $("#rollback-status").textContent = "";
   try {
     const hasRedis = Boolean(state.redisFile);
@@ -401,14 +404,19 @@ async function migrate() {
         source_name: hasRedis ? `${state.sqliteFile.name} + ${state.redisFile.name}` : state.sqliteFile.name,
         source_size: state.sqliteFile.size + (state.redisFile?.size || 0),
         source_counts: state.counts,
-        mode: $("#mode").value
+        mode: $("#mode").value,
+        skip_backup: state.skipBackup
       })
     });
     state.runId = started.run_id; state.migrationToken = started.migration_token;
     log(`任务 ${state.runId} 已创建，策略 ${started.mode}`);
     state.done = 0;
-    const backup = await exportCurrent({ runId: state.runId, counts: started.backup_counts, automatic: true });
-    log(`迁移前自动备份已下载：${backup.filename}`);
+    if (state.skipBackup) {
+      log("已跳过迁移前自动备份和 D1 快照；本次迁移无法一键还原", "error");
+    } else {
+      const backup = await exportCurrent({ runId: state.runId, counts: started.backup_counts, automatic: true });
+      log(`迁移前自动备份已下载：${backup.filename}`);
+    }
     state.phase = "prepare";
     await api("/prepare", { method: "POST", body: JSON.stringify({ run_id: state.runId }) });
     state.prepared = true;
@@ -470,3 +478,8 @@ $("#migrate").addEventListener("click", migrate);
 $("#export").addEventListener("click", manualExport);
 $("#rollback").addEventListener("click", rollback);
 for (const id of ["#sqlite-file", "#redis-file"]) $(id).addEventListener("change", () => { $("#preflight").hidden = true; });
+$("#skip-backup").addEventListener("change", event => {
+  $("#backup-note").textContent = event.target.checked
+    ? "已选择跳过备份：迁移会直接写入，失败后无法一键还原。"
+    : "执行前会自动导出当前数据，并在 D1 内建立可一键还原的快照。";
+});

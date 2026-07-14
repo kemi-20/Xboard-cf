@@ -450,6 +450,7 @@ CREATE TABLE IF NOT EXISTS v2_migration_runs (
   admin_id INTEGER,
   snapshot_counts TEXT,
   snapshot_complete INTEGER NOT NULL DEFAULT 0,
+  skip_backup INTEGER NOT NULL DEFAULT 0,
   prepared_at INTEGER,
   rollback_progress TEXT,
   started_at INTEGER NOT NULL,

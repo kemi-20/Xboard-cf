@@ -295,7 +295,10 @@ test("migration UI parses SQLite and Redis backups locally", () => {
   assert.match(app, /parsed\?\.value\?\.auth_data/);
   assert.match(app, /api\/v2\/admin\/migration/);
   assert.match(app, /手动配置 Resend API Key/);
-  assert.match(app, /支付渠道、支付插件配置不会导入/);
+  assert.match(app, /所有插件、插件配置和支付渠道不会导入/);
+  assert.match(page, /id="skip-backup"/);
+  assert.match(app, /skip_backup: state\.skipBackup/);
+  assert.match(app, /本次迁移无法一键还原/);
   assert.match(index, /\/api\/v2\/admin\/migration/);
 });
 
@@ -303,11 +306,24 @@ test("migration excludes service credentials that cannot move to Cloudflare", ()
   const source = fs.readFileSync("src/migration.ts", "utf8");
   assert.match(source, /NON_MIGRATABLE_SERVICE_TABLES/);
   assert.match(source, /"v2_payment"/);
+  assert.match(source, /"v2_plugins"/);
   assert.match(source, /NON_MIGRATABLE_MAIL_SETTINGS/);
   assert.match(source, /"email_password"/);
   assert.match(source, /"resend_api_key"/);
-  assert.match(source, /source\.type \|\| ""/);
+  assert.match(source, /NON_MIGRATABLE_SERVICE_TABLES\.has\(table\)/);
+  assert.match(source, /key\.startsWith\("plugin"\)/);
+  assert.match(source, /skip_backup INTEGER NOT NULL DEFAULT 0/);
+  assert.match(source, /该迁移已跳过备份，无法一键还原/);
   assert.match(source, /skipped_service_config/);
+});
+
+test("unsupported plugin and payment menus stay reserved but hidden", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /Reserved for a future native plugin\/payment implementation/);
+  assert.match(source, /pathname\.endsWith\("\/config\/plugin"\)/);
+  assert.match(source, /pathname\.endsWith\("\/config\/payment"\)/);
+  assert.match(source, /menu\.style\.display = "none"/);
+  assert.match(source, /api\.telegram\.org\/bot\$\{botToken\}/);
 });
 
 test("migration does not import or export application log records", () => {

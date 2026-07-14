@@ -511,7 +511,7 @@ async function ensureBootstrap(env: Env) {
     "CREATE TABLE IF NOT EXISTS v2_plugins (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, code TEXT NOT NULL UNIQUE, version TEXT NOT NULL, type TEXT, is_enabled INTEGER NOT NULL DEFAULT 0, config TEXT, installed_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)",
     "CREATE TABLE IF NOT EXISTS failed_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, connection TEXT NOT NULL, queue TEXT NOT NULL, payload TEXT NOT NULL, exception TEXT NOT NULL, failed_at INTEGER NOT NULL)",
     "CREATE TABLE IF NOT EXISTS v2_log (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, level TEXT, host TEXT, uri TEXT NOT NULL, method TEXT NOT NULL, data TEXT, ip TEXT, context TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"
-    , "CREATE TABLE IF NOT EXISTS v2_migration_runs (id TEXT PRIMARY KEY, source_type TEXT NOT NULL, source_name TEXT, source_size INTEGER NOT NULL DEFAULT 0, mode TEXT NOT NULL DEFAULT 'merge', status TEXT NOT NULL DEFAULT 'running', source_counts TEXT, progress TEXT, report TEXT, error TEXT, access_token_hash TEXT, admin_id INTEGER, started_at INTEGER NOT NULL, finished_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"
+    , "CREATE TABLE IF NOT EXISTS v2_migration_runs (id TEXT PRIMARY KEY, source_type TEXT NOT NULL, source_name TEXT, source_size INTEGER NOT NULL DEFAULT 0, mode TEXT NOT NULL DEFAULT 'merge', status TEXT NOT NULL DEFAULT 'running', source_counts TEXT, progress TEXT, report TEXT, error TEXT, access_token_hash TEXT, admin_id INTEGER, snapshot_counts TEXT, snapshot_complete INTEGER NOT NULL DEFAULT 0, skip_backup INTEGER NOT NULL DEFAULT 0, prepared_at INTEGER, rollback_progress TEXT, started_at INTEGER NOT NULL, finished_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"
     , "CREATE TABLE IF NOT EXISTS v2_migration_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, level TEXT NOT NULL DEFAULT 'info', table_name TEXT, message TEXT NOT NULL, details TEXT, created_at INTEGER NOT NULL)"
   ]) await runSqlIgnore(env, sql);
   const ts = now();
@@ -3386,6 +3386,14 @@ async function adminUi(request: Request, env: Env, securePath: string) {
         };
         const install = () => {
           const nav = document.querySelector("aside nav");
+          // Reserved for a future native plugin/payment implementation. Keep routes and code, hide only the unsupported menus.
+          nav?.querySelectorAll('a[href]').forEach(menu => {
+            const pathname = new URL(menu.href, location.origin).pathname;
+            if (pathname.endsWith("/config/plugin") || pathname.endsWith("/config/payment")) {
+              menu.dataset.xboardReservedMenu = "true";
+              menu.style.display = "none";
+            }
+          });
           const migrationLabels = {
             "zh-CN": { text: "数据迁移", title: "从原版 SQLite 导入数据或导出原版兼容数据库" },
             "en-US": { text: "Data Migration", title: "Import an original XBoard SQLite database or export an original-compatible database" },

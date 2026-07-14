@@ -11,7 +11,7 @@
     header h1{font-size:17px;margin:0}header a{color:var(--primary);text-decoration:none}.layout{max-width:1120px;margin:24px auto;padding:0 20px;display:grid;grid-template-columns:240px 1fr;gap:20px}
     nav{border-right:1px solid var(--line);padding-right:20px}.step{padding:10px 12px;margin-bottom:4px;border-radius:6px;color:var(--muted)}.step.active{background:#eaf2f8;color:#0b4f7d;font-weight:600}.step.done{color:var(--success)}
     main{min-width:0}.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:20px;margin-bottom:16px}.panel h2{font-size:16px;margin:0 0 16px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
-    label{display:block;color:var(--muted);font-size:12px;margin-bottom:6px}.field input,.field select{width:100%;height:38px;border:1px solid #cbd2d9;border-radius:6px;padding:0 10px;background:#fff}.source{display:flex;gap:16px}.source label{font-size:14px;color:var(--text);display:flex;align-items:center;gap:7px}
+    label{display:block;color:var(--muted);font-size:12px;margin-bottom:6px}.field input,.field select{width:100%;height:38px;border:1px solid #cbd2d9;border-radius:6px;padding:0 10px;background:#fff}.source{display:flex;gap:16px}.source label{font-size:14px;color:var(--text);display:flex;align-items:center;gap:7px}.check-field{grid-column:1/-1}.check-field label{display:flex;align-items:flex-start;gap:8px;font-size:14px;color:var(--text);cursor:pointer}.check-field input{width:16px;height:16px;margin:2px 0 0;padding:0;flex:0 0 auto}.check-field span{display:block}.check-field small{display:block;color:var(--danger);margin-top:2px}
     .actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:18px}.button{border:1px solid #b8c0c8;background:#fff;border-radius:6px;height:38px;padding:0 14px;cursor:pointer}.button.primary{background:var(--primary);border-color:var(--primary);color:#fff}.button.danger{background:var(--danger);border-color:var(--danger);color:#fff}.button:disabled{opacity:.45;cursor:not-allowed}
     .summary{width:100%;border-collapse:collapse}.summary th,.summary td{text-align:left;border-bottom:1px solid #edf0f2;padding:8px}.summary th{font-size:12px;color:var(--muted);font-weight:600}.summary td.num{text-align:right;font-variant-numeric:tabular-nums}
     .progress{height:8px;background:#e8ebee;border-radius:4px;overflow:hidden;margin:12px 0}.progress span{display:block;height:100%;width:0;background:var(--primary);transition:width .2s}.progress.failed span{background:var(--danger)}.log{height:230px;overflow:auto;background:#111827;color:#d1d5db;border-radius:6px;padding:12px;font:12px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap}.log .error-line{color:#fda29b}.muted{color:var(--muted)}.error{color:var(--danger);white-space:pre-wrap}.success{color:var(--success)}.warning{border-left:3px solid #d97706;background:#fffbeb;color:#92400e;padding:10px 12px;margin:12px 0}.warning strong{display:block;margin-bottom:4px}.error-box{border-left:3px solid var(--danger);background:#fef3f2;color:#7a271a;padding:12px;margin:12px 0;white-space:pre-wrap}
@@ -25,7 +25,7 @@
     <main>
       <section class="panel">
         <h2>导出当前数据</h2>
-        <p class="muted">生成标准 SQLite3 数据库，表结构、字段和索引与原版 XBoard 一致，可直接用于迁回原版。邮件凭据为空，支付渠道不导出，主题固定为 Xboard。</p>
+        <p class="muted">生成标准 SQLite3 数据库，表结构、字段和索引与原版 XBoard 一致，可直接用于迁回原版。邮件凭据为空，所有插件、插件配置和支付渠道不导出，主题固定为 Xboard。</p>
         <div class="actions"><button class="button" id="export">手动导出 SQLite3</button><span id="export-status" class="muted"></span></div>
       </section>
       <section class="panel">
@@ -34,13 +34,14 @@
           <div class="field"><label for="sqlite-file">SQLite3 数据库（必选）</label><input id="sqlite-file" type="file" accept=".db,.sqlite,.sqlite3" required></div>
           <div class="field"><label for="redis-file">Redis RDB / JSON（可选）</label><input id="redis-file" type="file" accept=".rdb,.json,application/json"></div>
           <div class="field"><label for="mode">冲突策略</label><select id="mode"><option value="overwrite">完整切换（保留原版主键关系）</option><option value="merge">合并并保留 D1 现有记录</option></select></div>
+          <div class="field check-field"><label for="skip-backup"><input id="skip-backup" type="checkbox"><span>跳过迁移前备份<small>跳过后不会自动导出 SQLite、不会建立 D1 快照，迁移失败时无法一键还原。</small></span></label></div>
         </div>
         <div class="actions"><button class="button primary" id="inspect">开始预检</button><span id="file-status" class="muted"></span></div>
       </section>
       <section class="panel" id="preflight" hidden>
         <h2>预检结果</h2>
         <div id="preflight-content"></div>
-        <div class="actions"><button class="button primary" id="migrate">执行迁移</button><span class="muted">执行前会自动导出当前数据，并在 D1 内建立可一键还原的快照。</span></div>
+        <div class="actions"><button class="button primary" id="migrate">执行迁移</button><span class="muted" id="backup-note">执行前会自动导出当前数据，并在 D1 内建立可一键还原的快照。</span></div>
       </section>
       <section class="panel" id="running" hidden>
         <h2>迁移进度</h2><div id="progress-label" class="muted">准备中</div><div id="progress" class="progress"><span id="progress-bar"></span></div><div id="log" class="log"></div>
