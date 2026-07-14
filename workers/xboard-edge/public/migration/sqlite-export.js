@@ -3,7 +3,7 @@ function formatSqliteDate(value) {
   if (!Number.isFinite(Number(value))) return value;
   const date = new Date(Number(value) * 1000);
   const part = number => String(number).padStart(2, "0");
-  return `${date.getFullYear()}-${part(date.getMonth() + 1)}-${part(date.getDate())} ${part(date.getHours())}:${part(date.getMinutes())}:${part(date.getSeconds())}`;
+  return `${date.getUTCFullYear()}-${part(date.getUTCMonth() + 1)}-${part(date.getUTCDate())} ${part(date.getUTCHours())}:${part(date.getUTCMinutes())}:${part(date.getUTCSeconds())}`;
 }
 
 function requiredFallback(column, row) {

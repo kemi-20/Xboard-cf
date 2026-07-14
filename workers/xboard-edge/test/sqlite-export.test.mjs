@@ -49,3 +49,17 @@ test("SQLite export repairs legacy audit rows with missing HTTP fields", async (
     db.close();
   }
 });
+
+test("SQLite DATETIME export is stable regardless of the browser timezone", async () => {
+  const db = await templateDatabase();
+  try {
+    insertExportRows(db, "failed_jobs", [{
+      id: 990002, uuid: "timezone-test", connection: "test", queue: "test",
+      payload: "{}", exception: "test", failed_at: 1767225600
+    }]);
+    const failedAt = db.exec("SELECT failed_at FROM failed_jobs WHERE id = 990002")[0].values[0][0];
+    assert.equal(failedAt, "2026-01-01 00:00:00");
+  } finally {
+    db.close();
+  }
+});

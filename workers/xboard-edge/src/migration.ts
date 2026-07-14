@@ -116,6 +116,7 @@ function exportRow(table: string, source: MigrationRow): MigrationRow | null {
   const row = { ...source };
   if (table === "v2_settings") {
     const name = String(row.name || "").trim().toLowerCase();
+    if (name === "system_bootstrap_edge_version") return null;
     if (isThemeSetting(name)) {
       if (!DEFAULT_THEME_SETTINGS.has(name)) return null;
       row.value = "Xboard";
@@ -123,7 +124,14 @@ function exportRow(table: string, source: MigrationRow): MigrationRow | null {
     if (NON_MIGRATABLE_MAIL_SETTINGS.has(name) || name.startsWith("smtp_")) row.value = "";
     if (name.startsWith("payment_") || name.startsWith("pay_")) return null;
   }
-  if (table === "v2_stat" && row.transfer_used_total === undefined) row.transfer_used_total = row.transfer_used ?? "0";
+  if (table === "v2_stat") {
+    if (row.transfer_used_total === undefined) row.transfer_used_total = row.transfer_used ?? "0";
+    row.transfer_used_total = String(row.transfer_used_total ?? "0").replace(/\.0+$/, "");
+  }
+  if (table === "v2_user") {
+    if (String(row.password_algo || "").toLowerCase() === "bcrypt" && /^\$2[aby]\$/.test(String(row.password || ""))) row.password_algo = null;
+    if (Number(row.online_count || 0) === 0 && !row.last_online_at) row.online_count = null;
+  }
   if (["v2_stat", "v2_stat_user", "v2_stat_server"].includes(table) && !String(row.record_type || "").trim()) row.record_type = "d";
   if (table === "v2_admin_audit_log") {
     if (row.admin_id === null || row.admin_id === undefined) row.admin_id = 0;

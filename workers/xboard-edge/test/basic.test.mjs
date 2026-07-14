@@ -267,6 +267,14 @@ test("migration excludes service credentials that cannot move to Cloudflare", ()
   assert.match(source, /skipped_service_config/);
 });
 
+test("migration export restores original SQLite value representations", () => {
+  const source = fs.readFileSync("src/migration.ts", "utf8");
+  assert.match(source, /name === "system_bootstrap_edge_version"/);
+  assert.match(source, /replace\(\/\\\.0\+\$\/, ""\)/);
+  assert.match(source, /row\.password_algo = null/);
+  assert.match(source, /row\.online_count = null/);
+});
+
 test("plan traffic is converted from gigabytes to user bytes", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /SELECT transfer_enable FROM v2_plan[\s\S]*?\* 1073741824/);
