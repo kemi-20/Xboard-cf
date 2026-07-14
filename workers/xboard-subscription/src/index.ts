@@ -240,7 +240,7 @@ function generalUri(user: any, server: any) {
   if (server.type === "hysteria") {
     const version = Number(ps.version || 2);
     if (version === 2) {
-      return `hysteria2://${password}@${address}:${server.port}?${query({ sni: ps.tls?.server_name, insecure: ps.tls?.allow_insecure ? "1" : "0", obfs: ps.obfs?.open ? ps.obfs?.type || "salamander" : "none", "obfs-password": ps.obfs?.open ? ps.obfs?.password : undefined, mport: server.ports })}#${name}`;
+      return `hysteria2://${password}@${address}:${server.port}?${query({ sni: ps.tls?.server_name, insecure: ps.tls?.allow_insecure ? "1" : "0", obfs: ps.obfs?.open ? ps.obfs?.type || "salamander" : undefined, "obfs-password": ps.obfs?.open ? ps.obfs?.password : undefined, mport: server.ports })}#${name}`;
     }
     return `hysteria://${address}:${server.port}?${query({ protocol: "udp", auth: password, sni: ps.tls?.server_name, insecure: ps.tls?.allow_insecure ? "1" : "0", upmbps: ps.bandwidth?.up, downmbps: ps.bandwidth?.down, obfs: ps.obfs?.open && ps.obfs?.password ? "xplus" : undefined, obfsParam: ps.obfs?.open ? ps.obfs?.password : undefined })}#${name}`;
   }
@@ -256,17 +256,17 @@ function general(user: any, servers: any[], encode = true) {
   return encode ? b64(content) : content;
 }
 
-function clashProxy(user: any, server: any) {
+function clashProxy(user: any, server: any, client: Client = "clashmeta") {
   const ps = server.protocol_settings || {};
   const base: Config = { name: server.name, type: server.type === "shadowsocks" ? "ss" : server.type, server: server.host, port: Number(server.port), udp: true };
-  if (server.type === "shadowsocks") Object.assign(base, { cipher: ps.cipher || "aes-128-gcm", password: server.password || user.uuid, plugin: ps.plugin, "plugin-opts": ps.plugin_opts });
+  if (server.type === "shadowsocks") Object.assign(base, { cipher: ps.cipher || "aes-128-gcm", password: server.password || user.uuid, ...clashPluginOptions(ps, client) });
   else if (server.type === "vmess") {
     Object.assign(base, { uuid: user.uuid, alterId: 0, cipher: "auto", network: ps.network || "tcp", tls: Boolean(ps.tls), servername: ps.tls_settings?.server_name, "skip-cert-verify": Boolean(ps.tls_settings?.allow_insecure) });
     applyClashTransport(base, ps, server);
     applyClashExtras(base, ps);
   }
   else if (server.type === "vless") {
-    Object.assign(base, { uuid: user.uuid, alterId: 0, cipher: "auto", flow: ps.flow, encryption: ps.encryption?.enabled ? ps.encryption?.encryption || "none" : "none", tls: Boolean(ps.tls), "skip-cert-verify": Number(ps.tls) === 2 ? Boolean(ps.reality_settings?.allow_insecure) : Boolean(ps.tls_settings?.allow_insecure), servername: ps.reality_settings?.server_name || ps.tls_settings?.server_name });
+    Object.assign(base, { uuid: user.uuid, alterId: 0, cipher: "auto", flow: client === "stash" && Number(ps.tls) !== 2 ? undefined : ps.flow, encryption: ps.encryption?.enabled ? ps.encryption?.encryption || "none" : "none", tls: Boolean(ps.tls), "skip-cert-verify": Number(ps.tls) === 2 ? Boolean(ps.reality_settings?.allow_insecure) : Boolean(ps.tls_settings?.allow_insecure), servername: ps.reality_settings?.server_name || ps.tls_settings?.server_name });
     if (Number(ps.tls) === 2) base["reality-opts"] = { "public-key": ps.reality_settings?.public_key, "short-id": ps.reality_settings?.short_id };
     if (tlsFingerprint(ps)) base["client-fingerprint"] = tlsFingerprint(ps);
     const ns = ps.network_settings || {};
@@ -286,15 +286,44 @@ function clashProxy(user: any, server: any) {
     applyClashTransport(base, ps, server);
     applyClashExtras(base, ps);
   }
-  else if (server.type === "hysteria") Object.assign(base, Number(ps.version || 1) === 2
-    ? { type: "hysteria2", password: server.password || user.uuid, sni: ps.tls?.server_name, "skip-cert-verify": Boolean(ps.tls?.allow_insecure), ports: server.ports, obfs: ps.obfs?.open ? ps.obfs?.type : undefined, "obfs-password": ps.obfs?.open ? ps.obfs?.password : undefined }
-    : { type: "hysteria", auth_str: server.password || user.uuid, sni: ps.tls?.server_name, "skip-cert-verify": Boolean(ps.tls?.allow_insecure), up: ps.bandwidth?.up, down: ps.bandwidth?.down, obfs: ps.obfs?.open ? ps.obfs?.password : undefined });
-  else if (server.type === "tuic") Object.assign(base, Number(ps.version) === 4
-    ? { token: server.password || user.uuid, sni: ps.tls?.server_name, "skip-cert-verify": Boolean(ps.tls?.allow_insecure), "congestion-controller": ps.congestion_control || "cubic", "udp-relay-mode": ps.udp_relay_mode || "native", alpn: ps.alpn }
-    : { uuid: server.password || user.uuid, password: server.password || user.uuid, sni: ps.tls?.server_name, "skip-cert-verify": Boolean(ps.tls?.allow_insecure), "congestion-controller": ps.congestion_control || "cubic", "udp-relay-mode": ps.udp_relay_mode || "native", alpn: ps.alpn });
+  else if (server.type === "hysteria") {
+    const version = Number(ps.version || 1);
+    const common = { sni: ps.tls?.server_name, "skip-cert-verify": Boolean(ps.tls?.allow_insecure), ports: server.ports, "hop-interval": ps.hop_interval !== undefined ? Number(ps.hop_interval) : undefined };
+    if (version === 2) Object.assign(base, client === "stash"
+      ? { ...common, type: "hysteria2", auth: server.password || user.uuid, "up-speed": ps.bandwidth?.up, "down-speed": ps.bandwidth?.down, "fast-open": true, obfs: ps.obfs?.open ? ps.obfs?.type || "salamander" : undefined, "obfs-password": ps.obfs?.open ? ps.obfs?.password : undefined }
+      : { ...common, type: "hysteria2", password: server.password || user.uuid, obfs: ps.obfs?.open ? ps.obfs?.type : undefined, "obfs-password": ps.obfs?.open ? ps.obfs?.password : undefined });
+    else Object.assign(base, client === "stash"
+      ? { ...common, type: "hysteria", "auth-str": server.password || user.uuid, protocol: "udp", "up-speed": ps.bandwidth?.up, "down-speed": ps.bandwidth?.down, obfs: ps.obfs?.open ? ps.obfs?.password : undefined }
+      : { ...common, type: "hysteria", auth_str: server.password || user.uuid, protocol: "udp", up: ps.bandwidth?.up, down: ps.bandwidth?.down, obfs: ps.obfs?.open ? ps.obfs?.password : undefined, "fast-open": true, disable_mtu_discovery: true });
+  }
+  else if (server.type === "tuic") {
+    const common = { sni: ps.tls?.server_name, "skip-cert-verify": Boolean(ps.tls?.allow_insecure), "congestion-controller": ps.congestion_control || "cubic", "udp-relay-mode": ps.udp_relay_mode || "native", alpn: ps.alpn || (client === "stash" ? ["h3"] : undefined) };
+    const credentials = Number(ps.version) === 4 ? { token: server.password || user.uuid } : { uuid: server.password || user.uuid, password: server.password || user.uuid };
+    Object.assign(base, common, credentials, client === "stash" ? { "reduce-rtt": true, "fast-open": true, "heartbeat-interval": 10000, "request-timeout": 8000, "max-udp-relay-packet-size": 1500, version: Number(ps.version || 5) } : {});
+  }
   else if (server.type === "anytls") Object.assign(base, { password: server.password || user.uuid, sni: ps.tls?.server_name, "skip-cert-verify": Boolean(ps.tls?.allow_insecure), alpn: ps.alpn });
   else Object.assign(base, { username: server.password || user.uuid, password: server.password || user.uuid, tls: Boolean(ps.tls), sni: ps.tls_settings?.server_name, "skip-cert-verify": Boolean(ps.tls_settings?.allow_insecure) });
   return Object.fromEntries(Object.entries(base).filter(([, value]) => value !== undefined));
+}
+
+function clashPluginOptions(ps: any, client: Client) {
+  const plugin = String(ps.plugin || "");
+  if (!plugin || !ps.plugin_opts) return {};
+  const parsed = Object.fromEntries(String(ps.plugin_opts).split(";").map(item => item.trim()).filter(Boolean).map(item => {
+    const index = item.indexOf("=");
+    return index < 0 ? [item, true] : [item.slice(0, index).trim(), item.slice(index + 1).trim()];
+  }));
+  if (plugin === "obfs" || plugin === "obfs-local") return {
+    plugin: "obfs",
+    "plugin-opts": Object.fromEntries(Object.entries({ mode: parsed.obfs || parsed.mode || "http", host: parsed["obfs-host"] || parsed.host || (client === "clash" ? "" : "www.bing.com"), path: client === "clash" ? parsed.path : undefined }).filter(([, value]) => value !== undefined && value !== ""))
+  };
+  if (plugin === "v2ray-plugin") return {
+    plugin,
+    "plugin-opts": Object.fromEntries(Object.entries({ mode: parsed.mode || "websocket", tls: client === "clash" ? parsed.tls === "true" : Boolean(parsed.tls || parsed.server), host: parsed.host || (client === "clash" ? "" : undefined), path: parsed.path || "/", mux: client === "clash" ? undefined : parsed.mux ? true : undefined, headers: client === "clash" || !parsed.host ? undefined : { Host: parsed.host } }).filter(([, value]) => value !== undefined))
+  };
+  if (client !== "clash" && plugin === "shadow-tls") return { plugin, "plugin-opts": { host: parsed.host, password: parsed.password, version: Number(parsed.version || 2) } };
+  if (client !== "clash" && plugin === "restls") return { plugin, "plugin-opts": { host: parsed.host, password: parsed.password, "restls-script": parsed["restls-script"] || "123" } };
+  return { plugin, "plugin-opts": parsed };
 }
 
 function applyClashTransport(base: Config, ps: any, server: any) {
@@ -323,7 +352,7 @@ function regexValue(value: unknown) {
 function yamlProfile(client: Client, template: string, config: Config, user: any, servers: any[], request: Request) {
   let document: Config;
   try { document = parseYaml(template || "") || {}; } catch { document = {}; }
-  const proxies = servers.map(server => clashProxy(user, server));
+  const proxies = servers.map(server => clashProxy(user, server, client));
   const names = proxies.map(proxy => proxy.name);
   document.proxies = [...(Array.isArray(document.proxies) ? document.proxies : []), ...proxies];
   const groups = Array.isArray(document["proxy-groups"]) ? document["proxy-groups"] : [];
@@ -364,7 +393,7 @@ function singboxOutbound(user: any, server: any) {
   if (server.type === "socks") Object.assign(outbound, { version: "5", username: server.password || user.uuid, udp_over_tcp: ps.udp_over_tcp ? true : undefined });
   if (server.type === "http") Object.assign(outbound, { username: server.password || user.uuid, path: ps.path, headers: ps.headers });
   if (ps.tls || ps.tls_settings || ps.reality_settings || ps.tls?.server_name || ["trojan", "hysteria", "tuic", "anytls"].includes(server.type)) {
-    outbound.tls = { enabled: true, server_name: ps.reality_settings?.server_name || ps.tls_settings?.server_name || ps.tls?.server_name, insecure: Number(ps.tls) === 2 ? Boolean(ps.reality_settings?.allow_insecure) : Boolean(ps.tls_settings?.allow_insecure || ps.tls?.allow_insecure), alpn: ps.alpn };
+    outbound.tls = { enabled: true, server_name: ps.reality_settings?.server_name || ps.tls_settings?.server_name || ps.tls?.server_name, insecure: Number(ps.tls) === 2 ? Boolean(ps.reality_settings?.allow_insecure) : Boolean(ps.tls_settings?.allow_insecure || ps.tls?.allow_insecure), alpn: ps.alpn || (server.type === "tuic" ? ["h3"] : undefined) };
     if (Number(ps.tls) === 2) outbound.tls.reality = { enabled: true, public_key: ps.reality_settings?.public_key, short_id: ps.reality_settings?.short_id };
     if (tlsFingerprint(ps)) outbound.tls.utls = { enabled: true, fingerprint: tlsFingerprint(ps) };
     const ech = ps.tls_settings?.ech || ps.tls?.ech;
@@ -381,7 +410,78 @@ function singboxOutbound(user: any, server: any) {
   return outbound;
 }
 
-function singboxProfile(template: string, user: any, servers: any[]) {
+function versionLess(left: string, right: string) {
+  const a = left.split(".").map(Number), b = right.split(".").map(Number);
+  for (let index = 0; index < Math.max(a.length, b.length); index++) {
+    const difference = (a[index] || 0) - (b[index] || 0);
+    if (difference) return difference < 0;
+  }
+  return false;
+}
+
+function singboxCoreVersion(userAgent: string) {
+  const direct = userAgent.match(/sing-box\s+v?(\d+(?:\.\d+){0,2})/i);
+  if (direct) return direct[1];
+  if (/(hiddify|sfm|sing-box)/i.test(userAgent) && /v?\d+(?:\.\d+){0,2}/i.test(userAgent)) return "1.13.0";
+  return null;
+}
+
+function adaptSingboxConfig(document: Config, userAgent: string) {
+  const version = singboxCoreVersion(userAgent);
+  if (!version) return document;
+  document.outbounds = Array.isArray(document.outbounds) ? document.outbounds : [];
+  document.route ||= {};
+  document.route.rules = Array.isArray(document.route.rules) ? document.route.rules : [];
+  if (!versionLess(version, "1.13.0")) {
+    const removed = new Map<string, string>();
+    document.outbounds = document.outbounds.filter((outbound: any) => {
+      if (!["block", "dns"].includes(outbound?.type)) return true;
+      if (outbound.tag) removed.set(outbound.tag, outbound.type);
+      return false;
+    });
+    for (const rule of document.route.rules) {
+      const type = removed.get(rule.outbound);
+      if (!type) continue;
+      delete rule.outbound;
+      rule.action = type === "dns" ? "hijack-dns" : "reject";
+    }
+  }
+  if (versionLess(version, "1.11.0")) {
+    let needsDns = false, needsBlock = false;
+    for (const rule of document.route.rules) {
+      if (rule.action === "hijack-dns") { delete rule.action; rule.outbound = "dns-out"; needsDns = true; }
+      else if (rule.action === "reject") { delete rule.action; rule.outbound = "block"; needsBlock = true; }
+    }
+    if (needsBlock && !document.outbounds.some((item: any) => item.tag === "block")) document.outbounds.push({ type: "block", tag: "block" });
+    if (needsDns && !document.outbounds.some((item: any) => item.tag === "dns-out")) document.outbounds.push({ type: "dns", tag: "dns-out" });
+    for (const inbound of Array.isArray(document.inbounds) ? document.inbounds : []) {
+      if (inbound.type === "tun") inbound.endpoint_independent_nat = true;
+      if (inbound.sniff) inbound.sniff_override_destination = true;
+    }
+  }
+  if (versionLess(version, "1.12.0")) {
+    for (const server of Array.isArray(document.dns?.servers) ? document.dns.servers : []) {
+      if (!server.type) continue;
+      const host = server.server;
+      if (server.type === "https") server.address = `https://${host}/dns-query`;
+      else if (["tls", "tcp", "quic"].includes(server.type)) server.address = `${server.type}://${host}`;
+      else if (server.type === "block") server.address = "rcode://refused";
+      else if (server.type === "rcode") { server.address = `rcode://${server.rcode || "success"}`; delete server.rcode; }
+      else server.address = host;
+      delete server.type; delete server.server;
+    }
+  }
+  if (versionLess(version, "1.10.0")) {
+    for (const inbound of Array.isArray(document.inbounds) ? document.inbounds : []) {
+      if (inbound.type !== "tun" || !Array.isArray(inbound.address)) continue;
+      for (const address of inbound.address) inbound[String(address).includes(":") ? "inet6_address" : "inet4_address"] = address;
+      delete inbound.address;
+    }
+  }
+  return document;
+}
+
+function singboxProfile(template: string, user: any, servers: any[], userAgent = "") {
   let document: Config;
   try { document = JSON.parse(template || "{}"); } catch { document = {}; }
   const proxies = servers.map(server => singboxOutbound(user, server));
@@ -397,7 +497,7 @@ function singboxProfile(template: string, user: any, servers: any[]) {
     outbound.outbounds = [...(Array.isArray(outbound.outbounds) ? outbound.outbounds : []), ...selected];
   }
   document.outbounds = [...outbounds, ...proxies];
-  return JSON.stringify(document, null, 2);
+  return JSON.stringify(adaptSingboxConfig(document, userAgent), null, 2);
 }
 
 function matchesPattern(pattern: string, subject: string) {
@@ -474,11 +574,17 @@ function shadowrocketLine(user: any, server: any) {
   if (["vmess", "vless"].includes(server.type)) {
     const params: Config = { tfo: 1, remark: server.name };
     if (server.type === "vmess") params.alterId = 0;
-    if (ps.flow) params.xtls = ({ none: 0, "xtls-rprx-direct": 1, "xtls-rprx-vision": 2 } as Config)[ps.flow];
+    if (ps.flow) Object.assign(params, { tls: 1, xtls: ({ none: 0, "xtls-rprx-direct": 1, "xtls-rprx-vision": 2 } as Config)[ps.flow] });
     if (ps.tls) Object.assign(params, { tls: 1, allowInsecure: Number(ps.tls) === 2 ? Number(Boolean(ps.reality_settings?.allow_insecure)) : Number(Boolean(ps.tls_settings?.allow_insecure)), peer: ps.tls_settings?.server_name, sni: ps.reality_settings?.server_name, pbk: ps.reality_settings?.public_key, sid: ps.reality_settings?.short_id, fp: tlsFingerprint(ps) });
     const ns = ps.network_settings || {};
-    if (ps.network === "ws") Object.assign(params, { obfs: "websocket", path: ns.path, obfsParam: ns.headers?.Host });
+    if (ps.network === "tcp" && ns.header?.type && ns.header.type !== "none") {
+      const paths = Array.isArray(ns.header?.request?.path) ? ns.header.request.path : [ns.header?.request?.path || "/"];
+      const hosts = Array.isArray(ns.header?.request?.headers?.Host) ? ns.header.request.headers.Host : [ns.header?.request?.headers?.Host || "www.example.com"];
+      Object.assign(params, { obfs: ns.header.type, path: paths[Math.floor(Math.random() * paths.length)], obfsParam: hosts[Math.floor(Math.random() * hosts.length)] });
+    }
+    else if (ps.network === "ws") Object.assign(params, { obfs: "websocket", path: ns.path, obfsParam: ns.headers?.Host });
     else if (ps.network === "grpc") Object.assign(params, { obfs: "grpc", path: ns.serviceName, host: ps.tls_settings?.server_name || server.host });
+    else if (ps.network === "kcp") Object.assign(params, { obfs: "kcp", path: ns.seed, type: ns.header?.type || "none" });
     else if (["h2", "httpupgrade", "xhttp"].includes(ps.network)) Object.assign(params, { obfs: ps.network, path: ns.path, obfsParam: Array.isArray(ns.host) ? ns.host[0] : ns.host || server.host, mode: ns.mode });
     const info = b64(`auto:${password}@${address}:${server.port}`);
     return `${server.type}://${info}?${query(params)}\r\n`;
@@ -652,10 +758,16 @@ async function templates(env: Env) {
 
 function output(client: Client, config: Config, templateMap: Config, user: any, servers: any[], request: Request, token: string) {
   servers = servers.filter(server => allowedProtocols[client].has(server.type));
-  if (client === "clash") servers = servers.filter(server => !["httpupgrade", "xhttp"].includes(String(server.protocol_settings?.network || "")));
+  if (client === "clash") servers = servers.filter(server => !["vmess", "trojan"].includes(server.type) || ["tcp", "ws", "grpc"].includes(String(server.protocol_settings?.network || "tcp")));
+  if (client === "clashmeta") servers = servers.filter(server => server.type !== "vmess" || ["tcp", "ws", "grpc", "http", "h2", "httpupgrade"].includes(String(server.protocol_settings?.network || "tcp")))
+    .filter(server => server.type !== "trojan" || ["tcp", "ws", "grpc", "httpupgrade"].includes(String(server.protocol_settings?.network || "tcp")));
+  if (client === "surge") {
+    const surgeCiphers = new Set(["aes-128-gcm", "aes-192-gcm", "aes-256-gcm", "chacha20-ietf-poly1305", "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm"]);
+    servers = servers.filter(server => server.type !== "shadowsocks" || surgeCiphers.has(String(server.protocol_settings?.cipher || "")));
+  }
   if (client === "singbox") servers = servers.filter(server => !(server.type === "vless" && server.protocol_settings?.network === "h2"));
   if (["clash", "clashmeta", "stash"].includes(client)) return yamlProfile(client, String(templateMap[client] || templateMap.clash || ""), config, user, servers, request);
-  if (client === "singbox") return singboxProfile(String(templateMap.singbox || ""), user, servers);
+  if (client === "singbox") return singboxProfile(String(templateMap.singbox || ""), user, servers, request.headers.get("user-agent") || "");
   if (client === "shadowsocks") return shadowsocksProfile(user, servers);
   if (client === "surge" || client === "surfboard") return textTemplateProfile(client, String(templateMap[client] || ""), config, user, servers, request, token);
   if (client === "shadowrocket") {
@@ -745,12 +857,24 @@ async function bodyEtag(body: string) {
   return `"${Array.from(new Uint8Array(digest)).map(value => value.toString(16).padStart(2, "0")).join("")}"`;
 }
 
-export const __test = { clientOf, decorateServers, general, generalUri, yamlProfile, clashProxy, singboxOutbound, singboxProfile, shadowsocksProfile, textTemplateProfile, proxyLine, shadowrocketLine, quantumultXLine, loonLine, serverPassword, randomizedPort, replaceByPattern, subscriptionUrl, output, responseHeaders };
+function matchesConfiguredSubscribePath(pathname: string, configuredPath: unknown) {
+  const path = String(configuredPath || "s").trim().replace(/^\/+|\/+$/g, "") || "s";
+  const prefix = `/${path}/`;
+  if (!pathname.startsWith(prefix)) return false;
+  const token = pathname.slice(prefix.length);
+  return token.length > 0 && !token.includes("/");
+}
+
+export const __test = { clientOf, decorateServers, general, generalUri, yamlProfile, clashProxy, singboxOutbound, singboxProfile, adaptSingboxConfig, shadowsocksProfile, textTemplateProfile, proxyLine, shadowrocketLine, quantumultXLine, loonLine, serverPassword, randomizedPort, replaceByPattern, subscriptionUrl, output, responseHeaders, matchesConfiguredSubscribePath };
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/health") return new Response(JSON.stringify({ data: { service: "xboard-subscription", time: now() } }), { headers: { "content-type": "application/json" } });
+    if (url.pathname !== "/api/v1/client/subscribe") {
+      const configured = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = 'subscribe_path'").first<{ value: string }>();
+      if (!matchesConfiguredSubscribePath(url.pathname, configured?.value)) return fail("Not Found", 404);
+    }
     const token = url.pathname === "/api/v1/client/subscribe"
       ? url.searchParams.get("token") || ""
       : url.pathname.split("/").filter(Boolean).pop() || url.searchParams.get("token") || "";

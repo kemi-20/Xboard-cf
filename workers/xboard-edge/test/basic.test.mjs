@@ -21,7 +21,10 @@ test("admin shell references the current bundle without caching", () => {
   assert.match(source, /"cache-control": "no-store, no-cache, must-revalidate"/);
   assert.match(source, /window\.settings = \$\{settingsJson\}/);
   assert.match(source, /id = "xboard-migration-menu"/);
-  assert.match(source, /nav\.appendChild\(link\)/);
+  assert.match(source, /sample \? sample\.cloneNode\(true\)/);
+  assert.match(source, /nav\.lastElementChild !== link/);
+  assert.match(source, /closest\("\[data-collapsed\]"\)/);
+  assert.match(source, /collapsed \? "sr-only" : ""/);
   assert.match(source, /M20 17v6/);
   assert.match(source, /M17 20l3 3l3 -3/);
   assert.match(source, /localStorage\.getItem\("i18nextLng"\)/);
@@ -96,6 +99,9 @@ test("official subscription paths are proxied through the subscription service b
   const wrangler = fs.readFileSync("wrangler.toml", "utf8");
   assert.match(source, /XBOARD_SUBSCRIPTION: Fetcher/);
   assert.match(source, /url\.pathname === "\/api\/v1\/client\/subscribe"/);
+  assert.match(source, /async function currentSubscribePath/);
+  assert.match(source, /isSubscriptionPath\(url\.pathname, await currentSubscribePath\(env\)\)/);
+  assert.doesNotMatch(source, /url\.pathname\.startsWith\("\/sub\/"\)/);
   assert.match(wrangler, /binding = "XBOARD_SUBSCRIPTION"[\s\S]*service = "xboard-subscription"/);
 });
 
@@ -541,4 +547,20 @@ test("V2 client app config exposes the complete upstream structure", () => {
     assert.match(section, new RegExp(key));
   }
   assert.match(section, /md5\(JSON\.stringify\(config\)\)/);
+});
+
+test("admin ticket, coupon and audit handlers preserve upstream behavior", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /UPDATE v2_ticket SET reply_status = 1/);
+  assert.match(source, /ticket_sendEmailNotify_/);
+  assert.match(source, /expirationTtl: 1800/);
+  assert.match(source, /parseJsonArray\(input\.reply_status\)/);
+  assert.match(source, /const ticketFields:/);
+  assert.match(source, /const couponFields = new Set/);
+  assert.match(source, /route === "\/server\/group\/save"/);
+  assert.match(source, /if \(!name\) return fail\("组名不能为空"/);
+  assert.match(source, /INSERT INTO v2_admin_audit_log\(admin_id, action, target, metadata, ip, method, uri, request_data/);
+  assert.match(source, /replaceAll\("-", "_"\)/);
+  assert.match(source, /const sensitive = \/\(\^\|_\)\(password\|token\|secret\|key\|api_key\)\$\/i/);
+  assert.match(source, /const userMap = new Map\(userEntries\)/);
 });

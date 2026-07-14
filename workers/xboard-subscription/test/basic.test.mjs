@@ -13,6 +13,13 @@ test("legacy client subscribe reads the query token instead of the route name", 
   assert.match(source, /url\.pathname === "\/api\/v1\/client\/subscribe"[\s\S]*url\.searchParams\.get\("token"\)/);
 });
 
+test("saved subscription paths are enforced instead of accepting arbitrary aliases", () => {
+  assert.equal(__test.matchesConfiguredSubscribePath("/custom/token", "custom"), true);
+  assert.equal(__test.matchesConfiguredSubscribePath("/s/token", "custom"), false);
+  assert.equal(__test.matchesConfiguredSubscribePath("/custom/a/b", "custom"), false);
+  assert.equal(__test.matchesConfiguredSubscribePath("/s/token", ""), true);
+});
+
 test("subscription output reads saved settings and templates", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /await loadSettings\(env\.XBOARD_DB\)/);
@@ -307,4 +314,66 @@ test("QuantumultX user agents and disabled template fallbacks match upstream beh
   assert.match(source, /flag\.includes\("quantumultx"\)/);
   assert.doesNotMatch(source, /quantumult%20x/);
   assert.match(source, /SELECT name, COALESCE\(content, ''\) AS content FROM v2_subscribe_templates WHERE enabled = 1/);
+});
+
+test("Clash-family Hysteria, TUIC and network allowlists follow upstream clients", () => {
+  const user = { uuid: "00000000-0000-4000-8000-000000000000" };
+  const hysteria1 = { type: "hysteria", name: "Hy1", host: "hy.example.com", port: 443, password: "secret", ports: "2000-3000", protocol_settings: { version: 1, hop_interval: 15, bandwidth: { up: 100, down: 200 }, tls: { server_name: "hy.example.com" }, obfs: { open: true, password: "obfs" } } };
+  const clashHy = __test.clashProxy(user, hysteria1, "clashmeta");
+  assert.equal(clashHy["hop-interval"], 15);
+  assert.equal(clashHy.protocol, "udp");
+  assert.equal(clashHy["fast-open"], true);
+  assert.equal(clashHy.disable_mtu_discovery, true);
+  const stashHy = __test.clashProxy(user, { ...hysteria1, protocol_settings: { ...hysteria1.protocol_settings, version: 2 } }, "stash");
+  assert.equal(stashHy.auth, "secret");
+  assert.equal(stashHy.password, undefined);
+  const stashTuic = __test.clashProxy(user, { type: "tuic", name: "TUIC", host: "tuic.example.com", port: 443, password: "secret", protocol_settings: { version: 5, tls: {} } }, "stash");
+  assert.deepEqual(stashTuic.alpn, ["h3"]);
+  assert.equal(stashTuic["heartbeat-interval"], 10000);
+  assert.equal(stashTuic["max-udp-relay-packet-size"], 1500);
+
+  const vmessXhttp = { type: "vmess", name: "VMess XHTTP", host: "node.example.com", port: 443, protocol_settings: { network: "xhttp", network_settings: {} } };
+  const rendered = __test.output("clashmeta", {}, { clashmeta: "{}" }, { ...user, u: 0, d: 0, transfer_enable: 1 }, [vmessXhttp], new Request("https://sub.example/s/token"), "token");
+  assert.doesNotMatch(rendered, /VMess XHTTP/);
+});
+
+test("Shadowrocket and Sing-box preserve upstream transport defaults", () => {
+  const user = { uuid: "00000000-0000-4000-8000-000000000000" };
+  const vlessKcp = { type: "vless", name: "VLESS KCP", host: "node.example.com", port: 443, protocol_settings: { flow: "xtls-rprx-vision", network: "kcp", network_settings: { seed: "seed-value", header: { type: "srtp" } } } };
+  const line = __test.shadowrocketLine(user, vlessKcp);
+  assert.match(line, /tls=1/);
+  assert.match(line, /obfs=kcp/);
+  assert.match(line, /path=seed-value/);
+  assert.match(line, /type=srtp/);
+  const tuic = __test.singboxOutbound(user, { type: "tuic", name: "TUIC", host: "node.example.com", port: 443, protocol_settings: { version: 5, tls: {} } });
+  assert.deepEqual(tuic.tls.alpn, ["h3"]);
+});
+
+test("Shadowsocks plugins and disabled Hysteria obfs use upstream representations", () => {
+  const user = { uuid: "00000000-0000-4000-8000-000000000000" };
+  const ss = { type: "shadowsocks", name: "SS", host: "node.example.com", port: 443, protocol_settings: { cipher: "aes-128-gcm", plugin: "v2ray-plugin", plugin_opts: "mode=websocket;tls;host=cdn.example.com;path=/ws;mux" } };
+  const proxy = __test.clashProxy(user, ss, "clashmeta");
+  assert.equal(proxy["plugin-opts"].mode, "websocket");
+  assert.equal(proxy["plugin-opts"].tls, true);
+  assert.deepEqual(proxy["plugin-opts"].headers, { Host: "cdn.example.com" });
+  const uri = __test.generalUri(user, { type: "hysteria", name: "Hy2", host: "hy.example.com", port: 443, protocol_settings: { version: 2, tls: {} } });
+  assert.doesNotMatch(uri, /[?&]obfs=none(?:&|#)/);
+});
+
+test("Sing-box templates adapt to the requesting core version", () => {
+  const modern = __test.adaptSingboxConfig({ outbounds: [{ type: "block", tag: "block" }], route: { rules: [{ outbound: "block" }] } }, "sing-box 1.13.0");
+  assert.deepEqual(modern.outbounds, []);
+  assert.equal(modern.route.rules[0].action, "reject");
+  const legacy = __test.adaptSingboxConfig({
+    outbounds: [],
+    route: { rules: [{ action: "hijack-dns" }, { action: "reject" }] },
+    dns: { servers: [{ type: "https", server: "dns.example.com" }] },
+    inbounds: [{ type: "tun", address: ["172.19.0.1/30", "fdfe:dcba:9876::1/126"], sniff: true }]
+  }, "sing-box 1.9.0");
+  assert.equal(legacy.route.rules[0].outbound, "dns-out");
+  assert.equal(legacy.route.rules[1].outbound, "block");
+  assert.equal(legacy.dns.servers[0].address, "https://dns.example.com/dns-query");
+  assert.equal(legacy.inbounds[0].inet4_address, "172.19.0.1/30");
+  assert.equal(legacy.inbounds[0].inet6_address, "fdfe:dcba:9876::1/126");
+  assert.equal(legacy.inbounds[0].endpoint_independent_nat, true);
 });

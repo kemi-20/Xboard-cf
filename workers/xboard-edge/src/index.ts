@@ -1705,10 +1705,18 @@ async function batchUpdateServers(request: Request, env: Env) {
 }
 
 async function audit(env: Env, adminId: number, request: Request, path: string) {
-  if (request.method !== "POST" && request.method !== "DELETE") return;
+  if (request.method !== "POST") return;
   try {
-    await env.XBOARD_DB.prepare("INSERT INTO v2_admin_audit_log(admin_id, action, target, metadata, ip, created_at) VALUES (?, ?, ?, ?, ?, ?)")
-      .bind(adminId, request.method, path, "{}", request.headers.get("cf-connecting-ip") || "", now()).run();
+    const route = path.replace(/^\/api\/v[12]\/[^/]+\//, "").replaceAll("-", "_");
+    const segments = route.split("/").filter(Boolean);
+    const operation = segments.pop() || "request";
+    const action = `${segments.join("_")}.${operation}`;
+    const input = await body<Record<string, any>>(request.clone());
+    const sensitive = /(^|_)(password|token|secret|key|api_key)$/i;
+    const requestData = Object.fromEntries(Object.entries(input).filter(([key]) => !sensitive.test(key)));
+    const ts = now();
+    await env.XBOARD_DB.prepare("INSERT INTO v2_admin_audit_log(admin_id, action, target, metadata, ip, method, uri, request_data, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(adminId, action, path, JSON.stringify(requestData), requestIp(request), request.method, new URL(request.url).pathname + new URL(request.url).search, JSON.stringify(requestData), ts, ts).run();
   } catch {
     // Audit logging must never break admin operations.
   }
@@ -2048,10 +2056,12 @@ async function adminTicket(request: Request, env: Env, route: string, adminId: n
   const id = nullableNumber(input.id || url.searchParams.get("id"));
   if (route === "/ticket/fetch") {
     if (id) {
-      const ticket = await env.XBOARD_DB.prepare("SELECT t.*, u.email, u.plan_id, u.group_id FROM v2_ticket t JOIN v2_user u ON u.id = t.user_id WHERE t.id = ?").bind(id).first<Record<string, any>>();
+      const ticket = await env.XBOARD_DB.prepare("SELECT t.* FROM v2_ticket t WHERE t.id = ?").bind(id).first<Record<string, any>>();
       if (!ticket) return fail("工单不存在", 400, 400202);
+      const user = await env.XBOARD_DB.prepare("SELECT * FROM v2_user WHERE id = ?").bind(ticket.user_id).first<Record<string, any>>();
       const messages = await env.XBOARD_DB.prepare("SELECT m.*, u.email FROM v2_ticket_message m LEFT JOIN v2_user u ON u.id = m.user_id WHERE m.ticket_id = ? ORDER BY m.id ASC").bind(id).all();
-      return ok({ ...ticket, user: { id: ticket.user_id, email: ticket.email, plan_id: ticket.plan_id, group_id: ticket.group_id }, messages: messages.results || [] });
+      const transformedUser = user ? { ...safeUser(user), balance: Number(user.balance || 0) / 100, commission_balance: Number(user.commission_balance || 0) / 100, subscribe_url: await subscribeUrl(request, env, String(user.token || "")) } : null;
+      return ok({ ...ticket, user: transformedUser, messages: messages.results || [] });
     }
     const current = Math.max(1, Number(input.current || url.searchParams.get("current") || 1));
     const pageSize = Math.min(100, Math.max(1, Number(input.pageSize || url.searchParams.get("pageSize") || 10)));
@@ -2060,13 +2070,29 @@ async function adminTicket(request: Request, env: Env, route: string, adminId: n
     const clauses: string[] = []; const binds: any[] = [];
     if (status !== null && status !== undefined && status !== "") { clauses.push("t.status = ?"); binds.push(Number(status)); }
     if (email) { clauses.push("u.email = ?"); binds.push(email); }
+    const replyStatuses = parseJsonArray(input.reply_status).map(Number).filter(Number.isFinite);
+    if (replyStatuses.length) { clauses.push(`t.reply_status IN (${replyStatuses.map(() => "?").join(",")})`); binds.push(...replyStatuses); }
+    const ticketFields: Record<string, string> = { id: "t.id", subject: "t.subject", level: "t.level", status: "t.status", reply_status: "t.reply_status", created_at: "t.created_at", updated_at: "t.updated_at", email: "u.email" };
+    for (const filter of parseJsonArray(input.filter)) {
+      const field = ticketFields[String(filter?.id || "")]; const value = filter?.value;
+      if (!field || value === undefined || value === null || value === "") continue;
+      if (Array.isArray(value) && value.length) { clauses.push(`${field} IN (${value.map(() => "?").join(",")})`); binds.push(...value); }
+      else { clauses.push(`${field} LIKE ?`); binds.push(`%${String(value)}%`); }
+    }
     const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
-    const result = await env.XBOARD_DB.prepare(`SELECT t.*, u.email, u.plan_id, u.group_id FROM v2_ticket t JOIN v2_user u ON u.id = t.user_id${where} ORDER BY t.updated_at DESC LIMIT ? OFFSET ?`).bind(...binds, pageSize, (current - 1) * pageSize).all<Record<string, any>>();
+    const sort = parseJsonArray(input.sort).map(item => ({ field: ticketFields[String(item?.id || "")], direction: item?.desc ? "DESC" : "ASC" })).filter(item => item.field);
+    const order = [...sort.map(item => `${item.field} ${item.direction}`), "t.updated_at DESC"].join(", ");
+    const result = await env.XBOARD_DB.prepare(`SELECT t.* FROM v2_ticket t JOIN v2_user u ON u.id = t.user_id${where} ORDER BY ${order} LIMIT ? OFFSET ?`).bind(...binds, pageSize, (current - 1) * pageSize).all<Record<string, any>>();
     const count = await env.XBOARD_DB.prepare(`SELECT COUNT(*) AS count FROM v2_ticket t JOIN v2_user u ON u.id = t.user_id${where}`).bind(...binds).first<{ count: number }>();
-    return json({ data: (result.results || []).map(ticket => ({ ...ticket, user: { id: ticket.user_id, email: ticket.email, plan_id: ticket.plan_id, group_id: ticket.group_id } })), total: Number(count?.count || 0) });
+    const tickets = result.results || [];
+    const userIds = [...new Set(tickets.map(ticket => Number(ticket.user_id)).filter(Boolean))];
+    const users = userIds.length ? await env.XBOARD_DB.prepare(`SELECT * FROM v2_user WHERE id IN (${userIds.map(() => "?").join(",")})`).bind(...userIds).all<Record<string, any>>() : { results: [] as Record<string, any>[] };
+    const userEntries = await Promise.all((users.results || []).map(async user => [Number(user.id), { ...safeUser(user), balance: Number(user.balance || 0) / 100, commission_balance: Number(user.commission_balance || 0) / 100, subscribe_url: await subscribeUrl(request, env, String(user.token || "")) }] as const));
+    const userMap = new Map(userEntries);
+    return json({ data: tickets.map(ticket => ({ ...ticket, user: userMap.get(Number(ticket.user_id)) || null })), total: Number(count?.count || 0) });
   }
   if (!id) return fail("工单ID不能为空", 422, 422);
-  const ticket = await env.XBOARD_DB.prepare("SELECT id, status FROM v2_ticket WHERE id = ?").bind(id).first<Record<string, any>>();
+  const ticket = await env.XBOARD_DB.prepare("SELECT id, user_id, subject, status FROM v2_ticket WHERE id = ?").bind(id).first<Record<string, any>>();
   if (!ticket) return fail("工单不存在", 400, 400202);
   if (route === "/ticket/reply") {
     if (!String(input.message || "").trim()) return fail("消息不能为空", 422, 422);
@@ -2074,8 +2100,25 @@ async function adminTicket(request: Request, env: Env, route: string, adminId: n
     const ts = now();
     await env.XBOARD_DB.batch([
       env.XBOARD_DB.prepare("INSERT INTO v2_ticket_message(ticket_id, user_id, is_admin, message, created_at, updated_at) VALUES (?, ?, 1, ?, ?, ?)").bind(id, adminId, String(input.message), ts, ts),
-      env.XBOARD_DB.prepare("UPDATE v2_ticket SET reply_status = 0, last_reply_user_id = ?, updated_at = ? WHERE id = ?").bind(adminId, ts, id)
+      env.XBOARD_DB.prepare("UPDATE v2_ticket SET reply_status = 1, last_reply_user_id = ?, updated_at = ? WHERE id = ?").bind(adminId, ts, id)
     ]);
+    const notifyKey = `ticket_sendEmailNotify_${ticket.user_id}`;
+    if (!await env.XBOARD_KV.get(notifyKey)) {
+      const recipient = await env.XBOARD_DB.prepare("SELECT email FROM v2_user WHERE id = ?").bind(ticket.user_id).first<{ email: string }>();
+      if (recipient?.email) {
+        try {
+          const all = await settings(env.XBOARD_DB);
+          await queueTemplateMail(env, "notify", recipient.email, {
+            name: pickSetting(all, "app_name", "XBoard"),
+            url: pickSetting(all, "app_url", ""),
+            content: `主题：${ticket.subject}\r\n回复内容：${String(input.message)}`
+          }, `您在${pickSetting(all, "app_name", "XBoard")}的工单得到了回复`);
+          await env.XBOARD_KV.put(notifyKey, "1", { expirationTtl: 1800 });
+        } catch {
+          // A mail provider or queue outage must not turn a persisted reply into an API failure.
+        }
+      }
+    }
     return ok(true);
   }
   if (route === "/ticket/close") {
@@ -2095,8 +2138,20 @@ async function adminCoupon(request: Request, env: Env, route: string): Promise<R
   if (route === "/coupon/fetch") {
     const url = new URL(request.url); const current = Math.max(1, Number(input.current || url.searchParams.get("current") || 1));
     const pageSize = Math.min(100, Math.max(1, Number(input.pageSize || url.searchParams.get("pageSize") || 10)));
-    const result = await env.XBOARD_DB.prepare("SELECT * FROM v2_coupon ORDER BY created_at DESC LIMIT ? OFFSET ?").bind(pageSize, (current - 1) * pageSize).all<Record<string, any>>();
-    const total = await firstNumber(env, "SELECT COUNT(*) AS count FROM v2_coupon");
+    const couponFields = new Set(["id", "code", "name", "type", "value", "show", "limit_use", "limit_use_with_user", "started_at", "ended_at", "created_at", "updated_at"]);
+    const clauses: string[] = []; const binds: any[] = [];
+    for (const filter of parseJsonArray(input.filter)) {
+      const field = String(filter?.id || ""); const value = filter?.value;
+      if (!couponFields.has(field) || value === undefined || value === null || value === "") continue;
+      if (Array.isArray(value) && value.length) { clauses.push(`${field} IN (${value.map(() => "?").join(",")})`); binds.push(...value); }
+      else { clauses.push(`${field} LIKE ?`); binds.push(`%${String(value)}%`); }
+    }
+    const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
+    const sort = parseJsonArray(input.sort).map(item => ({ field: String(item?.id || ""), direction: item?.desc ? "DESC" : "ASC" })).filter(item => couponFields.has(item.field));
+    const order = [...sort.map(item => `${item.field} ${item.direction}`), "created_at DESC"].join(", ");
+    const result = await env.XBOARD_DB.prepare(`SELECT * FROM v2_coupon${where} ORDER BY ${order} LIMIT ? OFFSET ?`).bind(...binds, pageSize, (current - 1) * pageSize).all<Record<string, any>>();
+    const totalRow = await env.XBOARD_DB.prepare(`SELECT COUNT(*) AS count FROM v2_coupon${where}`).bind(...binds).first<{ count: number }>();
+    const total = Number(totalRow?.count || 0);
     return json({
       data: (result.results || []).map(row => ({
         ...row,
@@ -2439,6 +2494,19 @@ async function adminCoreResource(request: Request, env: Env, route: string): Pro
     return ok(true);
   }
   if (route === "/knowledge/sort") return sortAdminRows(env, "v2_knowledge", input);
+  if (route === "/server/group/save") {
+    const name = String(input.name || "").trim();
+    if (!name) return fail("组名不能为空", 422, 422);
+    const ts = now();
+    if (id) {
+      const result = await env.XBOARD_DB.prepare("UPDATE v2_server_group SET name = ?, updated_at = ? WHERE id = ?").bind(name, ts, id).run();
+      if (!Number((result.meta as any)?.changes || 0)) return fail("组不存在", 400, 400202);
+    } else {
+      await env.XBOARD_DB.prepare("INSERT INTO v2_server_group(name, created_at, updated_at) VALUES (?, ?, ?)").bind(name, ts, ts).run();
+    }
+    await bump(env.XBOARD_KV, "servers_version");
+    return ok(true);
+  }
   if (route === "/server/group/drop") {
     if (!id) return fail("权限组不存在", 400, 400202);
     if (await env.XBOARD_DB.prepare("SELECT id FROM v2_user WHERE group_id = ? LIMIT 1").bind(id).first()) return fail("该权限组下存在用户无法删除", 400, 400201);
@@ -3438,6 +3506,18 @@ async function currentSecurePath(env: Env) {
   return normalizeSecurePath(row?.value || "admin");
 }
 
+async function currentSubscribePath(env: Env) {
+  const row = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = 'subscribe_path'").first<{ value: string }>();
+  return String(row?.value || "s").trim().replace(/^\/+|\/+$/g, "") || "s";
+}
+
+function isSubscriptionPath(pathname: string, subscribePath: string) {
+  const prefix = `/${subscribePath}/`;
+  if (!pathname.startsWith(prefix)) return false;
+  const token = pathname.slice(prefix.length);
+  return token.length > 0 && !token.includes("/");
+}
+
 async function adminUi(request: Request, env: Env, securePath: string) {
   const settingsJson = JSON.stringify({ base_url: "/", secure_path: `/${securePath}` }).replace(/</g, "\\u003c");
   const migrationHref = JSON.stringify(`/${securePath}/migration`).replace(/</g, "\\u003c");
@@ -3495,15 +3575,23 @@ async function adminUi(request: Request, env: Env, securePath: string) {
           const label = migrationLabels[language] || migrationLabels["en-US"];
           let link = nav?.querySelector("#xboard-migration-menu");
           if (nav && !link) {
-            const link = document.createElement("a");
+            const sample = nav.querySelector('a[href]:not(#xboard-migration-menu)');
+            const link = sample ? sample.cloneNode(true) : document.createElement("a");
             link.id = "xboard-migration-menu";
             link.href = href;
-            link.className = "inline-flex items-center whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground text-xs h-12 justify-start text-wrap rounded-none px-6";
+            if (!sample) link.className = "inline-flex items-center whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground text-xs h-12 justify-start text-wrap rounded-none px-6";
             link.innerHTML = '<div class="mr-2"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="tabler-icon tabler-icon-database-import"><path d="M4 6a8 3 0 1 0 16 0a8 3 0 1 0 -16 0"></path><path d="M4 6v12"></path><path d="M20 6v8"></path><path d="M4 12a8 3 0 0 0 16 0"></path><path d="M4 18c0 1.657 3.582 3 8 3c1.05 0 2.052-.076 2.25-.214"></path><path d="M20 17v6"></path><path d="M17 20l3 3l3 -3"></path></svg></div><span></span>';
             nav.appendChild(link);
           }
           link = nav?.querySelector("#xboard-migration-menu");
+          const sample = nav?.querySelector('a[href]:not(#xboard-migration-menu)');
+          if (link && sample && link.className !== sample.className) link.className = sample.className;
+          const collapsed = nav?.closest("[data-collapsed]")?.getAttribute("data-collapsed") === "true";
+          const icon = link?.querySelector("div");
+          if (icon && icon.className !== (collapsed ? "" : "mr-2")) icon.className = collapsed ? "" : "mr-2";
+          if (nav && link && nav.lastElementChild !== link) nav.appendChild(link);
           const text = link?.querySelector("span");
+          if (text && text.className !== (collapsed ? "sr-only" : "")) text.className = collapsed ? "sr-only" : "";
           if (link && link.title !== label.title) link.title = label.title;
           if (text && text.textContent !== label.text) text.textContent = label.text;
           updateFooterDate();
@@ -3563,11 +3651,12 @@ function isAdminDistAlias(pathname: string) {
 async function edgeFetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     if (isNodeProtocolPath(url.pathname, request.method)) return env.XBOARD_SERVER.fetch(request);
-    if (url.pathname === "/api/v1/client/subscribe" || url.pathname.startsWith("/s/") || url.pathname.startsWith("/sub/")) return env.XBOARD_SUBSCRIPTION.fetch(request);
+    if (url.pathname === "/api/v1/client/subscribe") return env.XBOARD_SUBSCRIPTION.fetch(request);
     const staticAsset = url.pathname === "/settings.local.js" || url.pathname === "/manifest.json" || url.pathname.startsWith("/assets/") || url.pathname.startsWith("/locales/") || url.pathname.startsWith("/images/");
     if (!staticAsset) {
       await ensureBootstrap(env);
     }
+    if (!staticAsset && isSubscriptionPath(url.pathname, await currentSubscribePath(env))) return env.XBOARD_SUBSCRIPTION.fetch(request);
     if (url.pathname === "/health") return ok({ service: "xboard-edge", time: now() });
     const securePath = staticAsset ? "admin" : await currentSecurePath(env);
     const adminUiPath = `/${securePath}`;
