@@ -1,4 +1,4 @@
-name: Deploy XBoard to Cloudflare
+name: Bootstrap XBoard on Cloudflare
 
 on:
   workflow_dispatch:
@@ -73,3 +73,32 @@ jobs:
       - name: Deploy xboard-edge
         working-directory: workers/xboard-edge
         run: npx wrangler deploy
+
+      - name: Show Cloudflare Workers Builds connection steps
+        if: always() && steps.resources.outcome == 'success'
+        shell: bash
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.resources.outputs.account_id }}
+        run: |
+          {
+            echo "## Cloudflare bootstrap result"
+            echo
+            echo "The Cloudflare resources and existing Workers were bootstrapped by Wrangler."
+            echo
+            echo "> Before running the connection steps, install/authorize the [Cloudflare Workers & Pages GitHub App](https://github.com/apps/cloudflare-workers-and-pages) for this repository. Git repository access cannot be granted by a Cloudflare API token; this GitHub security boundary has no supported Wrangler or Cloudflare REST API equivalent."
+            echo
+            echo "Use the same repository and branch for all five connections:"
+            echo
+            echo "- Repository: \`${GITHUB_REPOSITORY}\`"
+            echo "- Production branch: \`${GITHUB_REF_NAME}\`"
+            echo "- Build command: \`npm ci && npm run typecheck && npm test\`"
+            echo "- Deploy command: \`npx wrangler deploy\`"
+            echo
+            echo "| Worker | Root directory | Builds settings |"
+            echo "| --- | --- | --- |"
+            for worker in xboard-edge xboard-subscription xboard-server xboard-jobs xboard-cron; do
+              echo "| \`$worker\` | \`workers/$worker\` | [Open settings](https://dash.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/workers/services/view/$worker/production/settings/builds) |"
+            done
+            echo
+            echo "After these five one-time connections, pushes to \`${GITHUB_REF_NAME}\` are built and deployed by Cloudflare Workers Builds. This workflow remains manual and is not the push deployment mechanism."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -127,24 +127,37 @@ npx wrangler secret put RESEND_API_KEY
 
 兑换会同步更新 D1 中的用户、兑换码、兑换记录和流量重置日志。
 
-## 一键首次部署
+## 首次部署与仓库自动部署
 
-仓库包含只允许手动触发的 GitHub Actions workflow：`.github/workflows/deploy.yml`。在仓库的 `Settings -> Secrets and variables -> Actions` 中添加：
+最终部署结构是五个 Worker 分别连接同一个 GitHub 仓库，由 Cloudflare Workers Builds 监听 `master`。每个 Worker 使用自己的根目录，后续 push 不依赖 GitHub Actions 执行 `wrangler deploy`。
+
+开始前必须先让 Cloudflare 账号与 GitHub 账号建立授权关系。打开官方 [Cloudflare Workers & Pages GitHub App](https://github.com/apps/cloudflare-workers-and-pages)，选择 `Install` 或 `Configure`，授权当前 GitHub 账号，并允许它访问准备部署 XBoard 的仓库。Cloudflare 之后才能读取仓库并监听 push。
+
+下面的前三步参考 [UptimeFlare Quickstart](https://github.com/lyc8503/UptimeFlare/wiki/Quickstart)，并按 XBoard CF 所需资源和权限进行了调整：
+
+1. 打开 [Cloudflare API Tokens](https://dash.cloudflare.com/profile/api-tokens)，以 `Edit Cloudflare Workers` 模板创建 API Token，并补充 D1、Workers KV Storage 和 Queues 的编辑权限。新 Cloudflare 账号还应至少打开一次 [Workers & Pages](https://dash.cloudflare.com/?to=/:account/workers-and-pages)，让 Cloudflare 初始化账号的 `workers.dev` 子域名。
+2. Fork 本仓库到自己的 GitHub 账号，或使用本仓库作为部署源。部署仓库必须包含完整项目，并保留五个 `workers/xboard-*` 目录；生产分支使用 `master`。
+3. 在部署仓库进入 `Settings -> Secrets and variables -> Actions`，新建名为 `CLOUDFLARE_API_TOKEN` 的 Repository secret，值为第一步创建的 Token。Token 由 GitHub Secrets 保存，不要写入代码或公开日志。
+
+首次创建 D1、KV、Queues 和五个 Worker 时，使用仓库内只允许手动触发的 `.github/workflows/deploy.yml`：
 
 ```text
 CLOUDFLARE_API_TOKEN
 ```
 
-然后打开 `Actions -> Deploy XBoard to Cloudflare -> Run workflow`。workflow 会自动识别 Token 所属账号，创建或复用 `xboard-db`、`xboard-kv` 和五个 Queue，初始化 D1，并按依赖顺序部署全部 Worker。它只配置了 `workflow_dispatch`，不会在每次 push 时自动运行。
+然后打开 `Actions -> Bootstrap XBoard on Cloudflare -> Run workflow`。workflow 会自动识别 Token 所属账号，创建或复用 `xboard-db`、`xboard-kv`、`traffic-events` 和 `mail-events`，初始化 D1，并按依赖顺序创建或更新全部 Worker。它只配置了 `workflow_dispatch`，不会在每次 push 时运行。
 
 API Token 至少需要该账号下 Workers Scripts、D1、Workers KV Storage、Queues 和 Account Settings 的读取/编辑权限。若 Token 可访问多个账号，workflow 使用 Cloudflare API 返回的第一个账号。
 
-## 使用 Cloudflare Git 自动部署
+### 必须完成的一次 GitHub 授权
 
-首次资源和 Worker 创建完成后，仍可在 Cloudflare Workers Builds 中直接连接本仓库，为每个 Worker 分别创建自动部署项目：
+前置步骤中的 GitHub App 授权必须在配置 Builds 前完成。`CLOUDFLARE_API_TOKEN` 只能操作 Cloudflare 账号，不能替 GitHub 仓库所有者批准仓库访问；Cloudflare 目前也没有公开的 Wrangler 命令或 REST API 用于创建 Workers Builds 的 Git 仓库连接。这是 GitHub 的安全授权边界，workflow 无法绕过。
+
+授权完成后，在 Cloudflare 中依次打开每个已创建的 Worker，进入 `Settings -> Builds -> Connect`，五个 Worker 都选择：
 
 ```text
-Git 分支：master
+仓库：kemi-20/Xboard-cf
+生产分支：master
 构建命令：npm ci && npm run typecheck && npm test
 部署命令：npx wrangler deploy
 ```
@@ -159,7 +172,9 @@ workers/xboard-jobs
 workers/xboard-cron
 ```
 
-连接完成后，推送 `master` 即会触发 Cloudflare 自动构建和部署。GitHub Actions 适合首次完整创建资源；Cloudflare Git 集成适合后续 push 自动更新，两者可以同时使用。
+workflow 的运行摘要会生成五个 Worker 的 Builds 设置直达链接和对应根目录，方便逐项连接。连接完成后，推送 `master` 会由 Cloudflare Workers Builds 自动构建和部署对应 Worker；GitHub Actions 只负责首次创建资源和 Worker，不负责后续 push 部署。
+
+Cloudflare 官方说明：[Workers Builds](https://developers.cloudflare.com/workers/ci-cd/builds/) 和 [GitHub integration](https://developers.cloudflare.com/workers/ci-cd/builds/git-integration/github-integration/)。
 
 ## 初始化数据库
 
