@@ -188,6 +188,7 @@ CREATE TABLE IF NOT EXISTS v2_notice (
 CREATE TABLE IF NOT EXISTS v2_knowledge (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   category TEXT,
+  language TEXT,
   title TEXT NOT NULL,
   body TEXT,
   show INTEGER NOT NULL DEFAULT 1,
@@ -270,12 +271,35 @@ CREATE TABLE IF NOT EXISTS failed_jobs (
   failed_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS v2_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL,
+  level TEXT,
+  host TEXT,
+  uri TEXT NOT NULL,
+  method TEXT NOT NULL,
+  data TEXT,
+  ip TEXT,
+  context TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS v2_stat (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   record_at INTEGER NOT NULL,
   user_count INTEGER NOT NULL DEFAULT 0,
   order_count INTEGER NOT NULL DEFAULT 0,
   transfer_used INTEGER NOT NULL DEFAULT 0,
+  transfer_used_total INTEGER NOT NULL DEFAULT 0,
+  register_count INTEGER NOT NULL DEFAULT 0,
+  invite_count INTEGER NOT NULL DEFAULT 0,
+  order_total INTEGER NOT NULL DEFAULT 0,
+  paid_total INTEGER NOT NULL DEFAULT 0,
+  paid_count INTEGER NOT NULL DEFAULT 0,
+  commission_total INTEGER NOT NULL DEFAULT 0,
+  commission_count INTEGER NOT NULL DEFAULT 0,
+  record_type TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -303,6 +327,7 @@ CREATE TABLE IF NOT EXISTS v2_stat_server (
   u INTEGER NOT NULL DEFAULT 0,
   d INTEGER NOT NULL DEFAULT 0,
   record_at INTEGER NOT NULL,
+  record_type TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   UNIQUE(server_id, server_type, record_at)
@@ -315,7 +340,11 @@ CREATE TABLE IF NOT EXISTS v2_admin_audit_log (
   target TEXT,
   metadata TEXT,
   ip TEXT,
-  created_at INTEGER NOT NULL
+  method TEXT,
+  uri TEXT,
+  request_data TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS v2_traffic_reset_logs (
@@ -333,7 +362,8 @@ CREATE TABLE IF NOT EXISTS v2_traffic_reset_logs (
   trigger_source TEXT,
   metadata TEXT,
   reset_time INTEGER NOT NULL,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS v2_subscribe_templates (
@@ -386,7 +416,7 @@ CREATE TABLE IF NOT EXISTS v2_order (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS v2_payment (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, payment TEXT, config TEXT, enable INTEGER DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS v2_payment (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, payment TEXT, config TEXT, enable INTEGER DEFAULT 0, uuid TEXT, icon TEXT, handling_fee_fixed INTEGER, handling_fee_percent REAL, notify_domain TEXT, sort INTEGER DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS v2_coupon (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   code TEXT NOT NULL UNIQUE,
@@ -403,7 +433,38 @@ CREATE TABLE IF NOT EXISTS v2_coupon (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS v2_commission_log (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, order_id INTEGER, amount INTEGER DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS v2_commission_log (id INTEGER PRIMARY KEY AUTOINCREMENT, invite_user_id INTEGER, user_id INTEGER, order_id INTEGER, trade_no TEXT, order_amount INTEGER, get_amount INTEGER, amount INTEGER DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+
+CREATE TABLE IF NOT EXISTS v2_migration_runs (
+  id TEXT PRIMARY KEY,
+  source_type TEXT NOT NULL,
+  source_name TEXT,
+  source_size INTEGER NOT NULL DEFAULT 0,
+  mode TEXT NOT NULL DEFAULT 'merge',
+  status TEXT NOT NULL DEFAULT 'running',
+  source_counts TEXT,
+  progress TEXT,
+  report TEXT,
+  error TEXT,
+  access_token_hash TEXT,
+  admin_id INTEGER,
+  started_at INTEGER NOT NULL,
+  finished_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS v2_migration_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL,
+  level TEXT NOT NULL DEFAULT 'info',
+  table_name TEXT,
+  message TEXT NOT NULL,
+  details TEXT,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_migration_logs_run ON v2_migration_logs(run_id, id);
 CREATE TABLE IF NOT EXISTS v2_gift_card_template (
   id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, description TEXT, type INTEGER NOT NULL,
   status INTEGER NOT NULL DEFAULT 1, conditions TEXT, rewards TEXT NOT NULL, limits TEXT, special_config TEXT,

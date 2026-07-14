@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>XBoard 数据迁移</title>
+  <style>
+    :root{color-scheme:light;--bg:#f6f7f9;--panel:#fff;--line:#dfe3e8;--text:#1f2937;--muted:#667085;--primary:#1769aa;--danger:#b42318;--success:#067647}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}button,input,select{font:inherit}
+    header{height:58px;border-bottom:1px solid var(--line);background:var(--panel);display:flex;align-items:center;justify-content:space-between;padding:0 24px;position:sticky;top:0;z-index:2}
+    header h1{font-size:17px;margin:0}header a{color:var(--primary);text-decoration:none}.layout{max-width:1120px;margin:24px auto;padding:0 20px;display:grid;grid-template-columns:240px 1fr;gap:20px}
+    nav{border-right:1px solid var(--line);padding-right:20px}.step{padding:10px 12px;margin-bottom:4px;border-radius:6px;color:var(--muted)}.step.active{background:#eaf2f8;color:#0b4f7d;font-weight:600}.step.done{color:var(--success)}
+    main{min-width:0}.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:20px;margin-bottom:16px}.panel h2{font-size:16px;margin:0 0 16px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+    label{display:block;color:var(--muted);font-size:12px;margin-bottom:6px}.field input,.field select{width:100%;height:38px;border:1px solid #cbd2d9;border-radius:6px;padding:0 10px;background:#fff}.source{display:flex;gap:16px}.source label{font-size:14px;color:var(--text);display:flex;align-items:center;gap:7px}
+    .actions{display:flex;gap:10px;align-items:center;margin-top:18px}.button{border:1px solid #b8c0c8;background:#fff;border-radius:6px;height:38px;padding:0 14px;cursor:pointer}.button.primary{background:var(--primary);border-color:var(--primary);color:#fff}.button:disabled{opacity:.45;cursor:not-allowed}
+    .summary{width:100%;border-collapse:collapse}.summary th,.summary td{text-align:left;border-bottom:1px solid #edf0f2;padding:8px}.summary th{font-size:12px;color:var(--muted);font-weight:600}.summary td.num{text-align:right;font-variant-numeric:tabular-nums}
+    .progress{height:8px;background:#e8ebee;border-radius:4px;overflow:hidden;margin:12px 0}.progress span{display:block;height:100%;width:0;background:var(--primary);transition:width .2s}.log{height:230px;overflow:auto;background:#111827;color:#d1d5db;border-radius:6px;padding:12px;font:12px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap}.muted{color:var(--muted)}.error{color:var(--danger)}.success{color:var(--success)}.warning{border-left:3px solid #d97706;background:#fffbeb;color:#92400e;padding:10px 12px;margin:12px 0}.warning strong{display:block;margin-bottom:4px}
+    @media(max-width:760px){.layout{grid-template-columns:1fr}nav{border-right:0;border-bottom:1px solid var(--line);padding:0 0 12px;display:flex;overflow:auto}.step{white-space:nowrap}.grid{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+  <header><h1>XBoard 数据迁移</h1><a id="back" href="#">返回后台</a></header>
+  <div class="layout">
+    <nav><div class="step active" data-step="1">1. 选择备份</div><div class="step" data-step="2">2. 数据预检</div><div class="step" data-step="3">3. 执行迁移</div><div class="step" data-step="4">4. 完成校验</div></nav>
+    <main>
+      <section class="panel">
+        <h2>迁移源</h2>
+        <div class="grid">
+          <div class="field"><label for="sqlite-file">SQLite3 数据库</label><input id="sqlite-file" type="file" accept=".db,.sqlite,.sqlite3"></div>
+          <div class="field"><label for="redis-file">Redis RDB / JSON</label><input id="redis-file" type="file" accept=".rdb,.json,application/json"></div>
+          <div class="field"><label for="mode">冲突策略</label><select id="mode"><option value="overwrite">完整切换（保留原版主键关系）</option><option value="merge">合并并保留 D1 现有记录</option></select></div>
+        </div>
+        <div class="actions"><button class="button primary" id="inspect">开始预检</button><span id="file-status" class="muted"></span></div>
+      </section>
+      <section class="panel" id="preflight" hidden>
+        <h2>预检结果</h2>
+        <div id="preflight-content"></div>
+        <div class="actions"><button class="button primary" id="migrate">执行迁移</button><span class="muted">完整切换会以备份中的同主键记录为准。</span></div>
+      </section>
+      <section class="panel" id="running" hidden>
+        <h2>迁移进度</h2><div id="progress-label" class="muted">准备中</div><div class="progress"><span id="progress-bar"></span></div><div id="log" class="log"></div>
+      </section>
+      <section class="panel" id="result" hidden><h2>迁移报告</h2><div id="report"></div></section>
+    </main>
+  </div>
+  <script src="/migration/sql-wasm.js"></script>
+  <script type="module" src="/migration/app.js"></script>
+</body>
+</html>

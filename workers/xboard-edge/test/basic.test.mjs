@@ -203,8 +203,53 @@ test("login sessions fall back to D1 when KV writes fail", () => {
 test("bootstrap remains available when the KV daily write limit is exhausted", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /system_bootstrap_edge_version/);
-  assert.match(source, /await optionalKvPut\(env, "bootstrap:edge:v15"/);
+  assert.match(source, /await optionalKvPut\(env, "bootstrap:edge:v16"/);
   assert.doesNotMatch(source, /await env\.XBOARD_KV\.put\("bootstrap:edge:v12"/);
+});
+
+test("admin migration imports official SQLite data in bounded D1 batches", () => {
+  const source = fs.readFileSync("src/migration.ts", "utf8");
+  const index = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /sourceRows\.length > 100/);
+  assert.match(source, /INSERT OR REPLACE/);
+  assert.match(source, /INSERT OR IGNORE/);
+  assert.match(source, /transfer_used_total/);
+  assert.match(source, /v2_server_machine/);
+  assert.match(source, /password_algo = "bcrypt"/);
+  assert.match(source, /x-migration-token/);
+  assert.match(source, /access_token_hash = NULL/);
+  assert.match(index, /handleAdminMigration/);
+  assert.match(index, /\/migration\/status/);
+});
+
+test("migration UI parses SQLite and Redis backups locally", () => {
+  const page = fs.readFileSync("public/migration/panel.html", "utf8");
+  const app = fs.readFileSync("public/migration/app.js", "utf8");
+  const index = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(page, /SQLite3/);
+  assert.match(page, /Redis RDB \/ JSON/);
+  assert.match(page, /sqlite-file/);
+  assert.match(page, /redis-file/);
+  assert.match(app, /source_type: "xboard"/);
+  assert.match(app, /initSqlJs/);
+  assert.match(app, /REDIS\\d\{4\}/);
+  assert.match(app, /usefulRedisKey/);
+  assert.match(app, /Xboard_access_token/);
+  assert.match(app, /api\/v2\/admin\/migration/);
+  assert.match(app, /手动配置 Resend API Key/);
+  assert.match(app, /支付渠道、支付插件配置不会导入/);
+  assert.match(index, /\/api\/v2\/admin\/migration/);
+});
+
+test("migration excludes service credentials that cannot move to Cloudflare", () => {
+  const source = fs.readFileSync("src/migration.ts", "utf8");
+  assert.match(source, /NON_MIGRATABLE_SERVICE_TABLES/);
+  assert.match(source, /"v2_payment"/);
+  assert.match(source, /NON_MIGRATABLE_MAIL_SETTINGS/);
+  assert.match(source, /"email_password"/);
+  assert.match(source, /"resend_api_key"/);
+  assert.match(source, /source\.type \|\| ""/);
+  assert.match(source, /skipped_service_config/);
 });
 
 test("plan traffic is converted from gigabytes to user bytes", () => {

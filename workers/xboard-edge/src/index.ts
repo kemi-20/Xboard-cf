@@ -4,6 +4,7 @@ import { createSession, currentUser, hashPassword, sessionTokenDigest, verifyPas
 import { list, rows, settings } from "./db";
 import { bump } from "./kv";
 import { handleAdminGiftCard, handleUserGiftCard } from "./gift-card";
+import { authorizeMigration, handleAdminMigration } from "./migration";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; ASSETS: Fetcher; XBOARD_SERVER: Fetcher; XBOARD_SUBSCRIPTION: Fetcher; MAIL_EVENTS: Queue; }
@@ -127,6 +128,8 @@ const adminRouteMethods: Record<string, string[]> = {
   "/plugin/types": ["GET"], "/plugin/getPlugins": ["GET"], "/plugin/upload": ["POST"], "/plugin/delete": ["POST"], "/plugin/install": ["POST"],
   "/plugin/uninstall": ["POST"], "/plugin/enable": ["POST"], "/plugin/disable": ["POST"], "/plugin/config": ["GET", "POST"], "/plugin/upgrade": ["POST"],
   "/traffic-reset/logs": ["GET"], "/traffic-reset/stats": ["GET"], "/traffic-reset/reset-user": ["POST"]
+  , "/migration/status": ["GET"], "/migration/start": ["POST"], "/migration/batch": ["POST"],
+  "/migration/redis/import": ["POST"], "/migration/finish": ["POST"]
 };
 
 const allowedConfigSettings = new Set([
@@ -302,12 +305,12 @@ FINAL,Proxy
 };
 
 async function ensureBootstrap(env: Env) {
-  const marker = await optionalKvGet(env, "bootstrap:edge:v15");
+  const marker = await optionalKvGet(env, "bootstrap:edge:v16");
   if (marker) return;
   try {
     const persisted = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = 'system_bootstrap_edge_version'").first<{ value: string }>();
-    if (persisted?.value === "v15") {
-      await optionalKvPut(env, "bootstrap:edge:v15", String(now()));
+    if (persisted?.value === "v16") {
+      await optionalKvPut(env, "bootstrap:edge:v16", String(now()));
       return;
     }
   } catch {
@@ -416,7 +419,34 @@ async function ensureBootstrap(env: Env) {
     "ALTER TABLE v2_gift_card_usage ADD COLUMN plan_id_at_use INTEGER",
     "ALTER TABLE v2_gift_card_usage ADD COLUMN ip_address TEXT",
     "ALTER TABLE v2_gift_card_usage ADD COLUMN user_agent TEXT",
-    "ALTER TABLE v2_gift_card_usage ADD COLUMN notes TEXT"
+    "ALTER TABLE v2_gift_card_usage ADD COLUMN notes TEXT",
+    "ALTER TABLE v2_knowledge ADD COLUMN language TEXT",
+    "ALTER TABLE v2_stat ADD COLUMN transfer_used_total INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE v2_stat ADD COLUMN register_count INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE v2_stat ADD COLUMN invite_count INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE v2_stat ADD COLUMN order_total INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE v2_stat ADD COLUMN paid_total INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE v2_stat ADD COLUMN paid_count INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE v2_stat ADD COLUMN commission_total INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE v2_stat ADD COLUMN commission_count INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE v2_stat ADD COLUMN record_type TEXT",
+    "ALTER TABLE v2_stat_server ADD COLUMN record_type TEXT",
+    "ALTER TABLE v2_admin_audit_log ADD COLUMN method TEXT",
+    "ALTER TABLE v2_admin_audit_log ADD COLUMN uri TEXT",
+    "ALTER TABLE v2_admin_audit_log ADD COLUMN request_data TEXT",
+    "ALTER TABLE v2_admin_audit_log ADD COLUMN updated_at INTEGER",
+    "ALTER TABLE v2_traffic_reset_logs ADD COLUMN updated_at INTEGER",
+    "ALTER TABLE v2_payment ADD COLUMN uuid TEXT",
+    "ALTER TABLE v2_payment ADD COLUMN icon TEXT",
+    "ALTER TABLE v2_payment ADD COLUMN handling_fee_fixed INTEGER",
+    "ALTER TABLE v2_payment ADD COLUMN handling_fee_percent REAL",
+    "ALTER TABLE v2_payment ADD COLUMN notify_domain TEXT",
+    "ALTER TABLE v2_payment ADD COLUMN sort INTEGER DEFAULT 0",
+    "ALTER TABLE v2_commission_log ADD COLUMN invite_user_id INTEGER",
+    "ALTER TABLE v2_commission_log ADD COLUMN trade_no TEXT",
+    "ALTER TABLE v2_commission_log ADD COLUMN order_amount INTEGER",
+    "ALTER TABLE v2_commission_log ADD COLUMN get_amount INTEGER",
+    "ALTER TABLE v2_migration_runs ADD COLUMN access_token_hash TEXT"
   ];
   for (const sql of alters) await runSqlIgnore(env, sql);
   await runSqlIgnore(env, "UPDATE v2_order SET status = 2 WHERE status IS NULL OR CAST(status AS TEXT) NOT IN ('0','1','2','3','4')");
@@ -446,7 +476,10 @@ async function ensureBootstrap(env: Env) {
     "CREATE TABLE IF NOT EXISTS v2_invite_code (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, code TEXT NOT NULL UNIQUE, status INTEGER NOT NULL DEFAULT 0, pv INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)",
     "CREATE TABLE IF NOT EXISTS v2_mail_log (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL, subject TEXT NOT NULL, template_name TEXT NOT NULL, error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)",
     "CREATE TABLE IF NOT EXISTS v2_plugins (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, code TEXT NOT NULL UNIQUE, version TEXT NOT NULL, type TEXT, is_enabled INTEGER NOT NULL DEFAULT 0, config TEXT, installed_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)",
-    "CREATE TABLE IF NOT EXISTS failed_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, connection TEXT NOT NULL, queue TEXT NOT NULL, payload TEXT NOT NULL, exception TEXT NOT NULL, failed_at INTEGER NOT NULL)"
+    "CREATE TABLE IF NOT EXISTS failed_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, connection TEXT NOT NULL, queue TEXT NOT NULL, payload TEXT NOT NULL, exception TEXT NOT NULL, failed_at INTEGER NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS v2_log (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, level TEXT, host TEXT, uri TEXT NOT NULL, method TEXT NOT NULL, data TEXT, ip TEXT, context TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"
+    , "CREATE TABLE IF NOT EXISTS v2_migration_runs (id TEXT PRIMARY KEY, source_type TEXT NOT NULL, source_name TEXT, source_size INTEGER NOT NULL DEFAULT 0, mode TEXT NOT NULL DEFAULT 'merge', status TEXT NOT NULL DEFAULT 'running', source_counts TEXT, progress TEXT, report TEXT, error TEXT, access_token_hash TEXT, admin_id INTEGER, started_at INTEGER NOT NULL, finished_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"
+    , "CREATE TABLE IF NOT EXISTS v2_migration_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, level TEXT NOT NULL DEFAULT 'info', table_name TEXT, message TEXT NOT NULL, details TEXT, created_at INTEGER NOT NULL)"
   ]) await runSqlIgnore(env, sql);
   const ts = now();
   const settingsDefaults: Record<string, any> = {
@@ -512,8 +545,8 @@ async function ensureBootstrap(env: Env) {
     await runSqlIgnore(env, "INSERT INTO v2_subscribe_templates(name, content, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET content = CASE WHEN v2_subscribe_templates.content IS NULL OR v2_subscribe_templates.content = '' THEN excluded.content ELSE v2_subscribe_templates.content END, updated_at = excluded.updated_at", [name, content, ts, ts]);
   }
   await runSqlIgnore(env, "UPDATE v2_user SET transfer_enable = transfer_enable * 1073741824, updated_at = ? WHERE plan_id IS NOT NULL AND transfer_enable > 0 AND EXISTS (SELECT 1 FROM v2_plan WHERE v2_plan.id = v2_user.plan_id AND v2_plan.transfer_enable = v2_user.transfer_enable)", [ts]);
-  await runSqlIgnore(env, "INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES ('system_bootstrap_edge_version', 'v15', ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at", [ts, ts]);
-  await optionalKvPut(env, "bootstrap:edge:v15", String(ts));
+  await runSqlIgnore(env, "INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES ('system_bootstrap_edge_version', 'v16', ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at", [ts, ts]);
+  await optionalKvPut(env, "bootstrap:edge:v16", String(ts));
 }
 
 async function firstNumber(env: Env, sql: string, fallback = 0) {
@@ -2240,9 +2273,15 @@ async function adminApi(request: Request, env: Env, path: string) {
   const route = path.replace(/^\/api\/v2\/admin/, "");
   if (request.method === "POST" && route === "/passport/auth/login") return login(request, env, true);
   if (!adminRouteAllowed(route, request.method)) return json({ message: "Not Found" }, 404);
-  const admin = await currentUser(request, env.XBOARD_DB, env.XBOARD_KV, true);
+  let admin = await currentUser(request, env.XBOARD_DB, env.XBOARD_KV, true);
+  if (!admin && route.startsWith("/migration/")) {
+    const migrationAdminId = await authorizeMigration(request.clone(), env, route);
+    if (migrationAdminId !== null) admin = { id: migrationAdminId, email: "migration-session", is_admin: 1 };
+  }
   if (!admin) return fail("未授权", 401, 401);
   await audit(env, Number((admin as any).id || 0), request, path);
+  const migrationResponse = await handleAdminMigration(request.clone(), env, route, Number((admin as any).id || 0));
+  if (migrationResponse) return migrationResponse;
   const giftCardResponse = await handleAdminGiftCard(request.clone(), env.XBOARD_DB, route, Number((admin as any).id || 0));
   if (giftCardResponse) return giftCardResponse;
   const ticketResponse = await adminTicket(request.clone(), env, route, Number((admin as any).id || 0));
@@ -3107,9 +3146,11 @@ async function adminUi(request: Request, env: Env, securePath: string) {
     <script src="/locales/ru-RU.js"></script>
     <script type="module" crossorigin src="/assets/index-CF20260713.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-DiYa-_z_.css">
+    <style>#xboard-migration-link{position:fixed;left:16px;bottom:12px;z-index:1000;padding:6px 10px;border:1px solid #d4d4d8;border-radius:6px;background:#fff;color:#18181b;font:12px/1.4 system-ui;text-decoration:none;box-shadow:0 1px 3px rgba(0,0,0,.08)}#xboard-migration-link:hover{background:#f4f4f5}</style>
   </head>
   <body>
     <div id="root"></div>
+    <a id="xboard-migration-link" href="/${securePath}/migration" title="从原版 SQLite 和 Redis 迁移数据">数据迁移</a>
   </body>
 </html>`, { headers: {
     "content-type": "text/html; charset=utf-8",
@@ -3170,6 +3211,20 @@ export default {
     const securePath = staticAsset ? "admin" : await currentSecurePath(env);
     const adminUiPath = `/${securePath}`;
     if (url.pathname === adminUiPath || url.pathname === `${adminUiPath}/`) return adminUi(request, env, securePath);
+    if (url.pathname === `${adminUiPath}/migration` || url.pathname === `${adminUiPath}/migration/`) {
+      const assetUrl = new URL("/migration/panel.html", request.url);
+      let response = await env.ASSETS.fetch(new Request(assetUrl.toString(), request));
+      const location = response.headers.get("location");
+      if (response.status >= 300 && response.status < 400 && location) {
+        response = await env.ASSETS.fetch(new Request(new URL(location, request.url).toString(), request));
+      }
+      return new Response(response.body, { status: response.status, headers: response.headers });
+    }
+    if (url.pathname.startsWith(`${adminUiPath}/migration/`)) {
+      const relative = url.pathname.slice(`${adminUiPath}/migration/`.length);
+      const assetUrl = new URL(`/migration/${relative}`, request.url);
+      return env.ASSETS.fetch(new Request(assetUrl.toString(), request));
+    }
     if (url.pathname.startsWith(`${adminUiPath}/api/`)) {
       url.pathname = url.pathname.slice(adminUiPath.length);
       request = new Request(url.toString(), request);
@@ -3194,6 +3249,9 @@ export default {
       const response = await adminApi(canonicalRequest, env, canonicalPath);
       if (syncIntent && response.ok) ctx.waitUntil(notifyNodeSync(env, syncIntent));
       return response;
+    }
+    if (url.pathname === "/api/v2/admin/migration" || url.pathname.startsWith("/api/v2/admin/migration/")) {
+      return adminApi(request, env, url.pathname);
     }
     if (securePath !== "admin" && url.pathname.startsWith("/api/v2/admin")) return json({ message: "Not Found" }, 404);
     if (url.pathname.startsWith("/api/v2/admin")) {

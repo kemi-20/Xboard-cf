@@ -18,6 +18,7 @@ XBoard CF 是基于 Cloudflare Workers、D1、KV、Queues、Durable Objects 和 
 - 节点在线状态、机器负载、负载历史折线图和网络速率展示
 - D1 持久化业务数据，KV 缓存临时状态
 - Queue 异步处理流量，Cron Worker 执行周期任务
+- 后台联合导入原版 SQLite3 与 Redis RDB，平滑切换到 D1 + KV
 
 ## 后台入口
 
@@ -156,6 +157,36 @@ npx wrangler d1 execute xboard-db --remote --config workers/xboard-edge/wrangler
 ```
 
 `schema/seed.sql` 会创建或重置默认管理员。Schema 和 seed 都按幂等方式设计；已有数据库升级时应保留现有用户、节点、服务器和统计数据。
+
+## 从原版迁移
+
+登录后台后点击左下角“数据迁移”，或直接打开：
+
+```text
+https://你的域名/admin/migration
+```
+
+如果修改过后台路径，请把 `admin` 换成实际路径。一次迁移必须同时选择原版的两份备份：
+
+```text
+xboard.db   SQLite3 正式业务数据
+dump.rdb    Redis 运行状态（也支持规范化 Redis JSON）
+```
+
+浏览器会在本地解析两份文件，不会把整个数据库文件上传到第三方。SQLite 数据按最多 100 行一批写入 D1；Redis 只迁移节点心跳、推送时间、在线人数、负载、Metrics、待检查流量用户和旧调度时间。以下瞬时数据会自动跳过：
+
+```text
+Laravel Horizon 和旧 Queue 任务
+framework/schedule 锁
+旧 Session、临时登录 Token
+邮箱验证码、密码错误次数和注册限流计数
+```
+
+第 2 步“数据预检”会明确列出无法自动切换的外部服务配置。原版 SMTP/邮件驱动设置、Resend 凭据、支付渠道和支付插件配置不会导入；迁移完成后必须在新后台的邮件设置中手动填写 Resend API Key、发件人邮箱和发件人名称。邮件模板、订单等可审计业务历史仍会保留，但真实支付能力不会因此启用。
+
+默认“完整切换”会以原版主键数据为准，以保持用户、套餐、权限组、节点、机器、订单和统计之间的 ID 关系。“合并”只补充 D1 不存在的数据，适合已有 Cloudflare 数据时谨慎使用。迁移过程中即使原版设置覆盖了后台路径和访问令牌，迁移任务也会使用一次性迁移凭据继续执行；任务完成后该凭据立即失效。
+
+真实备份预演覆盖 14,369 行 SQLite 数据和 Redis 12 格式 RDB。迁移器会处理原版与 D1 的字段差异，包括时间戳、`transfer_used_total`、机器启用状态、订阅模板默认字段和 bcrypt 密码标记。
 
 ## 节点与服务器状态
 
