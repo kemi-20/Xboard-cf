@@ -3284,8 +3284,9 @@ async function adminUi(request: Request, env: Env, securePath: string) {
         const updateFooterDate = () => {
           const version = document.querySelector("aside div.border-t span.whitespace-nowrap");
           if (!version) return;
-          version.textContent = browserDate();
-          version.title = "浏览器本地日期";
+          const date = browserDate();
+          if (version.textContent !== date) version.textContent = date;
+          if (version.title !== "浏览器本地日期") version.title = "浏览器本地日期";
         };
         const install = () => {
           const nav = document.querySelector("aside nav");
