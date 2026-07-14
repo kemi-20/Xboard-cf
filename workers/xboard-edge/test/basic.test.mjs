@@ -234,7 +234,9 @@ test("migration UI parses SQLite and Redis backups locally", () => {
   assert.match(app, /initSqlJs/);
   assert.match(app, /REDIS\\d\{4\}/);
   assert.match(app, /usefulRedisKey/);
-  assert.match(app, /Xboard_access_token/);
+  assert.match(app, /XBOARD_ACCESS_TOKEN/);
+  assert.match(app, /localStorage, sessionStorage/);
+  assert.match(app, /parsed\?\.value\?\.auth_data/);
   assert.match(app, /api\/v2\/admin\/migration/);
   assert.match(app, /手动配置 Resend API Key/);
   assert.match(app, /支付渠道、支付插件配置不会导入/);

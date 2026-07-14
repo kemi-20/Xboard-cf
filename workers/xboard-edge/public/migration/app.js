@@ -8,13 +8,16 @@ const log = message => { const area = $("#log"); area.textContent += `${new Date
 const setStep = value => document.querySelectorAll(".step").forEach(element => { const step = Number(element.dataset.step); element.classList.toggle("active", step === value); element.classList.toggle("done", step < value); });
 
 function storedToken() {
-  const candidates = [localStorage.getItem("Xboard_access_token"), localStorage.getItem("access_token")].filter(Boolean);
+  const keys = ["XBOARD_ACCESS_TOKEN", "Xboard_access_token", "access_token", "ACCESS_TOKEN"];
+  const candidates = [localStorage, sessionStorage].flatMap(storage => keys.map(key => storage.getItem(key))).filter(Boolean);
   for (const candidate of candidates) {
     try {
       const parsed = JSON.parse(candidate);
-      const value = parsed?.value ?? parsed?.data ?? parsed;
+      const value = parsed?.value?.auth_data ?? parsed?.value ?? parsed?.data?.auth_data ?? parsed?.data ?? parsed?.auth_data ?? parsed?.token ?? parsed;
       if (typeof value === "string") return value;
-    } catch { return candidate; }
+    } catch {
+      if (typeof candidate === "string") return candidate;
+    }
   }
   return "";
 }
