@@ -2009,7 +2009,12 @@ async function registerUser(request: Request, env: Env) {
     const count = Number(await optionalKvGet(env, rateKey) || 0);
     await optionalKvPutTtl(env, rateKey, String(count + 1), Math.max(60, Number(pickSetting(all, "register_limit_expire", 60)) * 60));
   }
-  return login(new Request(request.url, { method: "POST", body: JSON.stringify({ email, password: passwordText }), headers: { "content-type": "application/json" } }), env, false);
+  const loginHeaders = new Headers({ "content-type": "application/json" });
+  for (const name of ["cf-connecting-ip", "x-forwarded-for", "user-agent"]) {
+    const value = request.headers.get(name);
+    if (value) loginHeaders.set(name, value);
+  }
+  return login(new Request(request.url, { method: "POST", body: JSON.stringify({ email, password: passwordText }), headers: loginHeaders }), env, false);
 }
 
 async function tableColumns(env: Env, table: string) {

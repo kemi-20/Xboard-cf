@@ -58,6 +58,14 @@ test("dashboard queue statistics honor the official time windows", () => {
   assert.doesNotMatch(source, /SELECT status, COUNT\(\*\) AS count FROM v2_job_logs GROUP BY status/);
 });
 
+test("registration limits use the Cloudflare visitor IP and preserve it during automatic login", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /request\.headers\.get\("cf-connecting-ip"\) \|\| request\.headers\.get\("x-forwarded-for"\)/);
+  assert.match(source, /const rateKey = `rate:register:\$\{requestIp\(request\)\}`/);
+  assert.match(source, /\["cf-connecting-ip", "x-forwarded-for", "user-agent"\]/);
+  assert.match(source, /headers: loginHeaders/);
+});
+
 test("admin CRUD routes server resources to their own tables", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /\["\/server\/group\/", "v2_server_group"\]/);
