@@ -295,10 +295,11 @@ test("migration UI parses SQLite and Redis backups locally", () => {
   assert.match(app, /parsed\?\.value\?\.auth_data/);
   assert.match(app, /api\/v2\/admin\/migration/);
   assert.match(app, /手动配置 Resend API Key/);
-  assert.match(app, /所有插件、插件配置和支付渠道不会导入/);
+  assert.match(app, /所有插件、插件配置、支付渠道和服务器机器负载历史不会导入/);
   assert.match(page, /id="skip-backup"/);
   assert.match(app, /skip_backup: state\.skipBackup/);
-  assert.match(app, /本次迁移无法一键还原/);
+  assert.match(app, /强制账号备份已下载/);
+  assert.match(app, /tables: started\.backup_tables/);
   assert.match(app, /const batchSize = 100/);
   assert.match(app, /table, offset, limit: 100/);
   assert.match(index, /\/api\/v2\/admin\/migration/);
@@ -316,6 +317,12 @@ test("migration excludes service credentials that cannot move to Cloudflare", ()
   assert.match(source, /key\.startsWith\("plugin"\)/);
   assert.match(source, /skip_backup INTEGER NOT NULL DEFAULT 0/);
   assert.match(source, /该迁移已跳过备份，无法一键还原/);
+  assert.match(source, /CRITICAL_BACKUP_TABLES = \["v2_user", "personal_access_tokens"\]/);
+  assert.match(source, /SKIPPED_SOURCE_TABLES = \["v2_log", "v2_server_machine_load_history"\]/);
+  assert.match(source, /skipped_tables: SKIPPED_SOURCE_TABLES/);
+  assert.match(source, /DELETE FROM v2_server_machine_load_history/);
+  const migrationTables = source.slice(source.indexOf("const MIGRATION_TABLES"), source.indexOf("const CRITICAL_BACKUP_TABLES"));
+  assert.doesNotMatch(migrationTables, /v2_server_machine_load_history/);
   assert.match(source, /skipped_service_config/);
 });
 
@@ -332,8 +339,10 @@ test("unsupported plugin and payment menus stay reserved but hidden", () => {
 
 test("migration does not import or export application log records", () => {
   const source = fs.readFileSync("src/migration.ts", "utf8");
-  const tableList = source.slice(source.indexOf("const MIGRATION_TABLES"), source.indexOf("const tableSet"));
+  const tableList = source.match(/const MIGRATION_TABLES = \[[\s\S]*?\] as const;/)?.[0] || "";
   assert.doesNotMatch(tableList, /"v2_log"/);
+  assert.doesNotMatch(tableList, /"v2_server_machine_load_history"/);
+  assert.match(fs.readFileSync("public/migration/app.js", "utf8"), /\(skip\)/);
   assert.match(fs.readFileSync("../../schema/d1.sql", "utf8"), /CREATE TABLE IF NOT EXISTS v2_log/);
 });
 

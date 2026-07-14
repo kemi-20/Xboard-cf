@@ -12,6 +12,8 @@ const state = {
   redisEntries: [],
   counts: {},
   tables: [],
+  skippedTables: [],
+  skippedCounts: {},
   sqliteTotal: 0,
   total: 0,
   done: 0,
@@ -82,9 +84,10 @@ async function api(path, options = {}) {
   return payload.data ?? payload;
 }
 
-function renderCounts(counts) {
+function renderCounts(counts, skippedCounts = {}) {
+  const skipped = new Set(Object.keys(skippedCounts));
   const entries = Object.entries(counts).sort((a, b) => a[0].localeCompare(b[0]));
-  return `<table class="summary"><thead><tr><th>数据表</th><th style="text-align:right">记录数</th></tr></thead><tbody>${entries.map(([table, count]) => `<tr><td>${table}</td><td class="num">${Number(count).toLocaleString()}</td></tr>`).join("")}</tbody></table>`;
+  return `<table class="summary"><thead><tr><th>数据表</th><th style="text-align:right">记录数</th></tr></thead><tbody>${entries.map(([table, count]) => `<tr><td>${table}${skipped.has(table) ? " (skip)" : ""}</td><td class="num">${Number(count).toLocaleString()}</td></tr>`).join("")}</tbody></table>`;
 }
 
 async function loadSql() {
@@ -98,11 +101,17 @@ async function inspectSqlite(file) {
   state.db = new SQL.Database(new Uint8Array(await file.arrayBuffer()));
   const status = await api("/status");
   state.tables = status.tables;
+  state.skippedTables = status.skipped_tables || [];
   const existing = new Set(state.db.exec("SELECT name FROM sqlite_master WHERE type='table'")[0]?.values.flat().map(String) || []);
   const counts = {};
   for (const table of state.tables) {
     if (!existing.has(table)) continue;
     counts[table] = Number(state.db.exec(`SELECT COUNT(*) FROM \`${table}\``)[0]?.values[0]?.[0] || 0);
+  }
+  state.skippedCounts = {};
+  for (const table of state.skippedTables) {
+    if (!existing.has(table)) continue;
+    state.skippedCounts[table] = Number(state.db.exec(`SELECT COUNT(*) FROM \`${table}\``)[0]?.values[0]?.[0] || 0);
   }
   return counts;
 }
@@ -247,7 +256,8 @@ async function inspect() {
     const sourceSummary = redisFile
       ? `<p class="success">联合校验通过：SQLite ${state.sqliteTotal.toLocaleString()} 行，Redis ${redisCount.toLocaleString()} 个有效键。</p>`
       : `<p class="success">SQLite 校验通过：${state.sqliteTotal.toLocaleString()} 行。</p><div class="warning"><strong>未选择 Redis 备份</strong>核心业务数据可以正常迁移。节点在线状态、近期负载、Metrics、旧 Session 和其他临时缓存不会保留；节点重新连接后会自动重新生成运行状态。</div>`;
-    $("#preflight-content").innerHTML = `${sourceSummary}<div class="warning"><strong>以下内容不会迁移</strong>原版 SMTP/邮件驱动设置和 Resend 凭据不会导入，所有插件、插件配置和支付渠道不会导入，所有旧主题配置也会忽略。Telegram 机器人由 Cloudflare 版本内置实现，不依赖原版插件。迁移完成后仅启用默认 Xboard 主题，请在新后台手动配置 Resend API Key、发件人邮箱和发件人名称。</div><p class="muted">邮件模板、订单等可审计业务历史会保留；队列任务、Horizon 监控、调度锁、旧会话、验证码和限流计数不会导入。</p>${renderCounts(state.counts)}`;
+    const displayedCounts = { ...state.counts, ...state.skippedCounts };
+    $("#preflight-content").innerHTML = `${sourceSummary}<div class="warning"><strong>以下内容不会迁移</strong>原版 SMTP/邮件驱动设置和 Resend 凭据不会导入，所有插件、插件配置、支付渠道和服务器机器负载历史不会导入，所有旧主题配置也会忽略。Telegram 机器人由 Cloudflare 版本内置实现，不依赖原版插件。迁移完成后仅启用默认 Xboard 主题，请在新后台手动配置 Resend API Key、发件人邮箱和发件人名称。</div><p class="muted">邮件模板、订单等可审计业务历史会保留；队列任务、Horizon 监控、调度锁、旧会话、验证码和限流计数不会导入。标记为 (skip) 的数据表仅显示源库行数，不计入迁移进度，也不会备份、导入或导出；服务器负载历史会由节点重新上报生成。</p>${renderCounts(displayedCounts, state.skippedCounts)}`;
     $("#preflight").hidden = false;
     $("#file-status").textContent = redisFile ? `${sqliteFile.name} + ${redisFile.name}` : `${sqliteFile.name}（未选择 Redis）`;
     setStep(2);
@@ -280,9 +290,9 @@ function downloadDatabase(db, prefix) {
   return { filename: anchor.download, size: blob.size };
 }
 
-async function exportCurrent({ runId = null, counts = null, automatic = false } = {}) {
+async function exportCurrent({ runId = null, counts = null, tables = null, automatic = false } = {}) {
   const SQL = await loadSql();
-  const manifest = runId ? { tables: state.tables, counts } : await api("/export/manifest");
+  const manifest = runId ? { tables: tables || state.tables, counts } : await api("/export/manifest");
   const templateResponse = await fetch("/migration/xboard-template.db", { cache: "no-store" });
   if (!templateResponse.ok) throw new Error(`无法读取原版 SQLite 模板：HTTP ${templateResponse.status}`);
   const db = new SQL.Database(new Uint8Array(await templateResponse.arrayBuffer()));
@@ -384,7 +394,7 @@ function showFailure(error) {
     const note = document.createElement("p");
     note.className = "muted";
     note.textContent = state.skipBackup
-      ? "本次迁移已选择跳过备份，无法一键还原；目标业务数据可能已经发生变化。"
+      ? "本次迁移只创建了强制账号备份，无法一键完整还原；目标业务数据可能已经发生变化。"
       : "错误发生在迁移前快照完成之前，目标业务数据尚未被清空或写入，无需还原。";
     $("#report").append(note);
   }
@@ -411,12 +421,11 @@ async function migrate() {
     state.runId = started.run_id; state.migrationToken = started.migration_token;
     log(`任务 ${state.runId} 已创建，策略 ${started.mode}`);
     state.done = 0;
+    const backup = await exportCurrent({ runId: state.runId, counts: started.backup_counts, tables: started.backup_tables, automatic: true });
     if (state.skipBackup) {
-      log("已跳过迁移前自动备份和 D1 快照；本次迁移无法一键还原", "error");
-    } else {
-      const backup = await exportCurrent({ runId: state.runId, counts: started.backup_counts, automatic: true });
-      log(`迁移前自动备份已下载：${backup.filename}`);
-    }
+      state.snapshotComplete = false;
+      log(`强制账号备份已下载：${backup.filename}；其他业务表未建立快照，本次迁移无法一键完整还原`, "error");
+    } else log(`迁移前自动备份已下载：${backup.filename}`);
     state.phase = "prepare";
     await api("/prepare", { method: "POST", body: JSON.stringify({ run_id: state.runId }) });
     state.prepared = true;
@@ -480,6 +489,6 @@ $("#rollback").addEventListener("click", rollback);
 for (const id of ["#sqlite-file", "#redis-file"]) $(id).addEventListener("change", () => { $("#preflight").hidden = true; });
 $("#skip-backup").addEventListener("change", event => {
   $("#backup-note").textContent = event.target.checked
-    ? "已选择跳过备份：迁移会直接写入，失败后无法一键还原。"
+    ? "已跳过完整备份：仍会先强制备份用户和登录凭据，失败后无法一键完整还原。"
     : "执行前会自动导出当前数据，并在 D1 内建立可一键还原的快照。";
 });

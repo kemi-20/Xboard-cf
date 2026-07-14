@@ -12,14 +12,16 @@ type MigrationRow = Record<string, unknown>;
 type MigrationStatus = "running" | "failed" | "rolling_back" | "rollback_failed" | "rolled_back" | "completed";
 
 const MIGRATION_TABLES = [
-  "v2_server_group", "v2_plan", "v2_user", "personal_access_tokens", "v2_server_machine",
+  "v2_user", "personal_access_tokens", "v2_server_group", "v2_plan", "v2_server_machine",
   "v2_server_route", "v2_server", "v2_settings", "v2_notice", "v2_knowledge", "v2_ticket",
   "v2_ticket_message", "v2_mail_templates", "v2_invite_code", "v2_mail_log", "v2_plugins",
   "failed_jobs", "v2_order", "v2_payment", "v2_coupon", "v2_commission_log",
   "v2_gift_card_template", "v2_gift_card_code", "v2_gift_card_usage", "v2_stat",
   "v2_stat_user", "v2_stat_server", "v2_admin_audit_log", "v2_traffic_reset_logs",
-  "v2_subscribe_templates", "v2_server_machine_load_history"
+  "v2_subscribe_templates"
 ] as const;
+const CRITICAL_BACKUP_TABLES = ["v2_user", "personal_access_tokens"] as const;
+const SKIPPED_SOURCE_TABLES = ["v2_log", "v2_server_machine_load_history"] as const;
 
 const tableSet = new Set<string>(MIGRATION_TABLES);
 const tableOrder = Object.fromEntries(MIGRATION_TABLES.map((table, index) => [table, index]));
@@ -165,9 +167,17 @@ async function readTableRows(db: D1Database, table: string, limit: number, offse
 }
 
 async function allTableCounts(db: D1Database) {
+  return tableCounts(db, MIGRATION_TABLES);
+}
+
+async function tableCounts(db: D1Database, tables: readonly string[]) {
   const counts: Record<string, number> = {};
-  for (const table of MIGRATION_TABLES) counts[table] = await tableCount(db, table);
+  for (const table of tables) counts[table] = await tableCount(db, table);
   return counts;
+}
+
+function snapshotTables(run: Record<string, unknown>): string[] {
+  return Number(run.skip_backup || 0) ? [...CRITICAL_BACKUP_TABLES] : [...MIGRATION_TABLES];
 }
 
 async function setDefaultTheme(db: D1Database) {
@@ -273,7 +283,7 @@ async function migrationStatus(env: MigrationEnv) {
     report: safeJson(run.report, null),
     error: safeJson(run.error, run.error || null)
   }));
-  return ok({ tables: MIGRATION_TABLES, runs: parsed });
+  return ok({ tables: MIGRATION_TABLES, skipped_tables: SKIPPED_SOURCE_TABLES, runs: parsed });
 }
 
 async function startMigration(request: Request, env: MigrationEnv, adminId: number) {
@@ -284,11 +294,12 @@ async function startMigration(request: Request, env: MigrationEnv, adminId: numb
   const migrationToken = randomString(48);
   const ts = now();
   const skipBackup = input.skip_backup === true || input.skip_backup === 1 || input.skip_backup === "1";
-  const snapshotCounts = skipBackup ? {} : await allTableCounts(env.XBOARD_DB);
+  const backupTables = skipBackup ? [...CRITICAL_BACKUP_TABLES] : [...MIGRATION_TABLES];
+  const snapshotCounts = await tableCounts(env.XBOARD_DB, backupTables);
   await env.XBOARD_DB.prepare("INSERT INTO v2_migration_runs(id,source_type,source_name,source_size,mode,status,source_counts,progress,access_token_hash,admin_id,snapshot_counts,snapshot_complete,skip_backup,started_at,created_at,updated_at) VALUES (?,?,?,?,?,'running',?,'{}',?,?,?,?,?,?,?,?)")
-    .bind(runId, sourceType, String(input.source_name || ""), Number(input.source_size || 0), normalizeMode(input.mode), JSON.stringify(sourceCounts), await sha256(migrationToken), adminId, JSON.stringify(snapshotCounts), skipBackup ? 1 : 0, skipBackup ? 1 : 0, ts, ts, ts).run();
-  await logMigration(env, runId, skipBackup ? `开始 ${sourceType.toUpperCase()} 迁移，已按用户选择跳过迁移前备份` : `开始 ${sourceType.toUpperCase()} 迁移，等待迁移前快照`, undefined, { source_counts: sourceCounts, snapshot_counts: snapshotCounts, mode: normalizeMode(input.mode), skip_backup: skipBackup });
-  return ok({ run_id: runId, migration_token: migrationToken, mode: normalizeMode(input.mode), tables: MIGRATION_TABLES, backup_counts: snapshotCounts, skip_backup: skipBackup });
+    .bind(runId, sourceType, String(input.source_name || ""), Number(input.source_size || 0), normalizeMode(input.mode), JSON.stringify(sourceCounts), await sha256(migrationToken), adminId, JSON.stringify(snapshotCounts), 0, skipBackup ? 1 : 0, ts, ts, ts).run();
+  await logMigration(env, runId, skipBackup ? `开始 ${sourceType.toUpperCase()} 迁移，等待强制账号备份` : `开始 ${sourceType.toUpperCase()} 迁移，等待完整迁移前快照`, undefined, { source_counts: sourceCounts, snapshot_counts: snapshotCounts, backup_tables: backupTables, mode: normalizeMode(input.mode), skip_backup: skipBackup });
+  return ok({ run_id: runId, migration_token: migrationToken, mode: normalizeMode(input.mode), tables: MIGRATION_TABLES, backup_tables: backupTables, backup_counts: snapshotCounts, skip_backup: skipBackup });
 }
 
 async function exportManifest(env: MigrationEnv) {
@@ -297,7 +308,7 @@ async function exportManifest(env: MigrationEnv) {
     template: "/migration/xboard-template.db",
     tables: MIGRATION_TABLES,
     counts: await allTableCounts(env.XBOARD_DB),
-    excluded: ["邮件与 Resend 凭据会导出为空值", "所有插件、插件配置与支付渠道不会导出", "主题固定为 Xboard 默认主题"]
+    excluded: ["邮件与 Resend 凭据会导出为空值", "所有插件、插件配置与支付渠道不会导出", "服务器机器负载历史不会导出", "主题固定为 Xboard 默认主题"]
   });
 }
 
@@ -320,8 +331,8 @@ async function snapshotTable(request: Request, env: MigrationEnv) {
   const offset = Math.max(0, Number(input.offset || 0));
   if (!runId || !tableSet.has(table)) return fail("无效的快照任务或数据表", 422, 422);
   const run = await migrationRun(env, runId);
-  if (Number(run?.skip_backup || 0)) return fail("该迁移已选择跳过备份，不能创建迁移前快照", 409, 409);
   if (!run || run.status !== "running" || Number(run.snapshot_complete || 0)) return fail("迁移前快照任务不存在或已结束", 409, 409);
+  if (!snapshotTables(run).includes(table)) return fail("该数据表不在本次备份范围内", 422, 422);
   try {
     const sourceRows = await readTableRows(env.XBOARD_DB, table, limit, offset);
     const statements = sourceRows.map((row, index) => env.XBOARD_DB.prepare(
@@ -354,12 +365,11 @@ async function finishSnapshot(request: Request, env: MigrationEnv) {
   const runId = String(input.run_id || "");
   const run = await migrationRun(env, runId);
   if (!run || run.status !== "running") return fail("迁移任务不存在或已结束", 409, 409);
-  if (Number(run.skip_backup || 0)) return ok({ counts: {}, already_complete: true, skipped: true });
   if (Number(run.snapshot_complete || 0)) return ok({ counts: safeJson(run.snapshot_counts), already_complete: true });
   if (run.prepared_at) return fail("目标数据库已开始准备，不能再完成迁移前快照", 409, 409);
   const expected = safeJson(run.snapshot_counts) as Record<string, number>;
   const mismatches: Array<{ table: string; expected: number; captured: number }> = [];
-  for (const table of MIGRATION_TABLES) {
+  for (const table of snapshotTables(run)) {
     const row = await env.XBOARD_DB.prepare("SELECT COUNT(*) AS count FROM v2_migration_snapshot_rows WHERE run_id = ? AND table_name = ?")
       .bind(runId, table).first<{ count: number }>();
     const captured = Number(row?.count || 0);
@@ -371,7 +381,7 @@ async function finishSnapshot(request: Request, env: MigrationEnv) {
     return migrationError("迁移前快照校验失败，未写入任何导入数据", 409, details);
   }
   await env.XBOARD_DB.prepare("UPDATE v2_migration_runs SET snapshot_complete = 1, updated_at = ? WHERE id = ?").bind(now(), runId).run();
-  await logMigration(env, runId, "迁移前 D1 快照与原版 SQLite 自动备份已完成", undefined, { counts: expected });
+  await logMigration(env, runId, Number(run.skip_backup || 0) ? "强制账号备份已完成" : "迁移前 D1 快照与原版 SQLite 自动备份已完成", undefined, { counts: expected, tables: snapshotTables(run) });
   return ok({ counts: expected });
 }
 
@@ -700,6 +710,14 @@ async function finishMigration(request: Request, env: MigrationEnv) {
     await markMigrationFailed(env, runId, "设置默认主题失败", details);
     return migrationError(`设置默认主题失败：${details.error}`, 500, details);
   }
+  if (run.mode === "overwrite") {
+    try { await env.XBOARD_DB.prepare("DELETE FROM v2_server_machine_load_history").run(); }
+    catch (error) {
+      const details = { phase: "load_history_cleanup", error: errorMessage(error) };
+      await markMigrationFailed(env, runId, "清理旧服务器负载历史失败", details);
+      return migrationError(`清理旧服务器负载历史失败：${details.error}`, 500, details);
+    }
+  }
   const report = {
     source_type: run.source_type,
     mode: run.mode,
@@ -707,7 +725,7 @@ async function finishMigration(request: Request, env: MigrationEnv) {
     target_counts: counts,
     progress,
     warnings,
-    skipped_service_config: ["原 SMTP/邮件驱动设置", "Resend 凭据", "所有插件及插件配置", "支付渠道配置", "原主题与主题配置"],
+    skipped_service_config: ["原 SMTP/邮件驱动设置", "Resend 凭据", "所有插件及插件配置", "支付渠道配置", "原主题与主题配置", "服务器机器负载历史"],
     skip_backup: Boolean(Number(run.skip_backup || 0)),
     theme: "Xboard"
   };
