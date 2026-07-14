@@ -308,12 +308,12 @@ FINAL,Proxy
 };
 
 async function ensureBootstrap(env: Env) {
-  const marker = await optionalKvGet(env, "bootstrap:edge:v16");
+  const marker = await optionalKvGet(env, "bootstrap:edge:v17");
   if (marker) return;
   try {
     const persisted = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = 'system_bootstrap_edge_version'").first<{ value: string }>();
-    if (persisted?.value === "v16") {
-      await optionalKvPut(env, "bootstrap:edge:v16", String(now()));
+    if (persisted?.value === "v17") {
+      await optionalKvPut(env, "bootstrap:edge:v17", String(now()));
       return;
     }
   } catch {
@@ -486,6 +486,8 @@ async function ensureBootstrap(env: Env) {
     , "CREATE TABLE IF NOT EXISTS v2_migration_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, level TEXT NOT NULL DEFAULT 'info', table_name TEXT, message TEXT NOT NULL, details TEXT, created_at INTEGER NOT NULL)"
   ]) await runSqlIgnore(env, sql);
   const ts = now();
+  const overwriteMigration = await env.XBOARD_DB.prepare("SELECT 1 AS found FROM v2_migration_runs WHERE mode = 'overwrite' AND status != 'rolled_back' LIMIT 1").first<{ found: number }>();
+  const preserveMigratedData = Boolean(overwriteMigration?.found);
   const settingsDefaults: Record<string, any> = {
     app_name: "XBoard CF", app_description: "XBoard Cloudflare-native panel", app_url: "", logo: "", subscribe_url: "", stop_register: 0,
     subscribe_path: "s", frontend_admin_path: "admin", secure_path: "admin", frontend_theme: "Xboard",
@@ -506,9 +508,11 @@ async function ensureBootstrap(env: Env) {
     telegram_bot_enable: 0, telegram_bot_token: "", telegram_webhook_url: "", telegram_discuss_link: "",
     windows_version: "", windows_download_url: "", macos_version: "", macos_download_url: "", android_version: "", android_download_url: ""
   };
-  for (const [name, value] of Object.entries(settingsDefaults)) {
-    await runSqlIgnore(env, "INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = CASE WHEN v2_settings.value IS NULL OR v2_settings.value = '' THEN excluded.value ELSE v2_settings.value END, updated_at = excluded.updated_at",
-      [name, typeof value === "object" ? JSON.stringify(value) : String(value), ts, ts]);
+  if (!preserveMigratedData) {
+    for (const [name, value] of Object.entries(settingsDefaults)) {
+      await runSqlIgnore(env, "INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = CASE WHEN v2_settings.value IS NULL OR v2_settings.value = '' THEN excluded.value ELSE v2_settings.value END, updated_at = excluded.updated_at",
+        [name, typeof value === "object" ? JSON.stringify(value) : String(value), ts, ts]);
+    }
   }
   // Older Resend builds saved values under the original email_* setting names.
   // Synchronize both representations so an upgrade cannot make saved values disappear.
@@ -530,27 +534,34 @@ async function ensureBootstrap(env: Env) {
   })) {
     await runSqlIgnore(env, "INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at", [name, value, ts, ts]);
   }
-  await runSqlIgnore(env, "INSERT INTO v2_server_group(id, name, created_at, updated_at) VALUES (1, 'Default', ?, ?) ON CONFLICT(id) DO NOTHING", [ts, ts]);
-  await runSqlIgnore(env, "INSERT INTO v2_plan(id, group_id, transfer_enable, name, speed_limit, device_limit, capacity_limit, reset_traffic_method, prices, content, tags, show, sell, renew, sort, created_at, updated_at) VALUES (1, 1, 1024, 'Default Trial', NULL, NULL, NULL, 0, '{}', 'Default seeded plan for first-run compatibility.', '[]', 1, 1, 1, 1, ?, ?) ON CONFLICT(id) DO NOTHING", [ts, ts]);
-  await runSqlIgnore(env, "INSERT INTO v2_user(email, password, password_algo, password_salt, uuid, token, transfer_enable, u, d, banned, is_admin, is_staff, plan_id, group_id, remind_expire, remind_traffic, created_at, updated_at) VALUES ('admin@admin.com', ?, 'pbkdf2', 'xboard-cloudflare-admin', '00000000-0000-4000-8000-000000000001', 'admin-default-token-change-me', 1099511627776, 0, 0, 0, 1, 1, 1, 1, 1, 1, ?, ?) ON CONFLICT(email) DO UPDATE SET password = excluded.password, password_algo = excluded.password_algo, password_salt = excluded.password_salt, banned = 0, is_admin = 1, is_staff = 1, plan_id = COALESCE(v2_user.plan_id, excluded.plan_id), group_id = COALESCE(v2_user.group_id, excluded.group_id), transfer_enable = CASE WHEN v2_user.transfer_enable = 0 THEN excluded.transfer_enable ELSE v2_user.transfer_enable END, remind_expire = 1, remind_traffic = 1, updated_at = excluded.updated_at", [DEFAULT_ADMIN_PASSWORD_HASH, ts, ts]);
-  await runSqlIgnore(env, "INSERT INTO v2_notice(id, title, content, show, sort, created_at, updated_at) VALUES (1, 'Welcome to XBoard CF', 'The Cloudflare-native XBoard panel is ready.', 1, 1, ?, ?) ON CONFLICT(id) DO UPDATE SET title = excluded.title, content = excluded.content, show = excluded.show, updated_at = excluded.updated_at", [ts, ts]);
-  await runSqlIgnore(env, "INSERT INTO v2_knowledge(id, category, title, body, show, sort, created_at, updated_at) VALUES (1, 'Getting Started', 'First-run checklist', 'Update the default administrator password, configure app_url, and add real nodes before production use.', 1, 1, ?, ?) ON CONFLICT(id) DO UPDATE SET category = excluded.category, title = excluded.title, body = excluded.body, show = excluded.show, updated_at = excluded.updated_at", [ts, ts]);
-  for (const [name, subject, content] of [
-    ["notify", "Notification from {{app.name}}", "{{content}}"],
-    ["verify", "Email verification code", "Your verification code is {{code}}."],
-    ["mailLogin", "Login to {{name}}", "Use this link to log in: {{link}}"],
-    ["remind_expire", "Service expiry reminder", "Your service is about to expire."],
-    ["remind_traffic", "Traffic usage reminder", "Your traffic usage is high."]
-  ]) {
-    await runSqlIgnore(env, "INSERT INTO v2_mail_templates(name, subject, content, enabled, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?) ON CONFLICT(name) DO UPDATE SET subject = excluded.subject, content = excluded.content, enabled = excluded.enabled, updated_at = excluded.updated_at", [name, subject, content, ts, ts]);
+  if (preserveMigratedData) {
+    await runSqlIgnore(env, "DELETE FROM v2_user WHERE email = 'admin@admin.com' AND uuid = '00000000-0000-4000-8000-000000000001' AND token = 'admin-default-token-change-me' AND password_salt = 'xboard-cloudflare-admin'");
   }
-  for (const [name, content] of Object.entries(defaultSubscribeTemplates)) {
-    await runSqlIgnore(env, "INSERT INTO v2_subscribe_templates(name, type, content, template, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?) ON CONFLICT(name) DO UPDATE SET content = CASE WHEN v2_subscribe_templates.content IS NULL OR v2_subscribe_templates.content = '' THEN excluded.content ELSE v2_subscribe_templates.content END, template = CASE WHEN v2_subscribe_templates.template IS NULL OR v2_subscribe_templates.template = '' THEN excluded.template ELSE v2_subscribe_templates.template END, enabled = 1, updated_at = excluded.updated_at", [name, name, content, content, ts, ts]);
-    await runSqlIgnore(env, "INSERT INTO v2_subscribe_templates(name, content, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET content = CASE WHEN v2_subscribe_templates.content IS NULL OR v2_subscribe_templates.content = '' THEN excluded.content ELSE v2_subscribe_templates.content END, updated_at = excluded.updated_at", [name, content, ts, ts]);
+  if (!preserveMigratedData) {
+    await runSqlIgnore(env, "INSERT INTO v2_server_group(id, name, created_at, updated_at) VALUES (1, 'Default', ?, ?) ON CONFLICT(id) DO NOTHING", [ts, ts]);
+    await runSqlIgnore(env, "INSERT INTO v2_plan(id, group_id, transfer_enable, name, speed_limit, device_limit, capacity_limit, reset_traffic_method, prices, content, tags, show, sell, renew, sort, created_at, updated_at) VALUES (1, 1, 1024, 'Default Trial', NULL, NULL, NULL, 0, '{}', 'Default seeded plan for first-run compatibility.', '[]', 1, 1, 1, 1, ?, ?) ON CONFLICT(id) DO NOTHING", [ts, ts]);
+    if (await firstNumber(env, "SELECT COUNT(*) AS c FROM v2_user") === 0) {
+      await runSqlIgnore(env, "INSERT INTO v2_user(email, password, password_algo, password_salt, uuid, token, transfer_enable, u, d, banned, is_admin, is_staff, plan_id, group_id, remind_expire, remind_traffic, created_at, updated_at) VALUES ('admin@admin.com', ?, 'pbkdf2', 'xboard-cloudflare-admin', '00000000-0000-4000-8000-000000000001', 'admin-default-token-change-me', 1099511627776, 0, 0, 0, 1, 1, 1, 1, 1, 1, ?, ?)", [DEFAULT_ADMIN_PASSWORD_HASH, ts, ts]);
+    }
+    await runSqlIgnore(env, "INSERT INTO v2_notice(id, title, content, show, sort, created_at, updated_at) VALUES (1, 'Welcome to XBoard CF', 'The Cloudflare-native XBoard panel is ready.', 1, 1, ?, ?) ON CONFLICT(id) DO UPDATE SET title = excluded.title, content = excluded.content, show = excluded.show, updated_at = excluded.updated_at", [ts, ts]);
+    await runSqlIgnore(env, "INSERT INTO v2_knowledge(id, category, title, body, show, sort, created_at, updated_at) VALUES (1, 'Getting Started', 'First-run checklist', 'Update the default administrator password, configure app_url, and add real nodes before production use.', 1, 1, ?, ?) ON CONFLICT(id) DO UPDATE SET category = excluded.category, title = excluded.title, body = excluded.body, show = excluded.show, updated_at = excluded.updated_at", [ts, ts]);
+    for (const [name, subject, content] of [
+      ["notify", "Notification from {{app.name}}", "{{content}}"],
+      ["verify", "Email verification code", "Your verification code is {{code}}."],
+      ["mailLogin", "Login to {{name}}", "Use this link to log in: {{link}}"],
+      ["remind_expire", "Service expiry reminder", "Your service is about to expire."],
+      ["remind_traffic", "Traffic usage reminder", "Your traffic usage is high."]
+    ]) {
+      await runSqlIgnore(env, "INSERT INTO v2_mail_templates(name, subject, content, enabled, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?) ON CONFLICT(name) DO UPDATE SET subject = excluded.subject, content = excluded.content, enabled = excluded.enabled, updated_at = excluded.updated_at", [name, subject, content, ts, ts]);
+    }
+    for (const [name, content] of Object.entries(defaultSubscribeTemplates)) {
+      await runSqlIgnore(env, "INSERT INTO v2_subscribe_templates(name, type, content, template, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?) ON CONFLICT(name) DO UPDATE SET content = CASE WHEN v2_subscribe_templates.content IS NULL OR v2_subscribe_templates.content = '' THEN excluded.content ELSE v2_subscribe_templates.content END, template = CASE WHEN v2_subscribe_templates.template IS NULL OR v2_subscribe_templates.template = '' THEN excluded.template ELSE v2_subscribe_templates.template END, enabled = 1, updated_at = excluded.updated_at", [name, name, content, content, ts, ts]);
+      await runSqlIgnore(env, "INSERT INTO v2_subscribe_templates(name, content, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET content = CASE WHEN v2_subscribe_templates.content IS NULL OR v2_subscribe_templates.content = '' THEN excluded.content ELSE v2_subscribe_templates.content END, updated_at = excluded.updated_at", [name, content, ts, ts]);
+    }
+    await runSqlIgnore(env, "UPDATE v2_user SET transfer_enable = transfer_enable * 1073741824, updated_at = ? WHERE plan_id IS NOT NULL AND transfer_enable > 0 AND EXISTS (SELECT 1 FROM v2_plan WHERE v2_plan.id = v2_user.plan_id AND v2_plan.transfer_enable = v2_user.transfer_enable)", [ts]);
   }
-  await runSqlIgnore(env, "UPDATE v2_user SET transfer_enable = transfer_enable * 1073741824, updated_at = ? WHERE plan_id IS NOT NULL AND transfer_enable > 0 AND EXISTS (SELECT 1 FROM v2_plan WHERE v2_plan.id = v2_user.plan_id AND v2_plan.transfer_enable = v2_user.transfer_enable)", [ts]);
-  await runSqlIgnore(env, "INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES ('system_bootstrap_edge_version', 'v16', ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at", [ts, ts]);
-  await optionalKvPut(env, "bootstrap:edge:v16", String(ts));
+  await runSqlIgnore(env, "INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES ('system_bootstrap_edge_version', 'v17', ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at", [ts, ts]);
+  await optionalKvPut(env, "bootstrap:edge:v17", String(ts));
 }
 
 async function firstNumber(env: Env, sql: string, fallback = 0) {
@@ -950,33 +961,54 @@ function monthStart(ts = now()) {
 }
 
 async function adminStats(env: Env) {
+  const current = now();
   const today = dayStart();
+  const yesterday = today - 86400;
   const month = monthStart();
-  const lastMonthDate = new Date(month * 1000);
-  lastMonthDate.setUTCMonth(lastMonthDate.getUTCMonth() - 1);
-  const lastMonth = Math.floor(lastMonthDate.getTime() / 1000);
+  const lastMonth = monthStart(month - 1);
+  const twoMonthsAgo = monthStart(lastMonth - 1);
+  const nodes = await adminServerRows(env);
   const totalUsers = await firstNumber(env, "SELECT COUNT(*) AS c FROM v2_user");
-  const activeUsers = await firstNumber(env, "SELECT COUNT(*) AS c FROM v2_user WHERE banned = 0");
-  const currentMonthNewUsers = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE created_at >= ${month}`);
+  const activeUsers = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE expired_at IS NULL OR expired_at >= ${current}`);
+  const currentMonthNewUsers = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE created_at >= ${month} AND created_at < ${current}`);
   const lastMonthNewUsers = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE created_at >= ${lastMonth} AND created_at < ${month}`);
-  const monthUpload = await firstNumber(env, `SELECT COALESCE(SUM(u), 0) AS c FROM v2_stat_user WHERE record_at >= ${month}`);
-  const monthDownload = await firstNumber(env, `SELECT COALESCE(SUM(d), 0) AS c FROM v2_stat_user WHERE record_at >= ${month}`);
-  const todayUpload = await firstNumber(env, `SELECT COALESCE(SUM(u), 0) AS c FROM v2_stat_user WHERE record_at >= ${today}`);
-  const todayDownload = await firstNumber(env, `SELECT COALESCE(SUM(d), 0) AS c FROM v2_stat_user WHERE record_at >= ${today}`);
-  const userGrowth = lastMonthNewUsers > 0 ? Math.round(((currentMonthNewUsers - lastMonthNewUsers) / lastMonthNewUsers) * 100) : currentMonthNewUsers > 0 ? 100 : 0;
+  const todayIncome = await firstNumber(env, `SELECT COALESCE(SUM(total_amount), 0) AS c FROM v2_order WHERE created_at >= ${today} AND created_at < ${current} AND status NOT IN (0,2)`);
+  const yesterdayIncome = await firstNumber(env, `SELECT COALESCE(SUM(total_amount), 0) AS c FROM v2_order WHERE created_at >= ${yesterday} AND created_at < ${today} AND status NOT IN (0,2)`);
+  const currentMonthIncome = await firstNumber(env, `SELECT COALESCE(SUM(total_amount), 0) AS c FROM v2_order WHERE created_at >= ${month} AND created_at < ${current} AND status NOT IN (0,2)`);
+  const lastMonthIncome = await firstNumber(env, `SELECT COALESCE(SUM(total_amount), 0) AS c FROM v2_order WHERE created_at >= ${lastMonth} AND created_at < ${month} AND status NOT IN (0,2)`);
+  const twoMonthsAgoIncome = await firstNumber(env, `SELECT COALESCE(SUM(total_amount), 0) AS c FROM v2_order WHERE created_at >= ${twoMonthsAgo} AND created_at < ${lastMonth} AND status NOT IN (0,2)`);
+  const currentMonthCommissionPayout = await firstNumber(env, `SELECT COALESCE(SUM(COALESCE(get_amount, amount, 0)), 0) AS c FROM v2_commission_log WHERE created_at >= ${month} AND created_at < ${current}`);
+  const lastMonthCommissionPayout = await firstNumber(env, `SELECT COALESCE(SUM(COALESCE(get_amount, amount, 0)), 0) AS c FROM v2_commission_log WHERE created_at >= ${lastMonth} AND created_at < ${month}`);
+  const twoMonthsAgoCommission = await firstNumber(env, `SELECT COALESCE(SUM(COALESCE(get_amount, amount, 0)), 0) AS c FROM v2_commission_log WHERE created_at >= ${twoMonthsAgo} AND created_at < ${lastMonth}`);
+  const monthUpload = await firstNumber(env, `SELECT COALESCE(SUM(u), 0) AS c FROM v2_stat_server WHERE record_at >= ${month} AND record_at < ${current}`);
+  const monthDownload = await firstNumber(env, `SELECT COALESCE(SUM(d), 0) AS c FROM v2_stat_server WHERE record_at >= ${month} AND record_at < ${current}`);
+  const todayUpload = await firstNumber(env, `SELECT COALESCE(SUM(u), 0) AS c FROM v2_stat_server WHERE record_at >= ${today} AND record_at < ${current}`);
+  const todayDownload = await firstNumber(env, `SELECT COALESCE(SUM(d), 0) AS c FROM v2_stat_server WHERE record_at >= ${today} AND record_at < ${current}`);
+  const totalUpload = await firstNumber(env, "SELECT COALESCE(SUM(u), 0) AS c FROM v2_stat_server");
+  const totalDownload = await firstNumber(env, "SELECT COALESCE(SUM(d), 0) AS c FROM v2_stat_server");
+  const growth = (value: number, previous: number) => previous > 0 ? Math.round(((value - previous) / previous) * 1000) / 10 : 0;
   return {
-    todayIncome: 0,
-    currentMonthIncome: 0,
-    dayIncomeGrowth: 0,
-    monthIncomeGrowth: 0,
+    todayIncome,
+    dayIncomeGrowth: growth(todayIncome, yesterdayIncome),
+    currentMonthIncome,
+    lastMonthIncome,
+    monthIncomeGrowth: growth(currentMonthIncome, lastMonthIncome),
+    lastMonthIncomeGrowth: growth(lastMonthIncome, twoMonthsAgoIncome),
+    currentMonthCommissionPayout,
+    lastMonthCommissionPayout,
+    commissionGrowth: growth(lastMonthCommissionPayout, twoMonthsAgoCommission),
     ticketPendingTotal: await firstNumber(env, "SELECT COUNT(*) AS c FROM v2_ticket WHERE status = 0"),
-    commissionPendingTotal: 0,
+    commissionPendingTotal: await firstNumber(env, "SELECT COUNT(*) AS c FROM v2_order WHERE commission_status = 0 AND invite_user_id IS NOT NULL AND status = 3 AND commission_balance > 0"),
     currentMonthNewUsers,
-    userGrowth,
+    userGrowth: growth(currentMonthNewUsers, lastMonthNewUsers),
     totalUsers,
     activeUsers,
-    monthTraffic: { upload: monthUpload, download: monthDownload },
-    todayTraffic: { upload: todayUpload, download: todayDownload }
+    onlineUsers: await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE t >= ${current - 600}`),
+    onlineDevices: await firstNumber(env, `SELECT COALESCE(SUM(online_count), 0) AS c FROM v2_user WHERE t >= ${current - 600}`),
+    onlineNodes: nodes.filter(node => Number((node as any).available_status) > 0).length,
+    todayTraffic: { upload: todayUpload, download: todayDownload, total: todayUpload + todayDownload },
+    monthTraffic: { upload: monthUpload, download: monthDownload, total: monthUpload + monthDownload },
+    totalTraffic: { upload: totalUpload, download: totalDownload, total: totalUpload + totalDownload }
   };
 }
 
@@ -3290,15 +3322,26 @@ async function adminUi(request: Request, env: Env, securePath: string) {
         };
         const install = () => {
           const nav = document.querySelector("aside nav");
-          if (nav && !nav.querySelector("#xboard-migration-menu")) {
+          const migrationLabels = {
+            "zh-CN": { text: "数据迁移", title: "从原版 SQLite 导入数据或导出原版兼容数据库" },
+            "en-US": { text: "Data Migration", title: "Import an original XBoard SQLite database or export an original-compatible database" },
+            "ru-RU": { text: "Миграция данных", title: "Импорт базы SQLite из оригинального XBoard или экспорт совместимой базы" }
+          };
+          const language = localStorage.getItem("i18nextLng") || "zh-CN";
+          const label = migrationLabels[language] || migrationLabels["en-US"];
+          let link = nav?.querySelector("#xboard-migration-menu");
+          if (nav && !link) {
             const link = document.createElement("a");
             link.id = "xboard-migration-menu";
             link.href = href;
-            link.title = "从原版 SQLite 导入数据或导出原版兼容数据库";
             link.className = "inline-flex items-center whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground text-xs h-12 justify-start text-wrap rounded-none px-6";
-            link.innerHTML = '<div class="mr-2"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="tabler-icon tabler-icon-database-import"><path d="M4 6a8 3 0 1 0 16 0a8 3 0 1 0 -16 0"></path><path d="M4 6v12"></path><path d="M20 6v8"></path><path d="M4 12a8 3 0 0 0 16 0"></path><path d="M4 18c0 1.657 3.582 3 8 3c1.05 0 2.052-.076 2.97-.214"></path><path d="M19 16v6"></path><path d="M16 19l3 3l3 -3"></path></svg></div><span>数据迁移</span>';
+            link.innerHTML = '<div class="mr-2"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="tabler-icon tabler-icon-database-import"><path d="M4 6a8 3 0 1 0 16 0a8 3 0 1 0 -16 0"></path><path d="M4 6v12"></path><path d="M20 6v8"></path><path d="M4 12a8 3 0 0 0 16 0"></path><path d="M4 18c0 1.657 3.582 3 8 3c1.05 0 2.052-.076 2.97-.214"></path><path d="M19 17v6"></path><path d="M16 20l3 3l3 -3"></path></svg></div><span></span>';
             nav.appendChild(link);
           }
+          link = nav?.querySelector("#xboard-migration-menu");
+          const text = link?.querySelector("span");
+          if (link && link.title !== label.title) link.title = label.title;
+          if (text && text.textContent !== label.text) text.textContent = label.text;
           updateFooterDate();
         };
         new MutationObserver(install).observe(document.documentElement, { childList: true, subtree: true });

@@ -22,8 +22,11 @@ test("admin shell references the current bundle without caching", () => {
   assert.match(source, /window\.settings = \$\{settingsJson\}/);
   assert.match(source, /id = "xboard-migration-menu"/);
   assert.match(source, /nav\.appendChild\(link\)/);
-  assert.match(source, /M19 16v6/);
-  assert.match(source, /M16 19l3 3l3 -3/);
+  assert.match(source, /M19 17v6/);
+  assert.match(source, /M16 20l3 3l3 -3/);
+  assert.match(source, /localStorage\.getItem\("i18nextLng"\)/);
+  assert.match(source, /"en-US": \{ text: "Data Migration"/);
+  assert.match(source, /"ru-RU": \{ text: "Миграция данных"/);
   assert.match(source, /new Intl\.DateTimeFormat\(undefined/);
   assert.match(source, /if \(version\.textContent !== date\) version\.textContent = date/);
   assert.match(source, /window\.setInterval\(updateFooterDate, 60000\)/);
@@ -211,8 +214,38 @@ test("login sessions fall back to D1 when KV writes fail", () => {
 test("bootstrap remains available when the KV daily write limit is exhausted", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /system_bootstrap_edge_version/);
-  assert.match(source, /await optionalKvPut\(env, "bootstrap:edge:v16"/);
+  assert.match(source, /await optionalKvPut\(env, "bootstrap:edge:v17"/);
   assert.doesNotMatch(source, /await env\.XBOARD_KV\.put\("bootstrap:edge:v12"/);
+});
+
+test("overwrite migrations suppress first-run seed data", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /mode = 'overwrite' AND status != 'rolled_back'/);
+  assert.match(source, /if \(!preserveMigratedData\) \{[\s\S]*SELECT COUNT\(\*\) AS c FROM v2_user/);
+  assert.match(source, /DELETE FROM v2_user WHERE email = 'admin@admin\.com' AND uuid = '00000000-0000-4000-8000-000000000001'/);
+  assert.doesNotMatch(source, /ON CONFLICT\(email\) DO UPDATE SET password = excluded\.password/);
+});
+
+test("dashboard statistics follow the upstream order and server traffic contracts", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const stats = source.slice(source.indexOf("async function adminStats"), source.indexOf("function dateString"));
+  assert.match(stats, /status NOT IN \(0,2\)/);
+  assert.match(stats, /FROM v2_stat_server/);
+  assert.doesNotMatch(stats, /FROM v2_stat_user/);
+  for (const field of ["todayIncome", "currentMonthIncome", "lastMonthIncome", "currentMonthCommissionPayout", "onlineNodes", "todayTraffic", "monthTraffic", "totalTraffic"]) {
+    assert.match(stats, new RegExp(field));
+  }
+});
+
+test("English and Russian email settings describe Resend instead of SMTP", () => {
+  const english = fs.readFileSync("public/locales/en-US.js", "utf8");
+  const russian = fs.readFileSync("public/locales/ru-RU.js", "utf8");
+  assert.match(english, /Resend API URL/);
+  assert.match(english, /Resend API Key/);
+  assert.doesNotMatch(english.slice(english.indexOf('"email": {'), english.indexOf('"telegram": {')), /SMTP/);
+  assert.match(russian, /URL API Resend/);
+  assert.match(russian, /API-ключ Resend/);
+  assert.doesNotMatch(russian.slice(russian.indexOf('"email": {'), russian.indexOf('"telegram": {')), /SMTP/);
 });
 
 test("admin migration imports official SQLite data in bounded D1 batches", () => {

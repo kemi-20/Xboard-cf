@@ -1384,28 +1384,28 @@ window.XBOARD_TRANSLATIONS['en-US'] = {
     },
     "email": {
       "title": "Email Settings",
-      "description": "Configure system email service for sending verification codes, password resets, and notifications, supporting various SMTP providers.",
+      "description": "Configure the Resend email service for verification codes, password resets, notifications, and reminders.",
       "tab_settings": "Settings",
       "tab_templates": "Templates",
       "email_host": {
-        "title": "SMTP Host",
-        "description": "SMTP server address, e.g., smtp.gmail.com"
+        "title": "Resend API URL",
+        "description": "Uses https://api.resend.com by default and normally does not need to be changed."
       },
       "email_port": {
-        "title": "SMTP Port",
-        "description": "SMTP server port, common ports: 25, 465, 587"
+        "title": "HTTPS Port",
+        "description": "The Resend API uses port 443."
       },
       "email_username": {
-        "title": "SMTP Username",
-        "description": "SMTP authentication username"
+        "title": "Sender Name",
+        "description": "Display name shown as the email sender."
       },
       "email_password": {
-        "title": "SMTP Password",
-        "description": "SMTP authentication password or application-specific password"
+        "title": "Resend API Key",
+        "description": "Resend API Key beginning with re_. It can also be configured as the xboard-jobs RESEND_API_KEY secret."
       },
       "email_from": {
-        "title": "From Address",
-        "description": "Sender's email address"
+        "title": "Sender Address",
+        "description": "Verified sender email address in Resend."
       },
       "email_from_name": {
         "title": "From Name",

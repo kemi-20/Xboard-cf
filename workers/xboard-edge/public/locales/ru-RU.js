@@ -1326,28 +1326,28 @@ window.XBOARD_TRANSLATIONS['ru-RU'] = {
     },
     "email": {
       "title": "Настройки почты",
-      "description": "Настройка SMTP для отправки кодов подтверждения, восстановления пароля и системных уведомлений.",
+      "description": "Настройка сервиса Resend для отправки кодов подтверждения, сброса пароля, уведомлений и напоминаний.",
       "tab_settings": "Настройки",
       "tab_templates": "Шаблоны",
       "email_host": {
-        "title": "SMTP Сервер",
-        "description": "Адрес сервера, напр. smtp.gmail.com"
+        "title": "URL API Resend",
+        "description": "По умолчанию используется https://api.resend.com; обычно изменять не требуется."
       },
       "email_port": {
-        "title": "SMTP Порт",
-        "description": "Обычно: 465 (SSL) или 587 (TLS)"
+        "title": "Порт HTTPS",
+        "description": "API Resend использует порт 443."
       },
       "email_username": {
-        "title": "Имя пользователя SMTP",
-        "description": "Ваш Email или логин"
+        "title": "Имя отправителя",
+        "description": "Отображаемое имя отправителя письма."
       },
       "email_password": {
-        "title": "Пароль SMTP",
-        "description": "Пароль приложения или основной пароль"
+        "title": "API-ключ Resend",
+        "description": "API-ключ Resend, начинающийся с re_. Его также можно задать в секрете RESEND_API_KEY воркера xboard-jobs."
       },
       "email_from": {
-        "title": "Email отправителя",
-        "description": "Будет отображаться в заголовке письма"
+        "title": "Адрес отправителя",
+        "description": "Подтвержденный в Resend адрес электронной почты отправителя."
       },
       "email_from_name": {
         "title": "Имя отправителя",
