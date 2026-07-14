@@ -746,6 +746,7 @@ window.XBOARD_TRANSLATIONS['en-US'] = {
     "pluginManagement": "Plugin Management",
     "paymentConfig": "Payment Configuration",
     "knowledgeManagement": "Knowledge Management",
+    "dataMigration": "Data Migration",
     "nodeManagement": "Node Management",
     "machineManagement": "Server Management",
     "permissionGroupManagement": "Permission Group",

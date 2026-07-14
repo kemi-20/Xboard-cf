@@ -19,6 +19,7 @@ XBoard CF 是基于 Cloudflare Workers、D1、KV、Queues、Durable Objects 和 
 - D1 持久化业务数据，KV 缓存临时状态
 - Queue 异步处理流量，Cron Worker 执行周期任务
 - 后台联合导入原版 SQLite3 与 Redis RDB，平滑切换到 D1 + KV
+- 后台全局搜索仅展示当前可用功能，并可直接打开数据迁移
 
 ## 后台入口
 
@@ -41,6 +42,10 @@ https://你的域名/admin
 /admin#/server/manage
 /admin#/user/manage
 ```
+
+后台路径可在“系统管理 -> 系统配置 -> 安全设置”中修改。修改后应使用新的安全路径访问后台；菜单中的“数据迁移”和全局搜索结果会自动使用当前路径。
+
+主题配置、插件管理和支付配置当前不兼容 Cloudflare-native 运行时，因此菜单及全局搜索结果均隐藏。对应前端路由、数据库表和兼容代码仍保留，方便未来升级。
 
 ### 默认超级管理员
 
@@ -172,7 +177,7 @@ npx wrangler d1 execute xboard-db --remote --config workers/xboard-edge/wrangler
 
 ## 从原版迁移
 
-登录后台后点击左下角“数据迁移”，或直接打开：
+登录后台后打开“系统管理 -> 数据迁移”，也可以在顶部全局搜索中搜索“数据迁移”，或直接打开：
 
 ```text
 https://你的域名/admin/migration
@@ -203,6 +208,18 @@ framework/schedule 锁
 任一批次失败时迁移会立即中止，进度和详细错误以红色显示。只要迁移前快照已经完成，页面会显示“一键还原”，用于清理本次失败写入并恢复迁移前的 D1 数据和本次修改过的 KV 键。
 
 真实备份预演覆盖 14,369 行 SQLite 数据和 Redis 12 格式 RDB。迁移器会处理原版与 D1 的字段差异，包括时间戳、`transfer_used_total`、机器启用状态、订阅模板默认字段和 bcrypt 密码标记。
+
+## IP 注册限制
+
+开启“系统管理 -> 系统配置 -> 安全设置 -> IP 注册限制”后，注册次数按访客公网 IP 分开记录在 KV：
+
+```text
+rate:register:{访客IP}
+```
+
+Cloudflare Worker 优先读取 `CF-Connecting-IP`。该请求头由 Cloudflare 写入，表示直接连接 Cloudflare 的访客 IP，并非 Cloudflare 机房节点 IP；缺失时才回退到 `X-Forwarded-For`。注册成功后的自动登录也会保留该 IP，用于更新用户的 `last_login_ip`。
+
+如果用户浏览器直接请求 Worker 或绑定到 Worker 的自定义域名，可获得真实用户 IP。如果请求先经过第三方服务器端反向代理，Cloudflare 看到的将是该代理服务器 IP；纯静态第三方前端不受此限制。
 
 ## 节点与服务器状态
 
@@ -273,7 +290,7 @@ npx wrangler deploy --dry-run --outdir ../../.tmp/xboard-edge-dry-run
 - 需要真实出金的佣金提现
 - 依赖外部支付插件的订单流程
 
-Cloudflare Workers 无法在运行时解压并执行 Laravel Blade 主题或任意 PHP 插件。插件管理和支付配置菜单目前仅在界面中隐藏，相关路由、表结构和兼容代码仍保留，便于未来升级为 Cloudflare-native 实现；上传 PHP/Blade ZIP 包不会被执行。Telegram 机器人是内置功能，不需要安装插件。
+Cloudflare Workers 无法在运行时解压并执行 Laravel Blade 主题或任意 PHP 插件。主题配置、插件管理和支付配置目前在菜单和全局搜索中隐藏，相关路由、表结构和兼容代码仍保留，便于未来升级为 Cloudflare-native 实现；上传 PHP/Blade ZIP 包不会被执行。Telegram 机器人是内置功能，不需要安装插件。
 
 礼品卡不在暂缓范围内，已经执行真实奖励发放。支付相关表和兼容接口仍然保留，用于避免后台页面崩溃。
 

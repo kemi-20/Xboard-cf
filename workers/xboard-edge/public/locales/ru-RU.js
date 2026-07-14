@@ -688,6 +688,7 @@ window.XBOARD_TRANSLATIONS['ru-RU'] = {
     "pluginManagement": "Управление плагинами",
     "paymentConfig": "Настройки оплаты",
     "knowledgeManagement": "База знаний",
+    "dataMigration": "Миграция данных",
     "nodeManagement": "Управление узлами",
     "machineManagement": "Управление серверами",
     "permissionGroupManagement": "Группы доступа",

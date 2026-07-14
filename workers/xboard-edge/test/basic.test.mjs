@@ -38,6 +38,20 @@ test("admin shell references the current bundle without caching", () => {
   assert.doesNotMatch(source, /position:fixed;left:16px;bottom:12px/);
 });
 
+test("admin search hides reserved pages and includes data migration", () => {
+  const bundle = fs.readFileSync("public/assets/index-CF20260713.js", "utf8");
+  const zh = fs.readFileSync("public/locales/zh-CN.js", "utf8");
+  const en = fs.readFileSync("public/locales/en-US.js", "utf8");
+  const ru = fs.readFileSync("public/locales/ru-RU.js", "utf8");
+  assert.match(bundle, /\.filter\(e=>!\["\/config\/plugin","\/config\/payment","\/config\/theme"\]\.includes\(e\.href\)\)/);
+  assert.match(bundle, /id:"data-migration-search",title:"nav:dataMigration"/);
+  assert.match(bundle, /href:`\$\{window\.location\.origin\}\$\{window\.settings\.secure_path\}\/migration`/);
+  assert.match(bundle, /window\.location\.assign\(e\)/);
+  assert.match(zh, /"dataMigration": "数据迁移"/);
+  assert.match(en, /"dataMigration": "Data Migration"/);
+  assert.match(ru, /"dataMigration": "Миграция данных"/);
+});
+
 test("admin UI and API follow the saved secure path", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /async function currentSecurePath/);

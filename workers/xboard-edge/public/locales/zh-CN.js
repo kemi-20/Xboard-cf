@@ -747,6 +747,7 @@ window.XBOARD_TRANSLATIONS['zh-CN'] = {
     "noticeManagement": "公告管理",
     "paymentConfig": "支付配置",
     "knowledgeManagement": "知识库管理",
+    "dataMigration": "数据迁移",
     "nodeManagement": "节点管理",
     "machineManagement": "服务器管理",
     "permissionGroupManagement": "权限组管理",
