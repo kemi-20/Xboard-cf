@@ -283,12 +283,12 @@ FINAL,Proxy
 };
 
 async function ensureBootstrap(env: Env) {
-  const marker = await optionalKvGet(env, "bootstrap:edge:v10");
+  const marker = await optionalKvGet(env, "bootstrap:edge:v11");
   if (marker) return;
   try {
     const persisted = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = 'system_bootstrap_edge_version'").first<{ value: string }>();
-    if (persisted?.value === "v10") {
-      await optionalKvPut(env, "bootstrap:edge:v10", String(now()));
+    if (persisted?.value === "v11") {
+      await optionalKvPut(env, "bootstrap:edge:v11", String(now()));
       return;
     }
   } catch {
@@ -344,6 +344,25 @@ async function ensureBootstrap(env: Env) {
     "ALTER TABLE v2_server_machine_load_history ADD COLUMN updated_at INTEGER",
     "ALTER TABLE v2_stat_user ADD COLUMN server_rate REAL NOT NULL DEFAULT 1",
     "ALTER TABLE v2_stat_user ADD COLUMN record_type TEXT NOT NULL DEFAULT 'd'",
+    "ALTER TABLE v2_order ADD COLUMN plan_id INTEGER",
+    "ALTER TABLE v2_order ADD COLUMN payment_id INTEGER",
+    "ALTER TABLE v2_order ADD COLUMN period TEXT",
+    "ALTER TABLE v2_order ADD COLUMN handling_amount INTEGER",
+    "ALTER TABLE v2_order ADD COLUMN balance_amount INTEGER",
+    "ALTER TABLE v2_order ADD COLUMN surplus_credit INTEGER",
+    "ALTER TABLE v2_order ADD COLUMN surplus_amount INTEGER",
+    "ALTER TABLE v2_order ADD COLUMN type INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE v2_order ADD COLUMN surplus_order_ids TEXT",
+    "ALTER TABLE v2_order ADD COLUMN coupon_id INTEGER",
+    "ALTER TABLE v2_order ADD COLUMN commission_status INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE v2_order ADD COLUMN invite_user_id INTEGER",
+    "ALTER TABLE v2_order ADD COLUMN actual_commission_balance INTEGER",
+    "ALTER TABLE v2_order ADD COLUMN commission_rate INTEGER",
+    "ALTER TABLE v2_order ADD COLUMN commission_auto_check INTEGER",
+    "ALTER TABLE v2_order ADD COLUMN commission_balance INTEGER",
+    "ALTER TABLE v2_order ADD COLUMN discount_amount INTEGER",
+    "ALTER TABLE v2_order ADD COLUMN paid_at INTEGER",
+    "ALTER TABLE v2_order ADD COLUMN callback_no TEXT",
     "ALTER TABLE v2_gift_card_template ADD COLUMN description TEXT",
     "ALTER TABLE v2_gift_card_template ADD COLUMN type INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE v2_gift_card_template ADD COLUMN status INTEGER NOT NULL DEFAULT 1",
@@ -367,6 +386,7 @@ async function ensureBootstrap(env: Env) {
     "ALTER TABLE v2_gift_card_usage ADD COLUMN notes TEXT"
   ];
   for (const sql of alters) await runSqlIgnore(env, sql);
+  await runSqlIgnore(env, "UPDATE v2_order SET status = 2 WHERE status IS NULL OR CAST(status AS TEXT) NOT IN ('0','1','2','3','4')");
   await runSqlIgnore(env, "UPDATE v2_stat_user SET server_rate = COALESCE(rate, 1)");
   await runSqlIgnore(env, "CREATE INDEX IF NOT EXISTS idx_machine_load_recorded ON v2_server_machine_load_history(machine_id, recorded_at)");
   for (const sql of [
@@ -426,8 +446,8 @@ async function ensureBootstrap(env: Env) {
     await runSqlIgnore(env, "INSERT INTO v2_subscribe_templates(name, type, content, template, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?) ON CONFLICT(name) DO UPDATE SET content = CASE WHEN v2_subscribe_templates.content IS NULL OR v2_subscribe_templates.content = '' THEN excluded.content ELSE v2_subscribe_templates.content END, template = CASE WHEN v2_subscribe_templates.template IS NULL OR v2_subscribe_templates.template = '' THEN excluded.template ELSE v2_subscribe_templates.template END, enabled = 1, updated_at = excluded.updated_at", [name, name, content, content, ts, ts]);
     await runSqlIgnore(env, "INSERT INTO v2_subscribe_templates(name, content, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET content = CASE WHEN v2_subscribe_templates.content IS NULL OR v2_subscribe_templates.content = '' THEN excluded.content ELSE v2_subscribe_templates.content END, updated_at = excluded.updated_at", [name, content, ts, ts]);
   }
-  await runSqlIgnore(env, "INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES ('system_bootstrap_edge_version', 'v10', ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at", [ts, ts]);
-  await optionalKvPut(env, "bootstrap:edge:v10", String(ts));
+  await runSqlIgnore(env, "INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES ('system_bootstrap_edge_version', 'v11', ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at", [ts, ts]);
+  await optionalKvPut(env, "bootstrap:edge:v11", String(ts));
 }
 
 async function firstNumber(env: Env, sql: string, fallback = 0) {
@@ -1734,6 +1754,139 @@ async function pluginApi(request: Request, env: Env, route: string): Promise<Res
   return null;
 }
 
+const orderPeriods: Record<string, string> = {
+  month_price: "monthly", quarter_price: "quarterly", half_year_price: "half_yearly", year_price: "yearly",
+  two_year_price: "two_yearly", three_year_price: "three_yearly", onetime_price: "onetime", reset_price: "reset_traffic"
+};
+const legacyOrderPeriods = Object.fromEntries(Object.entries(orderPeriods).map(([legacy, current]) => [current, legacy]));
+
+function legacyOrderPeriod(period: unknown) {
+  const value = String(period || "");
+  return legacyOrderPeriods[value] || value;
+}
+
+async function orderRows(env: Env, input: Record<string, any>) {
+  const page = Math.max(1, Number(input.current || input.page || 1));
+  const pageSize = Math.min(100, Math.max(1, Number(input.pageSize || input.page_size || 10)));
+  const clauses: string[] = [];
+  const binds: any[] = [];
+  if (input.is_commission === true || input.is_commission === "true" || Number(input.is_commission) === 1) {
+    clauses.push("o.invite_user_id IS NOT NULL", "CAST(o.status AS INTEGER) NOT IN (0, 2)", "COALESCE(o.commission_balance, 0) > 0");
+  }
+  const allowed = new Set(["id", "user_id", "plan_id", "trade_no", "type", "period", "status", "commission_status", "total_amount", "created_at"]);
+  for (const filter of parseJsonArray(input.filter)) {
+    const field = String(filter?.id || "");
+    if (!allowed.has(field)) continue;
+    const raw = filter?.value;
+    if (Array.isArray(raw)) {
+      const values = raw.filter(value => value !== "" && value !== null && value !== undefined);
+      if (values.length) { clauses.push(`o.${field} IN (${values.map(() => "?").join(",")})`); binds.push(...values); }
+      continue;
+    }
+    const text = String(raw ?? "");
+    const match = text.match(/^(eq|gt|gte|lt|lte|like|notlike):(.*)$/i);
+    const operator = match?.[1]?.toLowerCase(); const value = match ? match[2] : text;
+    const sqlOperator = { eq: "=", gt: ">", gte: ">=", lt: "<", lte: "<=", like: "LIKE", notlike: "NOT LIKE" }[operator || ""] || "LIKE";
+    clauses.push(`o.${field} ${sqlOperator} ?`);
+    binds.push(["LIKE", "NOT LIKE"].includes(sqlOperator) ? `%${value}%` : value);
+  }
+  const sorts = parseJsonArray(input.sort);
+  const sort = sorts.find(item => allowed.has(String(item?.id || "")));
+  const orderBy = sort ? `o.${String(sort.id)} ${sort.desc ? "DESC" : "ASC"}` : "o.created_at DESC";
+  const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
+  const result = await env.XBOARD_DB.prepare(`SELECT o.*, p.name AS plan_name FROM v2_order o LEFT JOIN v2_plan p ON p.id = o.plan_id${where} ORDER BY ${orderBy} LIMIT ? OFFSET ?`)
+    .bind(...binds, pageSize, (page - 1) * pageSize).all<Record<string, any>>();
+  const total = await env.XBOARD_DB.prepare(`SELECT COUNT(*) AS count FROM v2_order o${where}`).bind(...binds).first<{ count: number }>();
+  const data = (result.results || []).map(row => ({
+    ...row,
+    status: Number(row.status), type: Number(row.type || 1), commission_status: Number(row.commission_status || 0),
+    total_amount: Number(row.total_amount || 0), period: legacyOrderPeriod(row.period),
+    plan: row.plan_id ? { id: Number(row.plan_id), name: row.plan_name || "" } : null
+  }));
+  return paginated(data, Number(total?.count || 0), page, pageSize);
+}
+
+async function orderDetail(env: Env, id: number) {
+  const row = await env.XBOARD_DB.prepare("SELECT o.*, u.email AS user_email, p.name AS plan_name, iu.email AS invite_email FROM v2_order o LEFT JOIN v2_user u ON u.id=o.user_id LEFT JOIN v2_plan p ON p.id=o.plan_id LEFT JOIN v2_user iu ON iu.id=o.invite_user_id WHERE o.id=?").bind(id).first<Record<string, any>>();
+  if (!row) return null;
+  return {
+    ...row, status: Number(row.status), type: Number(row.type || 1), commission_status: Number(row.commission_status || 0),
+    total_amount: Number(row.total_amount || 0), period: legacyOrderPeriod(row.period),
+    user: row.user_id ? { id: Number(row.user_id), email: row.user_email || "" } : null,
+    plan: row.plan_id ? { id: Number(row.plan_id), name: row.plan_name || "" } : null,
+    invite_user: row.invite_user_id ? { id: Number(row.invite_user_id), email: row.invite_email || "" } : null,
+    commission_log: [], surplus_orders: []
+  };
+}
+
+function addOrderMonths(timestamp: number, months: number) {
+  const date = new Date(timestamp * 1000);
+  date.setUTCMonth(date.getUTCMonth() + months);
+  return Math.floor(date.getTime() / 1000);
+}
+
+async function adminOrder(request: Request, env: Env, route: string): Promise<Response | null> {
+  if (!route.startsWith("/order/")) return null;
+  const input = request.method === "POST" ? await body<Record<string, any>>(request.clone()) : {} as Record<string, any>;
+  if (request.method !== "POST") new URL(request.url).searchParams.forEach((value, key) => { input[key] = value; });
+  if (route === "/order/fetch") return json(await orderRows(env, input));
+  if (route === "/order/assign") {
+    const email = String(input.email || "").trim().toLowerCase(); const planId = nullableNumber(input.plan_id);
+    const legacyPeriod = String(input.period || ""); const period = orderPeriods[legacyPeriod]; const totalAmount = Number(input.total_amount);
+    if (!email) return fail("邮箱不能为空", 422, 422);
+    if (!planId) return fail("订阅不能为空", 422, 422);
+    if (!period) return fail("订阅周期格式有误", 422, 422);
+    if (!Number.isFinite(totalAmount) || totalAmount < 0) return fail("支付金额格式有误", 422, 422);
+    const user = await env.XBOARD_DB.prepare("SELECT id, plan_id, expired_at, invite_user_id FROM v2_user WHERE email=?").bind(email).first<Record<string, any>>();
+    if (!user) return fail("该用户不存在", 400, 400202);
+    const plan = await env.XBOARD_DB.prepare("SELECT id FROM v2_plan WHERE id=?").bind(planId).first();
+    if (!plan) return fail("该订阅不存在", 400, 400202);
+    const pending = await env.XBOARD_DB.prepare("SELECT id FROM v2_order WHERE user_id=? AND CAST(status AS INTEGER)=0 LIMIT 1").bind(user.id).first();
+    if (pending) return fail("该用户还有待支付的订单，无法分配", 400, 400);
+    const orderType = period === "reset_traffic" ? 4 : user.plan_id && Number(user.plan_id) !== planId ? 3 : (Number(user.plan_id) === planId && Number(user.expired_at || 0) > now()) ? 2 : 1;
+    const tradeNo = token(16); const ts = now();
+    await env.XBOARD_DB.prepare("INSERT INTO v2_order(user_id,plan_id,period,trade_no,status,total_amount,type,commission_status,invite_user_id,created_at,updated_at) VALUES (?,?,?,?,0,?,?,0,?,?,?)")
+      .bind(user.id, planId, period, tradeNo, Math.trunc(totalAmount), orderType, user.invite_user_id || null, ts, ts).run();
+    return ok(tradeNo);
+  }
+  if (route === "/order/detail") {
+    const detail = await orderDetail(env, Number(input.id || 0));
+    return detail ? ok(detail) : fail("订单不存在", 400, 400202);
+  }
+  const tradeNo = String(input.trade_no || "");
+  const order = tradeNo ? await env.XBOARD_DB.prepare("SELECT * FROM v2_order WHERE trade_no=?").bind(tradeNo).first<Record<string, any>>() : null;
+  if (!order) return fail("订单不存在", 400, 400202);
+  if (route === "/order/update") {
+    await env.XBOARD_DB.prepare("UPDATE v2_order SET commission_status=?,updated_at=? WHERE trade_no=?").bind(Number(input.commission_status || 0), now(), tradeNo).run();
+    return ok(true);
+  }
+  if (Number(order.status) !== 0) return fail("只能对待支付的订单进行操作", 400, 400);
+  if (route === "/order/cancel") {
+    await env.XBOARD_DB.prepare("UPDATE v2_order SET status=2,updated_at=? WHERE trade_no=?").bind(now(), tradeNo).run();
+    return ok(true);
+  }
+  if (route === "/order/paid") {
+    const plan = await env.XBOARD_DB.prepare("SELECT * FROM v2_plan WHERE id=?").bind(order.plan_id).first<Record<string, any>>();
+    const user = await env.XBOARD_DB.prepare("SELECT * FROM v2_user WHERE id=?").bind(order.user_id).first<Record<string, any>>();
+    if (!plan || !user) return fail("订单关联的用户或订阅不存在", 400, 400202);
+    const period = String(order.period || ""); const ts = now();
+    if (period === "reset_traffic") {
+      await env.XBOARD_DB.prepare("UPDATE v2_user SET u=0,d=0,updated_at=? WHERE id=?").bind(ts, user.id).run();
+    } else {
+      const months: Record<string, number> = { monthly: 1, quarterly: 3, half_yearly: 6, yearly: 12, two_yearly: 24, three_yearly: 36 };
+      const expiredAt = period === "onetime" ? null : addOrderMonths(Math.max(ts, Number(user.expired_at || 0)), months[period] || 0);
+      if (period !== "onetime" && !months[period]) return fail("无效的套餐周期", 400, 400);
+      const resetTraffic = Number(order.type) !== 2;
+      await env.XBOARD_DB.prepare("UPDATE v2_user SET plan_id=?,group_id=?,transfer_enable=?,speed_limit=?,device_limit=?,expired_at=?,u=?,d=?,updated_at=? WHERE id=?")
+        .bind(plan.id, plan.group_id, Number(plan.transfer_enable || 0), plan.speed_limit ?? null, plan.device_limit ?? null, expiredAt, resetTraffic ? 0 : Number(user.u || 0), resetTraffic ? 0 : Number(user.d || 0), ts, user.id).run();
+    }
+    await env.XBOARD_DB.prepare("UPDATE v2_order SET status=3,paid_at=?,callback_no='manual_operation',updated_at=? WHERE trade_no=?").bind(ts, ts, tradeNo).run();
+    await bump(env.XBOARD_KV, `user_version:${order.user_id}`);
+    return ok(true);
+  }
+  return null;
+}
+
 async function adminApi(request: Request, env: Env, path: string) {
   const route = path.replace(/^\/api\/v2\/admin/, "");
   if (request.method === "POST" && route === "/passport/auth/login") return login(request, env, true);
@@ -1751,6 +1904,8 @@ async function adminApi(request: Request, env: Env, path: string) {
   if (themeResponse) return themeResponse;
   const pluginResponse = await pluginApi(request.clone(), env, route);
   if (pluginResponse) return pluginResponse;
+  const orderResponse = await adminOrder(request.clone(), env, route);
+  if (orderResponse) return orderResponse;
   if (path.includes("/config/fetch")) return ok(await adminConfig(env, request));
   if (path.includes("/config/save")) {
     const input = await body<Record<string, any>>(request);
@@ -2126,7 +2281,7 @@ async function adminApi(request: Request, env: Env, path: string) {
       return json(await list(env.XBOARD_DB, table, page, pageSize));
     }
   }
-  if (path.match(/order|coupon|commission|gift-card/)) return json({ data: [], total: 0, current_page: 1, per_page: 20 });
+  if (path.match(/coupon|commission|gift-card/)) return json({ data: [], total: 0, current_page: 1, per_page: 20 });
   const table = adminTableForPath(path);
   if (table) {
     const url = new URL(request.url);

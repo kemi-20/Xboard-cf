@@ -203,8 +203,23 @@ test("login sessions fall back to D1 when KV writes fail", () => {
 test("bootstrap remains available when the KV daily write limit is exhausted", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /system_bootstrap_edge_version/);
-  assert.match(source, /await optionalKvPut\(env, "bootstrap:edge:v10"/);
-  assert.doesNotMatch(source, /await env\.XBOARD_KV\.put\("bootstrap:edge:v10"/);
+  assert.match(source, /await optionalKvPut\(env, "bootstrap:edge:v11"/);
+  assert.doesNotMatch(source, /await env\.XBOARD_KV\.put\("bootstrap:edge:v11"/);
+});
+
+test("admin orders are persisted and exposed through the official route set", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  for (const route of ["fetch", "assign", "detail", "update", "cancel", "paid"]) {
+    assert.match(source, new RegExp(`route === "/order/${route}"`));
+  }
+  assert.match(source, /INSERT INTO v2_order\(user_id,plan_id,period,trade_no,status,total_amount,type,commission_status,invite_user_id,created_at,updated_at\)/);
+  assert.match(source, /SELECT o\.\*, p\.name AS plan_name FROM v2_order o LEFT JOIN v2_plan p/);
+  assert.match(source, /const orderResponse = await adminOrder/);
+  assert.match(source, /month_price: "monthly"/);
+  assert.match(source, /legacyOrderPeriods\[value\]/);
+  assert.doesNotMatch(source, /path\.match\(\/order\|coupon/);
+  assert.match(source, /ALTER TABLE v2_order ADD COLUMN plan_id/);
+  assert.match(source, /UPDATE v2_order SET status = 2 WHERE status IS NULL/);
 });
 
 test("traffic history exposes the official server_rate field", () => {
