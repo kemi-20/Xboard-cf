@@ -56,6 +56,7 @@ test("client matching and encoded formats follow upstream flags", () => {
   assert.equal(__test.clientOf(new Request("https://sub.example/s/token", { headers: { "user-agent": "Mozilla/5.0" } })), "plain");
   assert.equal(__test.clientOf(new Request("https://sub.example/s/token?flag=shadowsocks")), "shadowsocks");
   assert.equal(__test.clientOf(new Request("https://sub.example/s/token?flag=quantumult-x")), "quantumultx");
+  assert.equal(__test.clientOf(new Request("https://sub.example/s/token", { headers: { "user-agent": "mihomo/1.19" } })), "clashmeta");
   const user = { uuid: "00000000-0000-4000-8000-000000000000", u: 0, d: 0, transfer_enable: 1 };
   const server = { id: 1, type: "shadowsocks", name: "Node", host: "127.0.0.1", port: 8388, protocol_settings: { cipher: "aes-128-gcm" } };
   const quantumult = __test.output("quantumultx", {}, {}, user, [server], new Request("https://sub.example/s/token"), "token");
@@ -143,9 +144,22 @@ test("saved Clash template controls rendered subscription", () => {
 test("saved Surge template placeholders are replaced", () => {
   const rendered = __test.textTemplateProfile("surge", "$app_name\n$subs_link\n$proxies\n$proxy_group\n$subscribe_info", { app_name: "Custom Board", subscribe_url: "https://subscribe.example", subscribe_path: "custom-sub" }, { uuid: "uuid", u: 0, d: 0, transfer_enable: 1073741824, expired_at: null }, [{ type: "shadowsocks", name: "Node A", host: "127.0.0.1", port: 8388, protocol_settings: { cipher: "aes-128-gcm" } }], new Request("https://worker.example/s/token"), "token");
   assert.match(rendered, /Custom Board/);
-  assert.match(rendered, /https:\/\/subscribe\.example\/custom-sub\/token/);
+  assert.match(rendered, /https:\/\/worker\.example\/custom-sub\/token/);
   assert.match(rendered, /Node A = ss/);
   assert.doesNotMatch(rendered, /\$(app_name|subs_link|proxies|proxy_group|subscribe_info)/);
+});
+
+test("subscription URL patterns, compatibility filters and cache headers follow upstream", () => {
+  assert.match(__test.replaceByPattern("https://sub[1-3].example/[uuid]"), /^https:\/\/sub[1-3]\.example\/[0-9a-f-]{36}$/);
+  const configured = __test.subscriptionUrl(new Request("https://worker.example/s/token"), { subscribe_url: "https://one.example,https://two.example", subscribe_path: "s" }, "token");
+  assert.match(configured, /^https:\/\/(one|two)\.example\/s\/token$/);
+  const user = { uuid: "uuid", u: 0, d: 0, transfer_enable: 1 };
+  const unsupported = [{ type: "vmess", name: "Upgrade", host: "example.com", port: 443, protocol_settings: { network: "httpupgrade" } }];
+  assert.doesNotMatch(__test.output("clash", {}, { clash: "proxies: []\nproxy-groups: []\nrules: []\n" }, user, unsupported, new Request("https://sub.example/s/token"), "token"), /Upgrade/);
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /value => value\.status < 400/);
+  assert.match(source, /if-none-match/);
+  assert.match(source, /status: 304/);
 });
 
 const realityVless = {

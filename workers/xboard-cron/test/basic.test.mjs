@@ -28,4 +28,10 @@ test("cron implements the official order, ticket, commission and traffic checks"
   assert.match(source, /v2_commission_log/);
   assert.match(source, /check:traffic-exceeded/);
   assert.match(source, /XBOARD_SERVER\.fetch/);
+  assert.match(source, /const recordDay = day - 86400/);
+  assert.match(source, /FROM v2_stat_server WHERE record_at >= \? AND record_at < \?/);
+  assert.match(source, /transfer_used_total = \?/);
+  assert.match(source, /WHERE status = 0 AND created_at <= \?/);
+  assert.match(source, /WHERE status = 1 ORDER BY id ASC LIMIT 200/);
+  assert.match(source, /UPDATE v2_order SET status = 3/);
 });

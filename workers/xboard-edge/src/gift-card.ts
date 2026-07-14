@@ -482,7 +482,11 @@ export async function handleUserGiftCard(request: Request, db: D1Database, route
         reward_preview: rewards,
         ...eligibility
       });
-    } catch (error: any) { return fail(String(error?.message || "查询失败，请稍后重试"), 400, 400); }
+    } catch (error: any) {
+      if (error?.message === "兑换码不存在") return fail("兑换码不存在", 400, 400);
+      console.error("gift card check failed", error);
+      return fail("查询失败，请稍后重试", 500, 500);
+    }
   }
   if (route === "/gift-card/redeem" && request.method === "POST") {
     const input = await requestInput(request);
@@ -497,7 +501,11 @@ export async function handleUserGiftCard(request: Request, db: D1Database, route
       if (!eligibility.can_redeem) return fail(String(eligibility.reason), 400, 400);
       const result = await redeem(db, card, user, request);
       return ok({ message: "兑换成功！", ...result });
-    } catch (error: any) { return fail(String(error?.message || "兑换失败，请稍后重试"), 400, 400); }
+    } catch (error: any) {
+      if (["兑换码不存在", "兑换码已被使用或已失效"].includes(String(error?.message || ""))) return fail(String(error.message), 400, 400);
+      console.error("gift card redeem failed", error);
+      return fail("兑换失败，请稍后重试", 500, 500);
+    }
   }
   if (route === "/gift-card/history" && request.method === "GET") {
     const input = await requestInput(request);

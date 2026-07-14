@@ -121,7 +121,7 @@ function clientOf(request: Request): Client {
   if (flag.includes("shadowrocket")) return "shadowrocket";
   if (flag.includes("quantumultx") || flag.includes("quantumult x") || flag.includes("quantumult-x")) return "quantumultx";
   if (flag.includes("loon")) return "loon";
-  if (["meta", "verge", "flclash", "nekobox", "clashmetaforandroid"].some(name => flag.includes(name))) return "clashmeta";
+  if (["meta", "mihomo", "verge", "flclash", "nekobox", "clashmetaforandroid"].some(name => flag.includes(name))) return "clashmeta";
   if (flag.includes("clash")) return "clash";
   return "plain";
 }
@@ -240,7 +240,7 @@ function generalUri(user: any, server: any) {
   if (server.type === "hysteria") {
     const version = Number(ps.version || 2);
     if (version === 2) {
-      return `hysteria2://${password}@${address}:${server.port}?${query({ sni: ps.tls?.server_name, insecure: ps.tls?.allow_insecure ? "1" : "0", obfs: ps.obfs?.open ? "salamander" : undefined, "obfs-password": ps.obfs?.open ? ps.obfs?.password : undefined, mport: server.ports })}#${name}`;
+      return `hysteria2://${password}@${address}:${server.port}?${query({ sni: ps.tls?.server_name, insecure: ps.tls?.allow_insecure ? "1" : "0", obfs: ps.obfs?.open ? ps.obfs?.type || "salamander" : "none", "obfs-password": ps.obfs?.open ? ps.obfs?.password : undefined, mport: server.ports })}#${name}`;
     }
     return `hysteria://${address}:${server.port}?${query({ protocol: "udp", auth: password, sni: ps.tls?.server_name, insecure: ps.tls?.allow_insecure ? "1" : "0", upmbps: ps.bandwidth?.up, downmbps: ps.bandwidth?.down, obfs: ps.obfs?.open && ps.obfs?.password ? "xplus" : undefined, obfsParam: ps.obfs?.open ? ps.obfs?.password : undefined })}#${name}`;
   }
@@ -523,7 +523,7 @@ function quantumultXLine(user: any, server: any) {
   if (["vmess", "vless", "trojan", "socks", "http"].includes(server.type)) {
     const type = server.type === "socks" ? "socks5" : server.type;
     const parts = [`${type}=${address}:${server.port}`];
-    if (server.type === "vmess") parts.push("method=auto", `password=${password}`);
+    if (server.type === "vmess") parts.push(`method=${ps.cipher || "auto"}`, `password=${password}`);
     else if (server.type === "vless") parts.push("method=none", `password=${password}`);
     else if (["socks", "http"].includes(server.type)) parts.push(`username=${password}`, `password=${password}`);
     else parts.push(`password=${password}`);
@@ -590,8 +590,19 @@ function loonLine(user: any, server: any) {
   return parts.filter(value => value !== undefined && value !== null && value !== "").join(",") + "\r\n";
 }
 
-function subscriptionUrl(request: Request, config: Config, token: string) {
-  const configured = String(config.subscribe_url || "").split(",").map(value => value.trim()).filter(Boolean)[0];
+function replaceByPattern(value: string) {
+  return value
+    .replace(/\[(\d+)-(\d+)\]/g, (_match, left, right) => {
+      const minimum = Math.min(Number(left), Number(right));
+      const maximum = Math.max(Number(left), Number(right));
+      return String(minimum + Math.floor(Math.random() * (maximum - minimum + 1)));
+    })
+    .replaceAll("[uuid]", crypto.randomUUID());
+}
+
+function subscriptionUrl(request: Request, config: Config, token: string, requestHostOnly = false) {
+  const configuredList = requestHostOnly ? [] : String(config.subscribe_url || "").split(",").map(value => value.trim()).filter(Boolean);
+  const configured = configuredList.length ? replaceByPattern(configuredList[Math.floor(Math.random() * configuredList.length)]) : "";
   const path = String(config.subscribe_path || "s").replace(/^\/+|\/+$/g, "") || "s";
   if (!configured) return `${new URL(request.url).origin}/${path}/${token}`;
   return `${configured.replace(/\/$/, "")}/${path}/${token}`;
@@ -608,7 +619,7 @@ function textTemplateProfile(client: "surge" | "surfboard", template: string, co
   const proxies = servers.map(server => proxyLine(user, server, client)).join("");
   const names = servers.map(server => server.name).join(", ");
   return String(template || "")
-    .replaceAll("$subs_link", subscriptionUrl(request, config, token))
+    .replaceAll("$subs_link", subscriptionUrl(request, config, token, client === "surge"))
     .replaceAll("$subs_domain", new URL(request.url).hostname)
     .replaceAll("$proxies", proxies)
     .replaceAll("$proxy_group", names)
@@ -628,6 +639,8 @@ async function templates(env: Env) {
 
 function output(client: Client, config: Config, templateMap: Config, user: any, servers: any[], request: Request, token: string) {
   servers = servers.filter(server => allowedProtocols[client].has(server.type));
+  if (client === "clash") servers = servers.filter(server => !["httpupgrade", "xhttp"].includes(String(server.protocol_settings?.network || "")));
+  if (client === "singbox") servers = servers.filter(server => !(server.type === "vless" && server.protocol_settings?.network === "h2"));
   if (["clash", "clashmeta", "stash"].includes(client)) return yamlProfile(client, String(templateMap[client] || templateMap.clash || ""), config, user, servers, request);
   if (client === "singbox") return singboxProfile(String(templateMap.singbox || ""), user, servers);
   if (client === "shadowsocks") return shadowsocksProfile(user, servers);
@@ -714,7 +727,12 @@ async function build(request: Request, env: Env, token: string) {
   return { status: 200, body, headers: responseHeaders(client, config, user) };
 }
 
-export const __test = { clientOf, decorateServers, general, generalUri, yamlProfile, clashProxy, singboxOutbound, singboxProfile, shadowsocksProfile, textTemplateProfile, proxyLine, shadowrocketLine, quantumultXLine, loonLine, serverPassword, randomizedPort, output, responseHeaders };
+async function bodyEtag(body: string) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body));
+  return `"${Array.from(new Uint8Array(digest)).map(value => value.toString(16).padStart(2, "0")).join("")}"`;
+}
+
+export const __test = { clientOf, decorateServers, general, generalUri, yamlProfile, clashProxy, singboxOutbound, singboxProfile, shadowsocksProfile, textTemplateProfile, proxyLine, shadowrocketLine, quantumultXLine, loonLine, serverPassword, randomizedPort, replaceByPattern, subscriptionUrl, output, responseHeaders };
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -733,7 +751,11 @@ export default {
     const client = clientOf(request);
     const variant = b64url(`${url.searchParams.get("types") || "all"}|${url.searchParams.get("filter") || ""}|${url.hostname}`);
     const cacheKey = `subscribe:v3:${token}:${client}:${variant}:${settingsVersion}:${serversVersion}:${templatesVersion}:${userVersion}`;
-    const result = await cached(env.XBOARD_KV, cacheKey, 60, () => build(request, env, token));
-    return new Response(result.body, { status: result.status, headers: result.headers as HeadersInit });
+    const result = await cached(env.XBOARD_KV, cacheKey, 60, () => build(request, env, token), value => value.status < 400);
+    const etag = await bodyEtag(result.body);
+    const headers = new Headers(result.headers as HeadersInit);
+    headers.set("etag", etag);
+    if ((request.headers.get("if-none-match") || "").split(",").map(value => value.trim()).includes(etag)) return new Response(null, { status: 304, headers });
+    return new Response(result.body, { status: result.status, headers });
   }
 };

@@ -30,8 +30,11 @@ async function resolveMailContent(env: Env, payload: any) {
   const template = row || defaults[name] || defaults.notify;
   const vars = payload.vars || {};
   const subject = render(String(template.subject || ""), vars) || render(String(payload.subject || ""), vars);
-  const text = row || (!payload.html && !payload.text) ? render(String(template.content), vars) : render(String(payload.text || ""), vars);
-  const html = row || (!payload.html && !payload.text)
+  const renderedContent = render(String(template.content), vars);
+  const text = row || (!payload.html && !payload.text) ? renderedContent : render(String(payload.text || ""), vars);
+  const html = row
+    ? renderedContent
+    : (!payload.html && !payload.text)
     ? `<div style="font-family:Arial,sans-serif;white-space:pre-wrap;line-height:1.6">${text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")}</div>`
     : payload.html ? render(String(payload.html), vars) : undefined;
   return { ...payload, subject, text: text || undefined, html };
@@ -92,7 +95,7 @@ async function traffic(env: Env, event: any) {
     userD += d;
     const ts = now();
     await runOnce(env, `${event.event_id}:user:${uid}`, "traffic:user", row, [
-      env.XBOARD_DB.prepare("UPDATE v2_user SET u = u + ?, d = d + ?, updated_at = ? WHERE id = ?").bind(u, d, ts, uid),
+      env.XBOARD_DB.prepare("UPDATE v2_user SET u = u + ?, d = d + ?, t = ?, updated_at = ? WHERE id = ?").bind(u, d, ts, ts, uid),
       env.XBOARD_DB.prepare("INSERT INTO v2_stat_user(user_id, server_id, server_type, u, d, rate, server_rate, record_type, record_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'd', ?, ?, ?) ON CONFLICT(user_id, server_id, server_type, record_at) DO UPDATE SET u = u + excluded.u, d = d + excluded.d, rate = excluded.rate, server_rate = excluded.server_rate, updated_at = excluded.updated_at")
         .bind(uid, event.server_id || 0, event.server_type || "unknown", u, d, rate, rate, recordAt, ts, ts)
     ]);

@@ -20,6 +20,7 @@ test("traffic statistics persist the official server_rate field", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /server_rate, record_type/);
   assert.match(source, /server_rate = excluded\.server_rate/);
+  assert.match(source, /SET u = u \+ \?, d = d \+ \?, t = \?, updated_at = \?/);
 });
 
 test("mail templates override fallbacks and Resend credentials stay protocol-specific", () => {
@@ -28,4 +29,5 @@ test("mail templates override fallbacks and Resend credentials stay protocol-spe
   assert.match(source, /render\(String\(template\.subject \|\| ""\), vars\) \|\| render\(String\(payload\.subject \|\| ""\), vars\)/);
   assert.doesNotMatch(source, /setting\(env, "email_password"\)/);
   assert.match(source, /replace\(\/\[<>\]\/g, ""\)/);
+  assert.match(source, /const html = row[\s\S]*?\? renderedContent/);
 });

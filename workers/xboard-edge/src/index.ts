@@ -208,7 +208,14 @@ async function nodeSyncIntent(request: Request, pathname: string, env: Env): Pro
 
 function shouldNotifyNodeSync(pathname: string, method: string) {
   if (method !== "POST" && method !== "DELETE") return false;
-  return ["/server/", "/user/", "/plan/", "/route/", "/group/"].some(part => pathname.includes(part));
+  return [
+    "/server/manage/save", "/server/manage/update", "/server/manage/drop", "/server/manage/sort",
+    "/server/route/save", "/server/route/drop", "/server/route/sort",
+    "/server/group/save", "/server/group/drop",
+    "/server/machine/save", "/server/machine/update", "/server/machine/drop",
+    "/user/update", "/user/destroy", "/user/ban", "/user/resetSecret", "/user/generate",
+    "/plan/save", "/plan/drop"
+  ].some(suffix => pathname.endsWith(suffix));
 }
 
 async function runSqlIgnore(env: Env, sql: string, binds: any[] = []) {
@@ -308,12 +315,12 @@ FINAL,Proxy
 };
 
 async function ensureBootstrap(env: Env) {
-  const marker = await optionalKvGet(env, "bootstrap:edge:v17");
+  const marker = await optionalKvGet(env, "bootstrap:edge:v18");
   if (marker) return;
   try {
     const persisted = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = 'system_bootstrap_edge_version'").first<{ value: string }>();
-    if (persisted?.value === "v17") {
-      await optionalKvPut(env, "bootstrap:edge:v17", String(now()));
+    if (persisted?.value === "v18") {
+      await optionalKvPut(env, "bootstrap:edge:v18", String(now()));
       return;
     }
   } catch {
@@ -475,6 +482,28 @@ async function ensureBootstrap(env: Env) {
     "CREATE INDEX IF NOT EXISTS idx_notice_sort ON v2_notice(sort)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_server_type_code ON v2_server(type, code) WHERE code IS NOT NULL AND code != ''"
   ]) await runSqlIgnore(env, sql);
+  for (const sql of [
+    "CREATE INDEX IF NOT EXISTS idx_v2_order_created_at ON v2_order(created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_v2_order_status ON v2_order(status)",
+    "CREATE INDEX IF NOT EXISTS idx_v2_order_total_amount ON v2_order(total_amount)",
+    "CREATE INDEX IF NOT EXISTS idx_v2_order_commission_status ON v2_order(commission_status)",
+    "CREATE INDEX IF NOT EXISTS idx_v2_order_invite_user_id ON v2_order(invite_user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_v2_order_commission_balance ON v2_order(commission_balance)",
+    "CREATE INDEX IF NOT EXISTS idx_v2_order_updated_at ON v2_order(updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_v2_commission_user ON v2_commission_log(user_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_v2_commission_order ON v2_commission_log(order_id)",
+    "CREATE INDEX IF NOT EXISTS idx_v2_ticket_status ON v2_ticket(status)",
+    "CREATE INDEX IF NOT EXISTS idx_v2_ticket_created_at ON v2_ticket(created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_v2_stat_server_server ON v2_stat_server(server_id, record_at)",
+    "CREATE INDEX IF NOT EXISTS idx_v2_stat_server_upload ON v2_stat_server(u)",
+    "CREATE INDEX IF NOT EXISTS idx_v2_stat_server_download ON v2_stat_server(d)",
+    "CREATE INDEX IF NOT EXISTS idx_v2_user_availability ON v2_user(banned, expired_at, group_id, transfer_enable, u, d)",
+    "CREATE INDEX IF NOT EXISTS idx_v2_user_t ON v2_user(t)",
+    "CREATE INDEX IF NOT EXISTS idx_v2_user_online_count ON v2_user(online_count)",
+    "CREATE INDEX IF NOT EXISTS idx_v2_user_created_at ON v2_user(created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_v2_server_sort ON v2_server(sort)",
+    "CREATE INDEX IF NOT EXISTS idx_v2_stat_user_record_user ON v2_stat_user(record_at, user_id)"
+  ]) await runSqlIgnore(env, sql);
   await runSqlIgnore(env, "UPDATE v2_gift_card_code SET status = 3 WHERE status = 'disabled'");
   for (const sql of [
     "CREATE TABLE IF NOT EXISTS v2_invite_code (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, code TEXT NOT NULL UNIQUE, status INTEGER NOT NULL DEFAULT 0, pv INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)",
@@ -560,8 +589,8 @@ async function ensureBootstrap(env: Env) {
     }
     await runSqlIgnore(env, "UPDATE v2_user SET transfer_enable = transfer_enable * 1073741824, updated_at = ? WHERE plan_id IS NOT NULL AND transfer_enable > 0 AND EXISTS (SELECT 1 FROM v2_plan WHERE v2_plan.id = v2_user.plan_id AND v2_plan.transfer_enable = v2_user.transfer_enable)", [ts]);
   }
-  await runSqlIgnore(env, "INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES ('system_bootstrap_edge_version', 'v17', ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at", [ts, ts]);
-  await optionalKvPut(env, "bootstrap:edge:v17", String(ts));
+  await runSqlIgnore(env, "INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES ('system_bootstrap_edge_version', 'v18', ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at", [ts, ts]);
+  await optionalKvPut(env, "bootstrap:edge:v18", String(ts));
 }
 
 async function firstNumber(env: Env, sql: string, fallback = 0) {
@@ -1473,7 +1502,8 @@ async function saveServer(request: Request, env: Env) {
       }
       saved = true;
     } catch (fallbackError: any) {
-      return fail(`保存服务器失败: ${fallbackError?.message || error?.message || "D1 写入失败"}`, 500, 500);
+      console.error("saveServer failed", { error: error?.message, fallback: fallbackError?.message });
+      return fail("保存服务器失败，请检查字段后重试", 500, 500);
     }
   }
   if (!saved) return fail("保存服务器失败: D1 写入未完成", 500, 500);
@@ -2691,6 +2721,11 @@ async function adminApi(request: Request, env: Env, path: string) {
     const allowedKeys = ["email", "password", "transfer_enable", "expired_at", "banned", "plan_id", "commission_rate", "discount", "is_admin", "is_staff", "u", "d", "balance", "commission_type", "commission_balance", "remarks", "speed_limit", "device_limit"];
     const values: Record<string, any> = {};
     for (const key of allowedKeys) if (input[key] !== undefined) values[key] = input[key];
+    const numericKeys = ["transfer_enable", "u", "d", "balance", "commission_balance", "commission_rate", "discount", "speed_limit", "device_limit", "plan_id", "expired_at"];
+    for (const key of numericKeys) {
+      const value = values[key];
+      if (value !== undefined && value !== null && value !== "" && !Number.isFinite(Number(value))) return fail(`${key} 必须是数字`, 422, 422);
+    }
     if (values.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(values.email))) return fail("邮箱格式不正确", 422, 422);
     if (values.email) {
       const duplicate = await env.XBOARD_DB.prepare("SELECT id FROM v2_user WHERE email = ? AND id != ?").bind(String(values.email).trim().toLowerCase(), id).first();
@@ -2950,8 +2985,9 @@ async function userApi(request: Request, env: Env, path: string) {
     const codes = await env.XBOARD_DB.prepare("SELECT id, code, status, pv, created_at, updated_at FROM v2_invite_code WHERE user_id = ? AND status = 0 ORDER BY id DESC").bind((user as any).id).all();
     const invited = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE invite_user_id = ${Number((user as any).id)}`);
     const commission = await firstNumber(env, `SELECT COALESCE(SUM(amount), 0) AS c FROM v2_commission_log WHERE user_id = ${Number((user as any).id)}`);
+    const pendingCommission = await firstNumber(env, `SELECT COALESCE(SUM(commission_balance), 0) AS c FROM v2_order WHERE status = 3 AND commission_status = 0 AND invite_user_id = ${Number((user as any).id)}`);
     const rate = Number((user as any).commission_rate || pickSetting(all, "invite_commission", 10));
-    return ok({ codes: codes.results || [], stat: [invited, commission, 0, rate, Number((user as any).commission_balance || 0)] });
+    return ok({ codes: codes.results || [], stat: [invited, commission, pendingCommission, rate, Number((user as any).commission_balance || 0)] });
   }
   if (request.method === "GET" && route === "/invite/details") {
     const result = await env.XBOARD_DB.prepare("SELECT * FROM v2_commission_log WHERE user_id = ? ORDER BY id DESC LIMIT 100").bind((user as any).id).all();

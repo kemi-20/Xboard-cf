@@ -214,7 +214,7 @@ test("login sessions fall back to D1 when KV writes fail", () => {
 test("bootstrap remains available when the KV daily write limit is exhausted", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /system_bootstrap_edge_version/);
-  assert.match(source, /await optionalKvPut\(env, "bootstrap:edge:v17"/);
+  assert.match(source, /await optionalKvPut\(env, "bootstrap:edge:v18"/);
   assert.doesNotMatch(source, /await env\.XBOARD_KV\.put\("bootstrap:edge:v12"/);
 });
 
@@ -317,6 +317,15 @@ test("migration does not import or export application log records", () => {
   assert.match(fs.readFileSync("../../schema/d1.sql", "utf8"), /CREATE TABLE IF NOT EXISTS v2_log/);
 });
 
+test("bootstrap creates the upstream performance indexes on existing D1 databases", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const schema = fs.readFileSync("../../schema/d1.sql", "utf8");
+  for (const index of ["idx_v2_order_created_at", "idx_v2_order_status", "idx_v2_commission_user", "idx_v2_ticket_status", "idx_v2_stat_server_server", "idx_v2_user_availability", "idx_v2_server_sort", "idx_v2_stat_user_record_user"]) {
+    assert.match(source, new RegExp(index));
+    assert.match(schema, new RegExp(index));
+  }
+});
+
 test("migration export restores original SQLite value representations", () => {
   const source = fs.readFileSync("src/migration.ts", "utf8");
   assert.match(source, /name === "system_bootstrap_edge_version"/);
@@ -366,6 +375,17 @@ test("node metrics fall back to D1 when KV writes are unavailable", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /parseKvObject\(kvMetrics\) \|\| parseKvObject\(server\.metrics\)/);
   assert.match(source, /ALTER TABLE v2_server ADD COLUMN metrics TEXT/);
+});
+
+test("node sync and error handling avoid unrelated work and SQL disclosure", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const giftCards = fs.readFileSync("src/gift-card.ts", "utf8");
+  assert.match(source, /pathname\.endsWith\(suffix\)/);
+  assert.doesNotMatch(source.slice(source.indexOf("function shouldNotifyNodeSync"), source.indexOf("async function runSqlIgnore")), /pathname\.includes\(part\)/);
+  assert.match(source, /pendingCommission[\s\S]*SUM\(commission_balance\)/);
+  assert.match(source, /保存服务器失败，请检查字段后重试/);
+  assert.doesNotMatch(source, /保存服务器失败: \$\{fallbackError/);
+  assert.match(giftCards, /gift card redeem failed/);
 });
 
 test("gift card APIs implement the official admin and user route set", () => {
@@ -453,4 +473,10 @@ test("user deletion removes ticket messages in the same D1 batch", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /DELETE FROM v2_ticket_message WHERE ticket_id IN \(SELECT id FROM v2_ticket WHERE user_id = \?\)/);
   assert.doesNotMatch(source, /for \(const ticket of ticketIds\.results/);
+});
+
+test("admin user updates reject non-numeric numeric fields", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /const numericKeys = \["transfer_enable"/);
+  assert.match(source, /Number\.isFinite\(Number\(value\)\)/);
 });

@@ -157,14 +157,18 @@ async function resetTraffic(env: Env, ts: number) {
 }
 
 async function statistics(env: Env, ts: number, day: number) {
+  const recordDay = day - 86400;
   const last = await optionalKvGet(env, "schedule:last_run:xboard:statistics");
   if (last && dayStart(Number(last)) >= day) return;
-  const totals = await env.XBOARD_DB.prepare("SELECT COUNT(*) AS user_count, COALESCE(SUM(u + d), 0) AS transfer_used FROM v2_user").first<any>();
-  const existing = await env.XBOARD_DB.prepare("SELECT id FROM v2_stat WHERE record_at = ? ORDER BY id ASC LIMIT 1").bind(day).first<any>();
+  const users = await env.XBOARD_DB.prepare("SELECT COUNT(*) AS user_count FROM v2_user").first<any>();
+  const traffic = await env.XBOARD_DB.prepare("SELECT COALESCE(SUM(u + d), 0) AS transfer_used FROM v2_stat_server WHERE record_at >= ? AND record_at < ?").bind(recordDay, day).first<any>();
+  const userCount = Number(users?.user_count || 0);
+  const transferUsed = Number(traffic?.transfer_used || 0);
+  const existing = await env.XBOARD_DB.prepare("SELECT id FROM v2_stat WHERE record_at = ? ORDER BY id ASC LIMIT 1").bind(recordDay).first<any>();
   if (existing) {
-    await env.XBOARD_DB.prepare("UPDATE v2_stat SET user_count = ?, transfer_used = ?, updated_at = ? WHERE id = ?").bind(Number(totals?.user_count || 0), Number(totals?.transfer_used || 0), ts, existing.id).run();
+    await env.XBOARD_DB.prepare("UPDATE v2_stat SET user_count = ?, transfer_used = ?, transfer_used_total = ?, record_type = 'd', updated_at = ? WHERE id = ?").bind(userCount, transferUsed, transferUsed, ts, existing.id).run();
   } else {
-    await env.XBOARD_DB.prepare("INSERT INTO v2_stat(record_at, user_count, order_count, transfer_used, created_at, updated_at) VALUES (?, ?, 0, ?, ?, ?)").bind(day, Number(totals?.user_count || 0), Number(totals?.transfer_used || 0), ts, ts).run();
+    await env.XBOARD_DB.prepare("INSERT INTO v2_stat(record_at, record_type, user_count, order_count, transfer_used, transfer_used_total, created_at, updated_at) VALUES (?, 'd', ?, 0, ?, ?, ?, ?)").bind(recordDay, userCount, transferUsed, transferUsed, ts, ts).run();
   }
   await optionalKvPut(env, "schedule:last_run:xboard:statistics", String(ts));
 }
@@ -183,9 +187,64 @@ async function checkTickets(env: Env, ts: number) {
     .bind(ts, ts - 86400).run();
 }
 
+function addOrderMonths(timestamp: number, months: number) {
+  const date = new Date(timestamp * 1000);
+  date.setUTCMonth(date.getUTCMonth() + months);
+  return Math.floor(date.getTime() / 1000);
+}
+
+async function openProcessingOrder(env: Env, order: Record<string, any>, ts: number) {
+  const plan = await env.XBOARD_DB.prepare("SELECT * FROM v2_plan WHERE id = ?").bind(order.plan_id).first<Record<string, any>>();
+  const user = await env.XBOARD_DB.prepare("SELECT * FROM v2_user WHERE id = ?").bind(order.user_id).first<Record<string, any>>();
+  if (!plan || !user) throw new Error(`Order ${order.trade_no} references a missing user or plan`);
+
+  const period = String(order.period || "");
+  const statements = [];
+  if (order.surplus_order_ids) {
+    let ids: number[] = [];
+    try { ids = JSON.parse(String(order.surplus_order_ids)).map(Number).filter(Boolean); } catch {}
+    if (ids.length) statements.push(env.XBOARD_DB.prepare(`UPDATE v2_order SET status = 4, updated_at = ? WHERE id IN (${ids.map(() => "?").join(",")})`).bind(ts, ...ids));
+  }
+
+  const balance = Number(user.balance || 0) + Number(order.surplus_credit || 0);
+  if (period === "reset_traffic") {
+    statements.push(env.XBOARD_DB.prepare("UPDATE v2_user SET u = 0, d = 0, balance = ?, updated_at = ? WHERE id = ?").bind(balance, ts, user.id));
+  } else {
+    const transferEnable = Number(plan.transfer_enable || 0) * 1073741824;
+    const resetTraffic = period === "onetime" || user.expired_at == null || Number(order.type) === 1;
+    let expiredAt: number | null = null;
+    if (period !== "onetime") {
+      const months: Record<string, number> = { monthly: 1, quarterly: 3, half_yearly: 6, yearly: 12, two_yearly: 24, three_yearly: 36 };
+      if (!months[period]) throw new Error(`Order ${order.trade_no} has unsupported period ${period}`);
+      const base = Number(order.type) === 3 ? ts : Math.max(ts, Number(user.expired_at || 0));
+      expiredAt = addOrderMonths(base, months[period]);
+    }
+    statements.push(env.XBOARD_DB.prepare(`UPDATE v2_user SET plan_id = ?, group_id = ?, transfer_enable = ?, speed_limit = ?, device_limit = ?, expired_at = ?, u = ?, d = ?, balance = ?, updated_at = ? WHERE id = ?`)
+      .bind(plan.id, plan.group_id, transferEnable, plan.speed_limit ?? null, plan.device_limit ?? null, expiredAt, resetTraffic ? 0 : Number(user.u || 0), resetTraffic ? 0 : Number(user.d || 0), balance, ts, user.id));
+  }
+  statements.push(env.XBOARD_DB.prepare("UPDATE v2_order SET status = 3, updated_at = ? WHERE id = ? AND status = 1").bind(ts, order.id));
+  await env.XBOARD_DB.batch(statements);
+  await optionalKvPut(env, `user_version:${user.id}`, String(ts));
+  const syncToken = await setting(env, "internal_sync_token", await setting(env, "server_token"));
+  if (syncToken) {
+    try {
+      await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/sync", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-xboard-internal-token": syncToken },
+        body: JSON.stringify({ scope: "user", user_id: Number(user.id) })
+      });
+    } catch {}
+  }
+}
+
 async function checkOrders(env: Env, ts: number) {
   await env.XBOARD_DB.prepare("UPDATE v2_order SET status = 2, updated_at = ? WHERE status = 0 AND created_at <= ?")
     .bind(ts, ts - 7200).run();
+  const processing = await env.XBOARD_DB.prepare("SELECT * FROM v2_order WHERE status = 1 ORDER BY id ASC LIMIT 200").all<Record<string, any>>();
+  for (const order of processing.results || []) {
+    try { await openProcessingOrder(env, order, ts); }
+    catch (error) { console.error("Failed to open processing order", { trade_no: order.trade_no, error }); }
+  }
 }
 
 async function checkTrafficExceeded(env: Env) {

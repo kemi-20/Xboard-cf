@@ -202,6 +202,14 @@ async function optionalKvPut(env: Env, key: string, value: string, options?: { e
   try { await env.XBOARD_KV.put(key, value, options); } catch { /* D1 and live reports remain authoritative. */ }
 }
 
+async function optionalKvGet(env: Env, key: string) {
+  try { return await env.XBOARD_KV.get(key); } catch { return null; }
+}
+
+async function optionalKvDelete(env: Env, key: string) {
+  try { await env.XBOARD_KV.delete(key); } catch { /* KV device state is ephemeral. */ }
+}
+
 function currentRate(node: Row) {
   const parsedFallback = Number(node.rate);
   const fallback = Number.isFinite(parsedFallback) ? parsedFallback : 1;
@@ -234,11 +242,11 @@ async function updateUserDeviceIndex(env: Env, nodeId: number, previous: Row, ne
   const userIds = new Set([...Object.keys(previous), ...Object.keys(next)]);
   for (const userId of userIds) {
     const key = `user:devices:${userId}`;
-    const aggregate = parseJson<Row>(await env.XBOARD_KV.get(key), {});
-    if (Array.isArray(next[userId])) aggregate[String(nodeId)] = next[userId];
+    const aggregate = parseJson<Row>(await optionalKvGet(env, key), {});
+    if (next[userId] && typeof next[userId] === "object") aggregate[String(nodeId)] = next[userId];
     else delete aggregate[String(nodeId)];
-    if (Object.keys(aggregate).length) await env.XBOARD_KV.put(key, JSON.stringify(aggregate), { expirationTtl: 300 });
-    else await env.XBOARD_KV.delete(key);
+    if (Object.keys(aggregate).length) await optionalKvPut(env, key, JSON.stringify(aggregate), { expirationTtl: 600 });
+    else await optionalKvDelete(env, key);
   }
 }
 
@@ -253,32 +261,61 @@ function normalizeDeviceIp(value: unknown) {
 async function processAlive(env: Env, nodeId: number, data: unknown) {
   if (!data || typeof data !== "object") return false;
   const key = `node:devices:${nodeId}`;
-  const previous = parseJson<Row>(await env.XBOARD_KV.get(key), {});
+  const previous = parseJson<Row>(await optionalKvGet(env, key), {});
   const next: Row = {};
+  const timestamp = now();
   for (const [userId, ips] of Object.entries(data as Row)) {
-    if (/^\d+$/.test(userId) && Array.isArray(ips)) next[userId] = Array.from(new Set(ips.map(normalizeDeviceIp).filter(Boolean)));
+    if (/^\d+$/.test(userId) && Array.isArray(ips)) {
+      next[userId] = Object.fromEntries(Array.from(new Set(ips.map(normalizeDeviceIp).filter(Boolean))).map(ip => [ip, timestamp]));
+    }
   }
   await updateUserDeviceIndex(env, nodeId, previous, next);
-  await env.XBOARD_KV.put(key, JSON.stringify(next), { expirationTtl: 300 });
+  await optionalKvPut(env, key, JSON.stringify(next), { expirationTtl: 600 });
   const affected = new Set([...Object.keys(previous), ...Object.keys(next)]);
+  const statements = [];
   for (const userId of affected) {
-    const nodes = parseJson<Row>(await env.XBOARD_KV.get(`user:devices:${userId}`), {});
-    const count = new Set(Object.values(nodes).flatMap(value => Array.isArray(value) ? value.map(normalizeDeviceIp).filter(Boolean) : [])).size;
-    await env.XBOARD_DB.prepare("UPDATE v2_user SET online_count = ?, last_online_at = ?, updated_at = ? WHERE id = ?")
-      .bind(count, now(), now(), Number(userId)).run();
+    const nodes = parseJson<Row>(await optionalKvGet(env, `user:devices:${userId}`), {});
+    const ips = new Set<string>();
+    for (const value of Object.values(nodes)) {
+      if (Array.isArray(value)) for (const ip of value) ips.add(normalizeDeviceIp(ip));
+      else if (value && typeof value === "object") for (const [ip, seenAt] of Object.entries(value)) if (Number(seenAt) >= timestamp - 300) ips.add(normalizeDeviceIp(ip));
+    }
+    statements.push(env.XBOARD_DB.prepare("UPDATE v2_user SET online_count = ?, last_online_at = ?, updated_at = ? WHERE id = ?").bind(ips.size, ips.size ? timestamp : null, timestamp, Number(userId)));
   }
+  if (statements.length) await env.XBOARD_DB.batch(statements);
   return true;
 }
 
 async function aggregateDevices(env: Env, users: Row[]) {
   const output: Row = {};
+  const cutoff = now() - 300;
   for (const user of users) {
     if (Number(user.device_limit || 0) <= 0) continue;
-    const nodes = parseJson<Row>(await env.XBOARD_KV.get(`user:devices:${user.id}`), {});
-    const count = new Set(Object.values(nodes).flatMap(value => Array.isArray(value) ? value.map(normalizeDeviceIp).filter(Boolean) : [])).size;
-    if (count > 0) output[String(user.id)] = count;
+    const nodes = parseJson<Row>(await optionalKvGet(env, `user:devices:${user.id}`), {});
+    const ips = new Set<string>();
+    for (const value of Object.values(nodes)) {
+      if (Array.isArray(value)) for (const ip of value) ips.add(normalizeDeviceIp(ip));
+      else if (value && typeof value === "object") for (const [ip, seenAt] of Object.entries(value)) if (Number(seenAt) >= cutoff) ips.add(normalizeDeviceIp(ip));
+    }
+    if (ips.size > 0) output[String(user.id)] = [...ips];
   }
   return output;
+}
+
+async function clearNodeDevices(env: Env, nodeId: number) {
+  const key = `node:devices:${nodeId}`;
+  const previous = parseJson<Row>(await optionalKvGet(env, key), {});
+  if (Object.keys(previous).length) await updateUserDeviceIndex(env, nodeId, previous, {});
+  await optionalKvDelete(env, key);
+  if (Object.keys(previous).length) {
+    const timestamp = now();
+    const statements = [];
+    for (const userId of Object.keys(previous)) {
+      const devices = await aggregateDevices(env, [{ id: Number(userId), device_limit: 1 }]);
+      statements.push(env.XBOARD_DB.prepare("UPDATE v2_user SET online_count = ?, last_online_at = ?, updated_at = ? WHERE id = ?").bind(Array.isArray(devices[userId]) ? devices[userId].length : 0, Array.isArray(devices[userId]) && devices[userId].length ? timestamp : null, timestamp, Number(userId)));
+    }
+    if (statements.length) await env.XBOARD_DB.batch(statements);
+  }
 }
 
 async function processStatus(env: Env, node: Row, status: unknown) {
@@ -422,7 +459,8 @@ async function saveMachineStatus(env: Env, machine: Row, input: Row) {
 }
 
 async function internalToken(env: Env) {
-  return setting(env, "internal_sync_token", await setting(env, "server_token"));
+  const value = await setting(env, "internal_sync_token", await setting(env, "server_token"));
+  return String(value || "").trim() || null;
 }
 
 async function pushDo(env: Env, name: string, event: string, data: Row) {
@@ -437,7 +475,7 @@ async function disconnectDo(env: Env, name: string) {
 }
 
 async function nodePushTarget(env: Env, node: Row) {
-  return await env.XBOARD_KV.get(`node:ws:target:${node.id}`)
+  return await optionalKvGet(env, `node:ws:target:${node.id}`)
     || (Number(node.machine_id) > 0 ? `machine:${node.machine_id}` : `node:${node.id}`);
 }
 
@@ -451,6 +489,7 @@ function websocketError(message: string) {
 }
 
 async function syncNode(env: Env, node: Row) {
+  if (!Number(node.enabled ?? 1)) return;
   const target = await nodePushTarget(env, node);
   const suffix = target.startsWith("machine:") ? { node_id: Number(node.id) } : {};
   await pushDo(env, target, "sync.config", { config: await nodeConfig(env, node), ...suffix });
@@ -600,6 +639,7 @@ export class NodeHub {
       server.send(wsMessage("auth.success", { machine_id: Number(machine.id), node_ids: identity.node_ids }));
       await this.env.XBOARD_DB.prepare("UPDATE v2_server_machine SET last_seen_at = ?, updated_at = ? WHERE id = ?").bind(now(), now(), machine.id).run();
       for (const node of nodes) {
+        await clearNodeDevices(this.env, Number(node.id));
         await this.env.XBOARD_KV.put(`node:ws:target:${node.id}`, `machine:${machine.id}`, { expirationTtl: 86400 });
         await this.env.XBOARD_KV.put(`node:ws:alive:${node.id}`, "1", { expirationTtl: 86400 });
         await this.fullSync(server, node, true);
@@ -617,6 +657,7 @@ export class NodeHub {
       this.accept(server, [`node:${node.id}`]);
       (server as any).serializeAttachment?.(identity);
       server.send(wsMessage("auth.success", { node_id: Number(node.id) }));
+      await clearNodeDevices(this.env, Number(node.id));
       await this.env.XBOARD_KV.put(`node:ws:target:${node.id}`, `node:${node.id}`, { expirationTtl: 86400 });
       await this.env.XBOARD_KV.put(`node:ws:alive:${node.id}`, "1", { expirationTtl: 86400 });
       await this.fullSync(server, node, false);
@@ -633,7 +674,11 @@ export class NodeHub {
     const data = input.data && typeof input.data === "object" ? input.data as Row : {};
     const nodeIds: number[] = Array.isArray(identity.node_ids) ? identity.node_ids.map(Number) : [];
     if (event === "pong") {
-      for (const nodeId of nodeIds) await this.env.XBOARD_KV.put(`node:ws:alive:${nodeId}`, "1", { expirationTtl: 86400 });
+      for (const nodeId of nodeIds) {
+        const target = identity.mode === "machine" ? `machine:${identity.machine_id}` : `node:${nodeId}`;
+        await optionalKvPut(this.env, `node:ws:alive:${nodeId}`, "1", { expirationTtl: 86400 });
+        await optionalKvPut(this.env, `node:ws:target:${nodeId}`, target, { expirationTtl: 86400 });
+      }
       return;
     }
     const nodeId = identity.mode === "machine" ? Number(data.node_id) : Number(identity.node_id);
@@ -658,12 +703,10 @@ export class NodeHub {
     const nodeIds: number[] = Array.isArray(identity.node_ids) ? identity.node_ids.map(Number) : [];
     for (const nodeId of nodeIds) {
       const expectedTarget = identity.mode === "machine" ? `machine:${identity.machine_id}` : `node:${nodeId}`;
-      if (await this.env.XBOARD_KV.get(`node:ws:target:${nodeId}`) !== expectedTarget) continue;
-      await this.env.XBOARD_KV.delete(`node:ws:target:${nodeId}`);
-      await this.env.XBOARD_KV.delete(`node:ws:alive:${nodeId}`);
-      const previous = parseJson<Row>(await this.env.XBOARD_KV.get(`node:devices:${nodeId}`), {});
-      await updateUserDeviceIndex(this.env, nodeId, previous, {});
-      await this.env.XBOARD_KV.delete(`node:devices:${nodeId}`);
+      if (await optionalKvGet(this.env, `node:ws:target:${nodeId}`) !== expectedTarget) continue;
+      await optionalKvDelete(this.env, `node:ws:target:${nodeId}`);
+      await optionalKvDelete(this.env, `node:ws:alive:${nodeId}`);
+      await clearNodeDevices(this.env, nodeId);
     }
   }
 
@@ -770,7 +813,9 @@ export default {
       return env.NODE_HUB.get(env.NODE_HUB.idFromName(name)).fetch(request);
     }
     if (url.pathname === "/internal/sync" && request.method === "POST") {
-      if (request.headers.get("x-xboard-internal-token") !== await internalToken(env)) return json({ message: "Unauthorized" }, 401);
+      const configuredToken = await internalToken(env);
+      if (!configuredToken) return json({ message: "Internal sync token is not configured" }, 500);
+      if (request.headers.get("x-xboard-internal-token") !== configuredToken) return json({ message: "Unauthorized" }, 401);
       const input = await readInput(request);
       if (input.scope === "user" && Number(input.user_id) > 0) {
         const sent = await syncUserChange(env, Number(input.user_id), Number(input.old_group_id || 0));

@@ -39,3 +39,13 @@ test("node metrics persist to D1 when KV is unavailable", () => {
   assert.match(source, /UPDATE v2_server SET metrics = \?, last_push_at = \?, updated_at = \?/);
   assert.match(source, /await optionalKvPut\(env, `node:metrics:\$\{node\.id\}`, value/);
 });
+
+test("websocket device state follows the official per-IP contract", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /next\[userId\] = Object\.fromEntries/);
+  assert.match(source, /output\[String\(user\.id\)\] = \[\.\.\.ips\]/);
+  assert.match(source, /await clearNodeDevices\(this\.env, Number\(node\.id\)\)/);
+  assert.match(source, /node:ws:target:\$\{nodeId\}`[\s\S]*expirationTtl: 86400/);
+  assert.match(source, /UPDATE v2_user SET online_count = \?/);
+  assert.match(source, /Internal sync token is not configured/);
+});
