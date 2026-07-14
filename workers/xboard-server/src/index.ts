@@ -749,6 +749,7 @@ export default {
     if (url.pathname === "/health") return json({ data: { service: "xboard-server", time: now() } });
     await ensureSchema(env);
     if (url.pathname === "/ws") {
+      if (Number(await setting(env, "server_ws_enable", "1")) !== 1) return websocketError("websocket disabled");
       const input: Row = {};
       url.searchParams.forEach((value, key) => { input[key] = value; });
       let name: string;

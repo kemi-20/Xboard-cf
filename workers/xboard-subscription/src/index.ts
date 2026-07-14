@@ -691,9 +691,10 @@ async function build(request: Request, env: Env, token: string) {
   const requestedTypeInput = url.searchParams.get("types") || "all";
   const requestedTypes = requestedTypeInput === "all" ? [...validServerTypes] : requestedTypeInput.split(/[|,｜]+/).map(value => value.trim()).filter(value => validServerTypes.has(value));
   const filterKeywords = (url.searchParams.get("filter") || "").length <= 20 ? (url.searchParams.get("filter") || "").split(/[|,｜]+/).map(value => value.trim().toLowerCase()).filter(Boolean) : [];
-  const all = (await env.XBOARD_DB.prepare("SELECT * FROM v2_server WHERE show = 1 ORDER BY sort ASC, id ASC").all<any>()).results || [];
+  const all = (await env.XBOARD_DB.prepare("SELECT * FROM v2_server ORDER BY sort ASC, id ASC").all<any>()).results || [];
   const parentMap = new Map(all.map(server => [Number(server.id), server]));
   const available = all.filter(server => {
+    if (Number(server.show ?? 1) !== 1) return false;
     if (Number(server.transfer_enable || 0) > 0 && Number(server.u || 0) + Number(server.d || 0) >= Number(server.transfer_enable)) return false;
     const groups = jsonValue<any[]>(server.group_ids, []).map(Number);
     return groups.includes(Number(user.group_id || 0));

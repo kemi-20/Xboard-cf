@@ -1,0 +1,75 @@
+name: Deploy XBoard to Cloudflare
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            workers/xboard-edge/package-lock.json
+            workers/xboard-subscription/package-lock.json
+            workers/xboard-server/package-lock.json
+            workers/xboard-jobs/package-lock.json
+            workers/xboard-cron/package-lock.json
+
+      - name: Validate token
+        shell: bash
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "Repository secret CLOUDFLARE_API_TOKEN is required." >&2
+            exit 1
+          fi
+
+      - name: Create or reuse Cloudflare resources
+        id: resources
+        run: node scripts/prepare-cloudflare-ci.mjs
+
+      - name: Install Worker dependencies
+        shell: bash
+        run: |
+          for worker in xboard-edge xboard-subscription xboard-server xboard-jobs xboard-cron; do
+            npm ci --prefix "workers/$worker"
+          done
+
+      - name: Initialize D1 schema and seed data
+        working-directory: workers/xboard-edge
+        run: |
+          npx wrangler d1 execute xboard-db --remote --file ../../schema/d1.sql
+          npx wrangler d1 execute xboard-db --remote --file ../../schema/seed.sql
+
+      - name: Deploy xboard-server
+        working-directory: workers/xboard-server
+        run: npx wrangler deploy
+
+      - name: Deploy xboard-jobs
+        working-directory: workers/xboard-jobs
+        run: npx wrangler deploy
+
+      - name: Deploy xboard-cron
+        working-directory: workers/xboard-cron
+        run: npx wrangler deploy
+
+      - name: Deploy xboard-subscription
+        working-directory: workers/xboard-subscription
+        run: npx wrangler deploy
+
+      - name: Deploy xboard-edge
+        working-directory: workers/xboard-edge
+        run: npx wrangler deploy

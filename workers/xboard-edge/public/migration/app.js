@@ -2,10 +2,41 @@ const securePath = location.pathname.split("/").filter(Boolean)[0] || "admin";
 const apiBase = "/api/v2/admin/migration";
 document.querySelector("#back").href = `/${securePath}`;
 
-const state = { sqliteFile: null, redisFile: null, db: null, redisEntries: [], counts: {}, tables: [], sqliteTotal: 0, total: 0, done: 0, runId: null, migrationToken: null };
+const state = {
+  sqliteFile: null,
+  redisFile: null,
+  db: null,
+  SQL: null,
+  redisEntries: [],
+  counts: {},
+  tables: [],
+  sqliteTotal: 0,
+  total: 0,
+  done: 0,
+  runId: null,
+  migrationToken: null,
+  snapshotComplete: false,
+  prepared: false,
+  phase: "idle",
+  table: null,
+  offset: 0
+};
+
 const $ = selector => document.querySelector(selector);
-const log = message => { const area = $("#log"); area.textContent += `${new Date().toLocaleTimeString()}  ${message}\n`; area.scrollTop = area.scrollHeight; };
-const setStep = value => document.querySelectorAll(".step").forEach(element => { const step = Number(element.dataset.step); element.classList.toggle("active", step === value); element.classList.toggle("done", step < value); });
+const setStep = value => document.querySelectorAll(".step").forEach(element => {
+  const step = Number(element.dataset.step);
+  element.classList.toggle("active", step === value);
+  element.classList.toggle("done", step < value);
+});
+
+function log(message, level = "info") {
+  const area = $("#log");
+  const line = document.createElement("div");
+  if (level === "error") line.className = "error-line";
+  line.textContent = `${new Date().toLocaleTimeString()}  ${message}`;
+  area.append(line);
+  area.scrollTop = area.scrollHeight;
+}
 
 function storedToken() {
   const keys = ["XBOARD_ACCESS_TOKEN", "Xboard_access_token", "access_token", "ACCESS_TOKEN"];
@@ -22,15 +53,29 @@ function storedToken() {
   return "";
 }
 
+function detailedError(payload, status) {
+  const message = payload?.message || `HTTP ${status}`;
+  const details = payload?.details && Object.keys(payload.details).length ? `\n${JSON.stringify(payload.details, null, 2)}` : "";
+  const error = new Error(`${message}${details}`);
+  error.status = status;
+  error.details = payload?.details || null;
+  return error;
+}
+
 async function api(path, options = {}) {
   const auth = storedToken();
-  if (!auth) throw new Error("未找到后台登录凭据，请返回后台重新登录");
+  if (!auth && !state.migrationToken) throw new Error("未找到后台登录凭据，请返回后台重新登录");
   const response = await fetch(`${apiBase}${path}`, {
     ...options,
-    headers: { "content-type": "application/json", authorization: auth.startsWith("Bearer ") ? auth : `Bearer ${auth}`, ...(state.migrationToken ? { "x-migration-token": state.migrationToken } : {}), ...(options.headers || {}) }
+    headers: {
+      "content-type": "application/json",
+      ...(auth ? { authorization: auth.startsWith("Bearer ") ? auth : `Bearer ${auth}` } : {}),
+      ...(state.migrationToken ? { "x-migration-token": state.migrationToken } : {}),
+      ...(options.headers || {})
+    }
   });
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok || (payload.code !== undefined && Number(payload.code) !== 0)) throw new Error(payload.message || `HTTP ${response.status}`);
+  if (!response.ok || (payload.code !== undefined && Number(payload.code) !== 0)) throw detailedError(payload, response.status);
   return payload.data ?? payload;
 }
 
@@ -39,8 +84,13 @@ function renderCounts(counts) {
   return `<table class="summary"><thead><tr><th>数据表</th><th style="text-align:right">记录数</th></tr></thead><tbody>${entries.map(([table, count]) => `<tr><td>${table}</td><td class="num">${Number(count).toLocaleString()}</td></tr>`).join("")}</tbody></table>`;
 }
 
+async function loadSql() {
+  if (!state.SQL) state.SQL = await initSqlJs({ locateFile: name => `/migration/${name}` });
+  return state.SQL;
+}
+
 async function inspectSqlite(file) {
-  const SQL = await initSqlJs({ locateFile: name => `/migration/${name}` });
+  const SQL = await loadSql();
   state.db?.close();
   state.db = new SQL.Database(new Uint8Array(await file.arrayBuffer()));
   const status = await api("/status");
@@ -194,8 +244,10 @@ async function inspect() {
     const sourceSummary = redisFile
       ? `<p class="success">联合校验通过：SQLite ${state.sqliteTotal.toLocaleString()} 行，Redis ${redisCount.toLocaleString()} 个有效键。</p>`
       : `<p class="success">SQLite 校验通过：${state.sqliteTotal.toLocaleString()} 行。</p><div class="warning"><strong>未选择 Redis 备份</strong>核心业务数据可以正常迁移。节点在线状态、近期负载、Metrics、旧 Session 和其他临时缓存不会保留；节点重新连接后会自动重新生成运行状态。</div>`;
-    $("#preflight-content").innerHTML = `${sourceSummary}<div class="warning"><strong>以下服务配置无法迁移</strong>原版 SMTP/邮件驱动设置和支付渠道、支付插件配置不会导入。迁移完成后，请在新后台的邮件设置中手动配置 Resend API Key、发件人邮箱和发件人名称。邮件模板、订单等可审计业务历史仍会保留，但真实支付功能不会启用。</div><p class="muted">队列任务、Horizon 监控、调度锁、旧会话、验证码和限流计数不会导入。</p>${renderCounts(state.counts)}`;
-    $("#preflight").hidden = false; $("#file-status").textContent = redisFile ? `${sqliteFile.name} + ${redisFile.name}` : `${sqliteFile.name}（未选择 Redis）`; setStep(2);
+    $("#preflight-content").innerHTML = `${sourceSummary}<div class="warning"><strong>以下内容不会迁移</strong>原版 SMTP/邮件驱动设置和 Resend 凭据不会导入，支付渠道、支付插件配置不会导入，所有旧主题配置也会忽略。迁移完成后仅启用默认 Xboard 主题，请在新后台手动配置 Resend API Key、发件人邮箱和发件人名称。</div><p class="muted">邮件模板、订单等可审计业务历史会保留；队列任务、Horizon 监控、调度锁、旧会话、验证码和限流计数不会导入。</p>${renderCounts(state.counts)}`;
+    $("#preflight").hidden = false;
+    $("#file-status").textContent = redisFile ? `${sqliteFile.name} + ${redisFile.name}` : `${sqliteFile.name}（未选择 Redis）`;
+    setStep(2);
   } finally { $("#inspect").disabled = false; }
 }
 
@@ -205,15 +257,122 @@ function sqliteRows(table, limit, offset) {
   return result.values.map(values => Object.fromEntries(result.columns.map((column, index) => [column, values[index]])));
 }
 
+function formatSqliteDate(value) {
+  if (value === null || value === undefined || value === "") return value;
+  if (!Number.isFinite(Number(value))) return value;
+  const date = new Date(Number(value) * 1000);
+  const part = number => String(number).padStart(2, "0");
+  return `${date.getFullYear()}-${part(date.getMonth() + 1)}-${part(date.getDate())} ${part(date.getHours())}:${part(date.getMinutes())}:${part(date.getSeconds())}`;
+}
+
+function insertExportRows(db, table, rows) {
+  if (!rows.length) return;
+  const info = db.exec(`PRAGMA table_info(\`${table}\`)`)[0];
+  if (!info) return;
+  const columns = info.values.map(values => ({ name: String(values[1]), type: String(values[2] || "").toUpperCase() }));
+  db.run("BEGIN");
+  try {
+    for (const row of rows) {
+      const selected = columns.filter(column => row[column.name] !== undefined);
+      if (!selected.length) continue;
+      const values = selected.map(column => {
+        let value = row[column.name];
+        if (column.type.includes("DATETIME") && typeof value === "number") value = formatSqliteDate(value);
+        if (value !== null && typeof value === "object") value = JSON.stringify(value);
+        if (typeof value === "boolean") value = value ? 1 : 0;
+        return value;
+      });
+      const names = selected.map(column => `\`${column.name.replaceAll("`", "")}\``).join(",");
+      db.run(`INSERT OR REPLACE INTO \`${table}\` (${names}) VALUES (${selected.map(() => "?").join(",")})`, values);
+    }
+    db.run("COMMIT");
+  } catch (error) {
+    db.run("ROLLBACK");
+    throw new Error(`生成原版 SQLite 时写入 ${table} 失败：${error.message}`);
+  }
+}
+
+function stamp() {
+  const date = new Date();
+  const part = number => String(number).padStart(2, "0");
+  return `${date.getFullYear()}${part(date.getMonth() + 1)}${part(date.getDate())}-${part(date.getHours())}${part(date.getMinutes())}${part(date.getSeconds())}`;
+}
+
+function downloadDatabase(db, prefix) {
+  const integrity = db.exec("PRAGMA integrity_check")[0]?.values?.[0]?.[0];
+  if (integrity !== "ok") throw new Error(`导出的 SQLite 完整性校验失败：${integrity || "无结果"}`);
+  db.run("VACUUM");
+  const blob = new Blob([db.export()], { type: "application/vnd.sqlite3" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `${prefix}-${stamp()}.db`;
+  anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return { filename: anchor.download, size: blob.size };
+}
+
+async function exportCurrent({ runId = null, counts = null, automatic = false } = {}) {
+  const SQL = await loadSql();
+  const manifest = runId ? { tables: state.tables, counts } : await api("/export/manifest");
+  const templateResponse = await fetch("/migration/xboard-template.db", { cache: "no-store" });
+  if (!templateResponse.ok) throw new Error(`无法读取原版 SQLite 模板：HTTP ${templateResponse.status}`);
+  const db = new SQL.Database(new Uint8Array(await templateResponse.arrayBuffer()));
+  const templateTables = new Set(db.exec("SELECT name FROM sqlite_master WHERE type='table'")[0]?.values.flat().map(String) || []);
+  const exportTables = manifest.tables.filter(table => templateTables.has(table));
+  let exported = 0;
+  const total = Object.values(manifest.counts || {}).reduce((sum, value) => sum + Number(value || 0), 0);
+  try {
+    for (const table of exportTables) {
+      const expected = Number(manifest.counts?.[table] || 0);
+      let offset = 0;
+      do {
+        state.phase = runId ? "snapshot" : "export"; state.table = table; state.offset = offset;
+        const result = await api(runId ? "/snapshot/table" : "/export/table", {
+          method: "POST",
+          body: JSON.stringify({ ...(runId ? { run_id: runId } : {}), table, offset, limit: 100 })
+        });
+        insertExportRows(db, table, result.rows || []);
+        offset = Number(result.next_offset || offset + Number(result.source_rows || 0));
+        exported += Number(result.source_rows || 0);
+        const label = `${automatic ? "自动备份" : "导出"} ${table}: ${Math.min(offset, expected)}/${expected}`;
+        if (automatic) { state.done = exported; updateProgress(label, total); log(label); }
+        else $("#export-status").textContent = `${label}，总进度 ${total ? Math.floor(exported / total * 100) : 100}%`;
+        if (result.done) break;
+      } while (offset < expected || expected === 0);
+    }
+    const downloaded = downloadDatabase(db, automatic ? "xboard-pre-migration" : "xboard-export");
+    if (runId) {
+      state.phase = "snapshot_finish";
+      await api("/snapshot/finish", { method: "POST", body: JSON.stringify({ run_id: runId }) });
+      state.snapshotComplete = true;
+    }
+    return downloaded;
+  } finally { db.close(); }
+}
+
+async function manualExport() {
+  $("#export").disabled = true;
+  $("#export-status").textContent = "正在生成原版 SQLite3 数据库";
+  try {
+    const result = await exportCurrent();
+    $("#export-status").textContent = `导出完成：${result.filename}（${(result.size / 1024 / 1024).toFixed(2)} MB）`;
+  } catch (error) {
+    $("#export-status").innerHTML = `<span class="error"></span>`;
+    $("#export-status .error").textContent = error.message;
+  } finally { $("#export").disabled = false; }
+}
+
 async function migrateSqlite() {
   const batchSize = 50;
   for (const table of state.tables) {
     const count = Number(state.counts[table] || 0);
     for (let offset = 0; offset < count; offset += batchSize) {
+      state.phase = "sqlite_import"; state.table = table; state.offset = offset;
       const rows = sqliteRows(table, batchSize, offset);
       const result = await api("/batch", { method: "POST", body: JSON.stringify({ run_id: state.runId, table, rows }) });
       state.done += rows.length; updateProgress(`${table}: ${Math.min(offset + rows.length, count)}/${count}`);
-      log(`${table}: 接收 ${rows.length} 行，新增 ${result.inserted} 行，D1 当前 ${result.target_count} 行`);
+      log(`${table}: 接收 ${rows.length} 行，写入 ${result.inserted} 行，D1 当前 ${result.target_count} 行`);
     }
   }
 }
@@ -221,30 +380,126 @@ async function migrateSqlite() {
 async function migrateRedis() {
   const batchSize = 100;
   for (let offset = 0; offset < state.redisEntries.length; offset += batchSize) {
+    state.phase = "redis_import"; state.table = "redis"; state.offset = offset;
     const entries = state.redisEntries.slice(offset, offset + batchSize);
     const result = await api("/redis/import", { method: "POST", body: JSON.stringify({ run_id: state.runId, entries }) });
     state.done += entries.length; updateProgress(`Redis: ${state.done}/${state.total}`); log(`Redis: 导入 ${result.imported}，跳过 ${result.skipped}`);
   }
 }
 
-function updateProgress(label) { $("#progress-label").textContent = label; $("#progress-bar").style.width = `${state.total ? Math.min(100, state.done / state.total * 100) : 100}%`; }
-
-async function migrate() {
-  $("#migrate").disabled = true; $("#running").hidden = false; setStep(3); state.done = 0; $("#log").textContent = "";
-  try {
-    const hasRedis = Boolean(state.redisFile);
-    const started = await api("/start", { method: "POST", body: JSON.stringify({ source_type: hasRedis ? "xboard" : "sqlite", source_name: hasRedis ? `${state.sqliteFile.name} + ${state.redisFile.name}` : state.sqliteFile.name, source_size: state.sqliteFile.size + (state.redisFile?.size || 0), source_counts: state.counts, mode: $("#mode").value }) });
-    state.runId = started.run_id; state.migrationToken = started.migration_token; log(`任务 ${state.runId} 已创建，策略 ${started.mode}`);
-    await migrateSqlite();
-    if (hasRedis) await migrateRedis();
-    const report = await api("/finish", { method: "POST", body: JSON.stringify({ run_id: state.runId }) });
-    updateProgress("迁移完成"); setStep(4); $("#result").hidden = false;
-    $("#report").innerHTML = `<p class="success">任务 ${state.runId} 已完成。</p>${report.warnings?.length ? `<p class="error">${report.warnings.join("<br>")}</p>` : "<p>源数据接收数量校验通过。</p>"}${report.target_counts ? renderCounts(report.target_counts) : ""}`;
-    log("迁移完成，设置和节点缓存版本已刷新");
-  } catch (error) { log(`失败: ${error.message}`); $("#progress-label").innerHTML = `<span class="error">${error.message}</span>`; throw error; }
-  finally { $("#migrate").disabled = false; }
+function updateProgress(label, total = state.total) {
+  $("#progress-label").textContent = label;
+  $("#progress-bar").style.width = `${total ? Math.min(100, state.done / total * 100) : 100}%`;
 }
 
-$("#inspect").addEventListener("click", () => inspect().catch(error => { $("#file-status").innerHTML = `<span class="error">${error.message}</span>`; }));
-$("#migrate").addEventListener("click", () => migrate().catch(() => {}));
+async function recordClientFailure(error) {
+  if (!state.runId) return;
+  try {
+    await api("/abort", {
+      method: "POST",
+      body: JSON.stringify({ run_id: state.runId, phase: state.phase, table: state.table, offset: state.offset, error: error.message })
+    });
+  } catch { /* The original server error already marked the run as failed. */ }
+}
+
+function showFailure(error) {
+  $("#progress").classList.add("failed");
+  $("#progress-label").innerHTML = "<span class=\"error\">迁移失败，流程已立即中断</span>";
+  $("#result").hidden = false;
+  $("#report").innerHTML = "";
+  const box = document.createElement("div");
+  box.className = "error-box";
+  box.textContent = `${error.message}\n\n阶段: ${state.phase}\n数据表: ${state.table || "-"}\n偏移: ${state.offset || 0}`;
+  $("#report").append(box);
+  $("#rollback").hidden = !state.snapshotComplete;
+  if (!state.snapshotComplete) {
+    const note = document.createElement("p");
+    note.className = "muted";
+    note.textContent = "错误发生在迁移前快照完成之前，目标业务数据尚未被清空或写入，无需还原。";
+    $("#report").append(note);
+  }
+  log(`失败: ${error.message}`, "error");
+}
+
+async function migrate() {
+  $("#migrate").disabled = true; $("#running").hidden = false; $("#result").hidden = true; setStep(3);
+  state.done = 0; state.runId = null; state.migrationToken = null; state.snapshotComplete = false; state.prepared = false; state.phase = "start"; state.table = null; state.offset = 0;
+  $("#log").textContent = ""; $("#progress").classList.remove("failed"); $("#rollback").hidden = true; $("#rollback-status").textContent = "";
+  try {
+    const hasRedis = Boolean(state.redisFile);
+    const started = await api("/start", {
+      method: "POST",
+      body: JSON.stringify({
+        source_type: hasRedis ? "xboard" : "sqlite",
+        source_name: hasRedis ? `${state.sqliteFile.name} + ${state.redisFile.name}` : state.sqliteFile.name,
+        source_size: state.sqliteFile.size + (state.redisFile?.size || 0),
+        source_counts: state.counts,
+        mode: $("#mode").value
+      })
+    });
+    state.runId = started.run_id; state.migrationToken = started.migration_token;
+    log(`任务 ${state.runId} 已创建，策略 ${started.mode}`);
+    state.done = 0;
+    const backup = await exportCurrent({ runId: state.runId, counts: started.backup_counts, automatic: true });
+    log(`迁移前自动备份已下载：${backup.filename}`);
+    state.phase = "prepare";
+    await api("/prepare", { method: "POST", body: JSON.stringify({ run_id: state.runId }) });
+    state.prepared = true;
+    state.done = 0;
+    await migrateSqlite();
+    if (hasRedis) await migrateRedis();
+    state.phase = "finish"; state.table = null; state.offset = 0;
+    const report = await api("/finish", { method: "POST", body: JSON.stringify({ run_id: state.runId }) });
+    updateProgress("迁移完成"); setStep(4); $("#result").hidden = false;
+    $("#report").innerHTML = `<p class="success">任务 ${state.runId} 已完成，当前主题已固定为 Xboard。</p><p>源数据接收数量校验通过。</p>${report.target_counts ? renderCounts(report.target_counts) : ""}`;
+    $("#rollback").hidden = true;
+    log("迁移完成，设置和节点缓存版本已刷新");
+    state.migrationToken = null;
+  } catch (error) {
+    await recordClientFailure(error);
+    showFailure(error);
+  } finally { $("#migrate").disabled = false; }
+}
+
+async function rollback() {
+  if (!state.runId || !state.snapshotComplete) return;
+  $("#rollback").disabled = true;
+  $("#rollback-status").textContent = "正在清理失败迁移并还原快照";
+  $("#progress").classList.remove("failed");
+  try {
+    state.phase = "rollback_start"; state.done = 0;
+    const started = await api("/rollback/start", { method: "POST", body: JSON.stringify({ run_id: state.runId }) });
+    const counts = started.counts || {};
+    state.total = Object.values(counts).reduce((sum, value) => sum + Number(value || 0), 0);
+    for (const table of started.tables) {
+      const expected = Number(counts[table] || 0);
+      let offset = 0;
+      do {
+        state.phase = "rollback_restore"; state.table = table; state.offset = offset;
+        const result = await api("/rollback/table", { method: "POST", body: JSON.stringify({ run_id: state.runId, table, offset, limit: 50 }) });
+        offset = Number(result.next_offset || offset + Number(result.restored || 0));
+        state.done += Number(result.restored || 0);
+        updateProgress(`还原 ${table}: ${Math.min(offset, expected)}/${expected}`);
+        log(`还原 ${table}: ${Math.min(offset, expected)}/${expected}`);
+        if (result.done) break;
+      } while (offset < expected || expected === 0);
+    }
+    state.phase = "rollback_finish"; state.table = null; state.offset = 0;
+    const report = await api("/rollback/finish", { method: "POST", body: JSON.stringify({ run_id: state.runId }) });
+    updateProgress("已还原到迁移前状态"); setStep(4);
+    $("#report").innerHTML = `<p class="success">一键还原完成，所有受影响的 D1 表和已修改 KV 键均已恢复。</p>${renderCounts(report.restored_counts || {})}`;
+    $("#rollback").hidden = true; $("#rollback-status").textContent = "还原完成";
+    state.migrationToken = null;
+  } catch (error) {
+    $("#progress").classList.add("failed");
+    $("#rollback-status").innerHTML = "";
+    const span = document.createElement("span"); span.className = "error"; span.textContent = error.message; $("#rollback-status").append(span);
+    log(`还原失败: ${error.message}`, "error");
+  } finally { $("#rollback").disabled = false; }
+}
+
+$("#inspect").addEventListener("click", () => inspect().catch(error => { $("#file-status").innerHTML = ""; const span = document.createElement("span"); span.className = "error"; span.textContent = error.message; $("#file-status").append(span); }));
+$("#migrate").addEventListener("click", migrate);
+$("#export").addEventListener("click", manualExport);
+$("#rollback").addEventListener("click", rollback);
 for (const id of ["#sqlite-file", "#redis-file"]) $(id).addEventListener("change", () => { $("#preflight").hidden = true; });

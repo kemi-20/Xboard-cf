@@ -448,10 +448,31 @@ CREATE TABLE IF NOT EXISTS v2_migration_runs (
   error TEXT,
   access_token_hash TEXT,
   admin_id INTEGER,
+  snapshot_counts TEXT,
+  snapshot_complete INTEGER NOT NULL DEFAULT 0,
+  prepared_at INTEGER,
+  rollback_progress TEXT,
   started_at INTEGER NOT NULL,
   finished_at INTEGER,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS v2_migration_snapshot_rows (
+  run_id TEXT NOT NULL,
+  table_name TEXT NOT NULL,
+  row_index INTEGER NOT NULL,
+  row_data TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY(run_id, table_name, row_index)
+);
+CREATE INDEX IF NOT EXISTS idx_migration_snapshot_run_table ON v2_migration_snapshot_rows(run_id, table_name, row_index);
+CREATE TABLE IF NOT EXISTS v2_migration_kv_snapshots (
+  run_id TEXT NOT NULL,
+  key_name TEXT NOT NULL,
+  existed INTEGER NOT NULL DEFAULT 0,
+  value TEXT,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY(run_id, key_name)
 );
 
 CREATE TABLE IF NOT EXISTS v2_migration_logs (

@@ -125,9 +125,21 @@ npx wrangler secret put RESEND_API_KEY
 
 兑换会同步更新 D1 中的用户、兑换码、兑换记录和流量重置日志。
 
+## 一键首次部署
+
+仓库包含只允许手动触发的 GitHub Actions workflow：`.github/workflows/deploy.yml`。在仓库的 `Settings -> Secrets and variables -> Actions` 中添加：
+
+```text
+CLOUDFLARE_API_TOKEN
+```
+
+然后打开 `Actions -> Deploy XBoard to Cloudflare -> Run workflow`。workflow 会自动识别 Token 所属账号，创建或复用 `xboard-db`、`xboard-kv` 和五个 Queue，初始化 D1，并按依赖顺序部署全部 Worker。它只配置了 `workflow_dispatch`，不会在每次 push 时自动运行。
+
+API Token 至少需要该账号下 Workers Scripts、D1、Workers KV Storage、Queues 和 Account Settings 的读取/编辑权限。若 Token 可访问多个账号，workflow 使用 Cloudflare API 返回的第一个账号。
+
 ## 使用 Cloudflare Git 自动部署
 
-本项目不使用 GitHub Actions。推荐在 Cloudflare Workers Builds 中直接连接本仓库，并为每个 Worker 分别创建项目：
+首次资源和 Worker 创建完成后，仍可在 Cloudflare Workers Builds 中直接连接本仓库，为每个 Worker 分别创建自动部署项目：
 
 ```text
 Git 分支：master
@@ -145,7 +157,7 @@ workers/xboard-jobs
 workers/xboard-cron
 ```
 
-连接完成后，推送 `master` 即会触发 Cloudflare 自动构建和部署。首次部署前仍需创建 D1、KV、Queues、Durable Object 和 Service Binding。
+连接完成后，推送 `master` 即会触发 Cloudflare 自动构建和部署。GitHub Actions 适合首次完整创建资源；Cloudflare Git 集成适合后续 push 自动更新，两者可以同时使用。
 
 ## 初始化数据库
 
@@ -182,9 +194,13 @@ framework/schedule 锁
 邮箱验证码、密码错误次数和注册限流计数
 ```
 
-第 2 步“数据预检”会明确列出无法自动切换的外部服务配置。原版 SMTP/邮件驱动设置、Resend 凭据、支付渠道和支付插件配置不会导入；迁移完成后必须在新后台的邮件设置中手动填写 Resend API Key、发件人邮箱和发件人名称。邮件模板、订单等可审计业务历史仍会保留，但真实支付能力不会因此启用。
+第 2 步“数据预检”会明确列出无法自动切换的外部服务配置。原版 SMTP/邮件驱动设置、Resend 凭据、支付渠道和支付插件配置不会导入；迁移完成后必须在新后台的邮件设置中手动填写 Resend API Key、发件人邮箱和发件人名称。所有旧主题和主题配置也会忽略，迁移后固定使用内置 `Xboard` 默认主题。邮件模板、订单等可审计业务历史仍会保留，但真实支付能力不会因此启用。
 
 默认“完整切换”会以原版主键数据为准，以保持用户、套餐、权限组、节点、机器、订单和统计之间的 ID 关系。“合并”只补充 D1 不存在的数据，适合已有 Cloudflare 数据时谨慎使用。迁移过程中即使原版设置覆盖了后台路径和访问令牌，迁移任务也会使用一次性迁移凭据继续执行；任务完成后该凭据立即失效。
+
+点击开始迁移后，浏览器会先把当前 D1 数据导出为原版兼容的 `xboard-pre-migration-*.db`，下载完成并校验快照行数后才会清理或写入目标数据。迁移页面也提供“导出当前数据”按钮，可随时生成标准 SQLite3 `xboard-export-*.db`；导出的邮件凭据为空，支付配置不导出。
+
+任一批次失败时迁移会立即中止，进度和详细错误以红色显示。只要迁移前快照已经完成，页面会显示“一键还原”，用于清理本次失败写入并恢复迁移前的 D1 数据和本次修改过的 KV 键。
 
 真实备份预演覆盖 14,369 行 SQLite 数据和 Redis 12 格式 RDB。迁移器会处理原版与 D1 的字段差异，包括时间戳、`transfer_used_total`、机器启用状态、订阅模板默认字段和 bcrypt 密码标记。
 

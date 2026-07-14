@@ -100,8 +100,8 @@ async function sendReminders(env: Env, ts: number, day: number) {
 
 async function checkCommission(env: Env, ts: number) {
   if (Number(await setting(env, "commission_auto_check_enable", "1"))) {
-    await env.XBOARD_DB.prepare("UPDATE v2_order SET commission_status = 1, updated_at = ? WHERE commission_status = 0 AND invite_user_id IS NOT NULL AND status = 3 AND updated_at <= ?")
-      .bind(ts, ts - 3 * 86400).run();
+    await env.XBOARD_DB.prepare("UPDATE v2_order SET commission_status = 1 WHERE commission_status = 0 AND invite_user_id IS NOT NULL AND status = 3 AND updated_at <= ?")
+      .bind(ts - 3 * 86400).run();
   }
   const settings = {
     distribution: Number(await setting(env, "commission_distribution_enable", "0")),
@@ -111,7 +111,7 @@ async function checkCommission(env: Env, ts: number) {
     closeWithdraw: Number(await setting(env, "withdraw_close_enable", "0"))
   };
   const shares = settings.distribution ? [settings.l1, settings.l2, settings.l3] : [100];
-  const orders = await env.XBOARD_DB.prepare("SELECT id, user_id, invite_user_id, commission_balance FROM v2_order WHERE commission_status = 1 AND invite_user_id IS NOT NULL ORDER BY id ASC LIMIT 500").all<Record<string, any>>();
+  const orders = await env.XBOARD_DB.prepare("SELECT id, user_id, invite_user_id, trade_no, total_amount, commission_balance FROM v2_order WHERE commission_status = 1 AND invite_user_id IS NOT NULL ORDER BY id ASC LIMIT 500").all<Record<string, any>>();
   for (const order of orders.results || []) {
     let inviterId = Number(order.invite_user_id);
     let actual = 0;
@@ -124,7 +124,8 @@ async function checkCommission(env: Env, ts: number) {
       if (amount > 0) {
         const column = settings.closeWithdraw ? "balance" : "commission_balance";
         statements.push(env.XBOARD_DB.prepare(`UPDATE v2_user SET ${column} = COALESCE(${column}, 0) + ?, updated_at = ? WHERE id = ?`).bind(amount, ts, inviter.id));
-        statements.push(env.XBOARD_DB.prepare("INSERT INTO v2_commission_log(user_id, order_id, amount, created_at, updated_at) VALUES (?, ?, ?, ?, ?)").bind(Number(order.user_id), Number(order.id), amount, ts, ts));
+        statements.push(env.XBOARD_DB.prepare("INSERT INTO v2_commission_log(invite_user_id, user_id, order_id, trade_no, order_amount, get_amount, amount, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+          .bind(Number(inviter.id), Number(order.user_id), Number(order.id), String(order.trade_no || ""), Number(order.total_amount || 0), amount, amount, ts, ts));
         actual += amount;
       }
       inviterId = Number(inviter.invite_user_id || 0);
@@ -138,7 +139,8 @@ async function resetTraffic(env: Env, ts: number) {
   const systemMethod = Number(await setting(env, "reset_traffic_method", "1"));
   const users = await env.XBOARD_DB.prepare(`SELECT u.id, u.u, u.d, u.expired_at, u.next_reset_at, u.reset_count, p.reset_traffic_method
     FROM v2_user u LEFT JOIN v2_plan p ON p.id = u.plan_id
-    WHERE u.next_reset_at IS NOT NULL AND u.next_reset_at <= ? AND u.plan_id IS NOT NULL`).bind(ts).all<any>();
+    WHERE u.next_reset_at IS NOT NULL AND u.next_reset_at <= ? AND u.plan_id IS NOT NULL
+      AND u.banned = 0 AND (u.expired_at IS NULL OR u.expired_at > ?)`).bind(ts, ts).all<any>();
   for (const user of users.results || []) {
     const next = nextResetAt(user, systemMethod, ts + 1);
     const oldU = Number(user.u || 0), oldD = Number(user.d || 0);

@@ -92,7 +92,7 @@ async function traffic(env: Env, event: any) {
     userD += d;
     const ts = now();
     await runOnce(env, `${event.event_id}:user:${uid}`, "traffic:user", row, [
-      env.XBOARD_DB.prepare("UPDATE v2_user SET u = u + ?, d = d + ?, t = COALESCE(t, 0) + ?, updated_at = ? WHERE id = ?").bind(u, d, u + d, ts, uid),
+      env.XBOARD_DB.prepare("UPDATE v2_user SET u = u + ?, d = d + ?, updated_at = ? WHERE id = ?").bind(u, d, ts, uid),
       env.XBOARD_DB.prepare("INSERT INTO v2_stat_user(user_id, server_id, server_type, u, d, rate, server_rate, record_type, record_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'd', ?, ?, ?) ON CONFLICT(user_id, server_id, server_type, record_at) DO UPDATE SET u = u + excluded.u, d = d + excluded.d, rate = excluded.rate, server_rate = excluded.server_rate, updated_at = excluded.updated_at")
         .bind(uid, event.server_id || 0, event.server_type || "unknown", u, d, rate, rate, recordAt, ts, ts)
     ]);
@@ -186,7 +186,7 @@ async function handle(env: Env, event: any) {
   else if (event.type === "mail") await mail(env, event);
   else if (event.type === "telegram") await telegram(env, event);
   else if (event.type === "stat") await stat(env, event);
-  else if (event.type === "node_sync") throw new Error("node_sync 必须由 xboard-server Service Binding 处理，不能静默丢弃");
+  else if (event.type === "node_sync") await runOnce(env, event.event_id, "node_sync", { ...event, skipped: "Use the xboard-server service binding for synchronous node updates" }, []);
   else await runOnce(env, event.event_id, event.type || "unknown", event, []);
 }
 

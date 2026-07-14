@@ -1,4 +1,4 @@
-import type { D1Database, ExecutionContext, Fetcher, KVNamespace, Queue } from "./types";
+import type { D1Database, D1PreparedStatement, ExecutionContext, Fetcher, KVNamespace, Queue } from "./types";
 import { body, fail, json, now, ok, randomString, token, uuid } from "./compat";
 import { createSession, currentUser, hashPassword, sessionTokenDigest, verifyPassword } from "./auth";
 import { list, rows, settings } from "./db";
@@ -128,8 +128,11 @@ const adminRouteMethods: Record<string, string[]> = {
   "/plugin/types": ["GET"], "/plugin/getPlugins": ["GET"], "/plugin/upload": ["POST"], "/plugin/delete": ["POST"], "/plugin/install": ["POST"],
   "/plugin/uninstall": ["POST"], "/plugin/enable": ["POST"], "/plugin/disable": ["POST"], "/plugin/config": ["GET", "POST"], "/plugin/upgrade": ["POST"],
   "/traffic-reset/logs": ["GET"], "/traffic-reset/stats": ["GET"], "/traffic-reset/reset-user": ["POST"]
-  , "/migration/status": ["GET"], "/migration/start": ["POST"], "/migration/batch": ["POST"],
-  "/migration/redis/import": ["POST"], "/migration/finish": ["POST"]
+  , "/migration/status": ["GET"], "/migration/export/manifest": ["GET"], "/migration/export/table": ["POST"],
+  "/migration/start": ["POST"], "/migration/snapshot/table": ["POST"], "/migration/snapshot/finish": ["POST"],
+  "/migration/prepare": ["POST"], "/migration/batch": ["POST"], "/migration/redis/import": ["POST"],
+  "/migration/abort": ["POST"], "/migration/rollback/start": ["POST"], "/migration/rollback/table": ["POST"],
+  "/migration/rollback/finish": ["POST"], "/migration/finish": ["POST"]
 };
 
 const allowedConfigSettings = new Set([
@@ -449,6 +452,7 @@ async function ensureBootstrap(env: Env) {
     "ALTER TABLE v2_migration_runs ADD COLUMN access_token_hash TEXT"
   ];
   for (const sql of alters) await runSqlIgnore(env, sql);
+  await runSqlIgnore(env, "UPDATE v2_coupon SET type = CAST(type AS INTEGER) WHERE CAST(type AS TEXT) LIKE '%.0'");
   await runSqlIgnore(env, "UPDATE v2_order SET status = 2 WHERE status IS NULL OR CAST(status AS TEXT) NOT IN ('0','1','2','3','4')");
   await runSqlIgnore(env, "UPDATE v2_stat_user SET server_rate = COALESCE(rate, 1)");
   await runSqlIgnore(env, "CREATE INDEX IF NOT EXISTS idx_machine_load_recorded ON v2_server_machine_load_history(machine_id, recorded_at)");
@@ -1151,8 +1155,12 @@ async function optionalKvPutTtl(env: Env, key: string, value: string, expiration
 }
 
 async function adminServerRows(env: Env) {
-  const servers = await rows(env.XBOARD_DB, "v2_server", 1000) as any[];
-  const machines = await rows(env.XBOARD_DB, "v2_server_machine", 1000) as any[];
+  const [serverResult, machineResult] = await Promise.all([
+    env.XBOARD_DB.prepare("SELECT * FROM v2_server ORDER BY sort ASC, id ASC LIMIT 1000").all<Record<string, any>>(),
+    env.XBOARD_DB.prepare("SELECT * FROM v2_server_machine ORDER BY id ASC LIMIT 1000").all<Record<string, any>>()
+  ]);
+  const servers = serverResult.results || [];
+  const machines = machineResult.results || [];
   const out = [];
   for (const server of servers) {
     const stateId = Number(server.parent_id || server.id);
@@ -1214,7 +1222,8 @@ async function adminServerRows(env: Env) {
 }
 
 async function adminMachineRows(env: Env) {
-  const machines = await rows(env.XBOARD_DB, "v2_server_machine", 1000) as any[];
+  const result = await env.XBOARD_DB.prepare("SELECT * FROM v2_server_machine ORDER BY id ASC LIMIT 1000").all<Record<string, any>>();
+  const machines = result.results || [];
   const out = [];
   for (const machine of machines) {
     const { token: _token, ...safeMachine } = machine;
@@ -1736,7 +1745,7 @@ async function login(request: Request, env: Env, admin = false) {
   if (Number(user.banned || 0) === 1) return fail("账号已被封禁", 403, 403);
   try { await env.XBOARD_KV.delete(rateKey); } catch {}
   const accessToken = await createSession(env.XBOARD_DB, env.XBOARD_KV, user, admin);
-  await env.XBOARD_DB.prepare("UPDATE v2_user SET last_login_at = ?, updated_at = ? WHERE id = ?").bind(now(), now(), user.id).run();
+  await env.XBOARD_DB.prepare("UPDATE v2_user SET last_login_at = ?, last_login_ip = ?, updated_at = ? WHERE id = ?").bind(now(), requestIp(request), now(), user.id).run();
   return ok({ token: user.token, is_admin: !!user.is_admin, email: user.email, auth_data: `Bearer ${accessToken}` });
 }
 
@@ -1930,21 +1939,58 @@ async function adminCoupon(request: Request, env: Env, route: string): Promise<R
     const pageSize = Math.min(100, Math.max(1, Number(input.pageSize || url.searchParams.get("pageSize") || 10)));
     const result = await env.XBOARD_DB.prepare("SELECT * FROM v2_coupon ORDER BY created_at DESC LIMIT ? OFFSET ?").bind(pageSize, (current - 1) * pageSize).all<Record<string, any>>();
     const total = await firstNumber(env, "SELECT COUNT(*) AS count FROM v2_coupon");
-    return json({ data: (result.results || []).map(row => ({ ...row, show: !!row.show, limit_plan_ids: parseJsonArray(row.limit_plan_ids), limit_period: parseJsonArray(row.limit_period) })), total });
+    return json({
+      data: (result.results || []).map(row => ({
+        ...row,
+        type: Math.trunc(Number.parseFloat(String(row.type ?? 0))),
+        value: Number(row.value ?? 0),
+        show: !!row.show,
+        limit_plan_ids: parseJsonArray(row.limit_plan_ids),
+        limit_period: parseJsonArray(row.limit_period)
+      })),
+      total
+    });
   }
   const id = nullableNumber(input.id);
   if (route === "/coupon/generate") {
     const required = ["name", "type", "value", "started_at", "ended_at"];
     if (required.some(key => input[key] === undefined || input[key] === "")) return fail("优惠券参数不完整", 422, 422);
-    if (![1, 2].includes(Number(input.type))) return fail("类型格式有误", 422, 422);
+    const couponType = Math.trunc(Number.parseFloat(String(input.type ?? "")));
+    if (![1, 2].includes(couponType)) return fail("类型格式有误", 422, 422);
     const count = Math.min(500, Math.max(1, Number(input.generate_count || 1))); const ts = now();
+    const generatedCoupons: Array<Record<string, any>> = [];
     const statements = Array.from({ length: count }, (_, index) => {
       const code = count === 1 && input.code ? String(input.code) : randomString(8);
-      const values = [code, String(input.name), Number(input.type), Number(input.value), boolNumber(input.show, 1), nullableNumber(input.limit_use), nullableNumber(input.limit_use_with_user), couponValue(input, "limit_plan_ids"), couponValue(input, "limit_period"), Number(input.started_at), Number(input.ended_at), ts, ts];
+      const values = [code, String(input.name), couponType, Number(input.value), boolNumber(input.show, 1), nullableNumber(input.limit_use), nullableNumber(input.limit_use_with_user), couponValue(input, "limit_plan_ids"), couponValue(input, "limit_period"), Number(input.started_at), Number(input.ended_at), ts, ts];
+      generatedCoupons.push({ ...input, code, type: couponType, created_at: ts });
       if (id && index === 0) return env.XBOARD_DB.prepare("UPDATE v2_coupon SET code=?, name=?, type=?, value=?, show=?, limit_use=?, limit_use_with_user=?, limit_plan_ids=?, limit_period=?, started_at=?, ended_at=?, updated_at=? WHERE id=?").bind(...values.slice(0, 11), ts, id);
       return env.XBOARD_DB.prepare("INSERT INTO v2_coupon(code,name,type,value,show,limit_use,limit_use_with_user,limit_plan_ids,limit_period,started_at,ended_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(...values);
     });
     try { await env.XBOARD_DB.batch(statements); } catch { return fail("优惠券代码已存在或参数无效", 400, 400); }
+    if (input.generate_count) {
+      const dateTime = (value: unknown) => new Date(Number(value || 0) * 1000).toISOString().replace("T", " ").slice(0, 19);
+      const csvValue = (value: unknown) => `"${String(value ?? "").replaceAll('"', '""')}"`;
+      const lines = ["名称,类型,金额或比例,开始时间,结束时间,可用次数,可用于订阅,券码,生成时间"];
+      for (const coupon of generatedCoupons) {
+        lines.push([
+          coupon.name,
+          coupon.type === 1 ? "金额" : "比例",
+          coupon.type === 1 ? Number(coupon.value || 0) / 100 : Number(coupon.value || 0),
+          dateTime(coupon.started_at),
+          dateTime(coupon.ended_at),
+          coupon.limit_use ?? "不限制",
+          parseJsonArray(coupon.limit_plan_ids).join("/") || "不限制",
+          coupon.code,
+          dateTime(coupon.created_at)
+        ].map(csvValue).join(","));
+      }
+      return new Response(`\uFEFF${lines.join("\r\n")}\r\n`, {
+        headers: {
+          "content-type": "text/csv; charset=utf-8",
+          "content-disposition": `attachment; filename="coupons-${ts}.csv"`
+        }
+      });
+    }
     return ok(true);
   }
   if (!id) return fail("优惠券ID不能为空", 422, 422);
@@ -2087,7 +2133,7 @@ async function adminOrder(request: Request, env: Env, route: string): Promise<Re
     if (!user) return fail("该用户不存在", 400, 400202);
     const plan = await env.XBOARD_DB.prepare("SELECT id FROM v2_plan WHERE id=?").bind(planId).first();
     if (!plan) return fail("该订阅不存在", 400, 400202);
-    const pending = await env.XBOARD_DB.prepare("SELECT id FROM v2_order WHERE user_id=? AND CAST(status AS INTEGER)=0 LIMIT 1").bind(user.id).first();
+    const pending = await env.XBOARD_DB.prepare("SELECT id FROM v2_order WHERE user_id=? AND CAST(status AS INTEGER) IN (0,1) LIMIT 1").bind(user.id).first();
     if (pending) return fail("该用户还有待支付的订单，无法分配", 400, 400);
     const orderType = period === "reset_traffic" ? 4 : user.plan_id && Number(user.plan_id) !== planId ? 3 : (Number(user.plan_id) === planId && Number(user.expired_at || 0) > now()) ? 2 : 1;
     const tradeNo = token(16); const ts = now();
@@ -2279,7 +2325,7 @@ async function adminApi(request: Request, env: Env, path: string) {
     if (migrationAdminId !== null) admin = { id: migrationAdminId, email: "migration-session", is_admin: 1 };
   }
   if (!admin) return fail("未授权", 401, 401);
-  await audit(env, Number((admin as any).id || 0), request, path);
+  if (!route.startsWith("/migration/")) await audit(env, Number((admin as any).id || 0), request, path);
   const migrationResponse = await handleAdminMigration(request.clone(), env, route, Number((admin as any).id || 0));
   if (migrationResponse) return migrationResponse;
   const giftCardResponse = await handleAdminGiftCard(request.clone(), env.XBOARD_DB, route, Number((admin as any).id || 0));
@@ -2348,6 +2394,7 @@ async function adminApi(request: Request, env: Env, path: string) {
     const nodes = await adminServerRows(env);
     const today = dayStart();
     const month = monthStart();
+    const lastMonth = monthStart(month - 1);
     const todayU = await firstNumber(env, `SELECT COALESCE(SUM(u), 0) AS c FROM v2_stat_server WHERE record_at >= ${today}`);
     const todayD = await firstNumber(env, `SELECT COALESCE(SUM(d), 0) AS c FROM v2_stat_server WHERE record_at >= ${today}`);
     const monthU = await firstNumber(env, `SELECT COALESCE(SUM(u), 0) AS c FROM v2_stat_server WHERE record_at >= ${month}`);
@@ -2355,14 +2402,14 @@ async function adminApi(request: Request, env: Env, path: string) {
     const totalU = await firstNumber(env, "SELECT COALESCE(SUM(u), 0) AS c FROM v2_stat_server");
     const totalD = await firstNumber(env, "SELECT COALESCE(SUM(d), 0) AS c FROM v2_stat_server");
     return ok({
-      month_income: 0,
+      month_income: await firstNumber(env, `SELECT COALESCE(SUM(total_amount), 0) AS c FROM v2_order WHERE created_at >= ${month} AND created_at < ${now()} AND status NOT IN (0,2)`),
       month_register_total: await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE created_at >= ${month}`),
       ticket_pending_total: await firstNumber(env, "SELECT COUNT(*) AS c FROM v2_ticket WHERE status = 0"),
-      commission_pending_total: 0,
-      day_income: 0,
-      last_month_income: 0,
-      commission_month_payout: 0,
-      commission_last_month_payout: 0,
+      commission_pending_total: await firstNumber(env, "SELECT COUNT(*) AS c FROM v2_order WHERE commission_status = 0 AND invite_user_id IS NOT NULL AND status NOT IN (0,2) AND commission_balance > 0"),
+      day_income: await firstNumber(env, `SELECT COALESCE(SUM(total_amount), 0) AS c FROM v2_order WHERE created_at >= ${today} AND created_at < ${now()} AND status NOT IN (0,2)`),
+      last_month_income: await firstNumber(env, `SELECT COALESCE(SUM(total_amount), 0) AS c FROM v2_order WHERE created_at >= ${lastMonth} AND created_at < ${month} AND status NOT IN (0,2)`),
+      commission_month_payout: await firstNumber(env, `SELECT COALESCE(SUM(COALESCE(get_amount, amount, 0)), 0) AS c FROM v2_commission_log WHERE created_at >= ${month} AND created_at < ${now()}`),
+      commission_last_month_payout: await firstNumber(env, `SELECT COALESCE(SUM(COALESCE(get_amount, amount, 0)), 0) AS c FROM v2_commission_log WHERE created_at >= ${lastMonth} AND created_at < ${month}`),
       online_nodes: nodes.filter(node => Number((node as any).available_status) > 0).length,
       online_devices: nodes.reduce((sum, node) => sum + Number((node as any).online_conn || 0), 0),
       online_users: nodes.reduce((sum, node) => sum + Number((node as any).online || 0), 0),
@@ -2491,7 +2538,10 @@ async function adminApi(request: Request, env: Env, path: string) {
   if (path.includes("/server/machine/nodes")) {
     const machineUrl = new URL(request.url);
     const machineId = Number(machineUrl.searchParams.get("machine_id") || machineUrl.searchParams.get("id") || 0);
-    const data = machineId ? (await rows(env.XBOARD_DB, "v2_server", 1000) as any[]).filter(row => Number(row.machine_id || 0) === machineId) : [];
+    const result = machineId
+      ? await env.XBOARD_DB.prepare("SELECT id, name, type, host, port, show, enabled, sort FROM v2_server WHERE machine_id = ? ORDER BY sort ASC, id ASC").bind(machineId).all<Record<string, any>>()
+      : { results: [] as Record<string, any>[] };
+    const data = result.results || [];
     return ok(data);
   }
   if (path.includes("/server/machine/history")) return adminMachineHistory(env, new URL(request.url));
@@ -2896,7 +2946,8 @@ async function userApi(request: Request, env: Env, path: string) {
       transfer_enable: Number((user as any).transfer_enable || 0), email: (user as any).email, uuid: (user as any).uuid,
       device_limit: (user as any).device_limit, speed_limit: (user as any).speed_limit, next_reset_at: (user as any).next_reset_at,
       plan: plan ? { ...plan, prices: parseJsonObject(plan.prices), tags: parseJsonArray(plan.tags) } : null,
-      subscribe_url: await subscribeUrl(request, env, (user as any).token), reset_day: null
+      subscribe_url: await subscribeUrl(request, env, (user as any).token),
+      reset_day: Number((user as any).next_reset_at || 0) > now() ? Math.ceil((Number((user as any).next_reset_at) - now()) / 86400) : null
     });
   }
   if (request.method === "GET" && route === "/getStat") {
@@ -3019,7 +3070,7 @@ async function userApi(request: Request, env: Env, path: string) {
       const planId = nullableNumber(input.plan_id); const legacyPeriod = String(input.period || ""); const period = orderPeriods[legacyPeriod];
       if (!planId) return fail("套餐ID不能为空", 422, 422);
       if (!period) return fail("套餐周期错误", 422, 422);
-      const pending = await env.XBOARD_DB.prepare("SELECT id FROM v2_order WHERE user_id = ? AND status = 0 LIMIT 1").bind(userId).first();
+      const pending = await env.XBOARD_DB.prepare("SELECT id FROM v2_order WHERE user_id = ? AND status IN (0,1) LIMIT 1").bind(userId).first();
       if (pending) return fail("您有未支付或待处理订单，请先取消", 400, 400);
       const plan = await env.XBOARD_DB.prepare("SELECT * FROM v2_plan WHERE id = ? AND show = 1 AND sell = 1").bind(planId).first<Record<string, any>>();
       if (!plan) return fail("订阅计划不存在", 400, 400);
@@ -3029,9 +3080,42 @@ async function userApi(request: Request, env: Env, path: string) {
         const count = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE plan_id = ${planId}`);
         if (count >= Number(plan.capacity_limit) && Number((user as any).plan_id) !== planId) return fail("该订阅已售罄", 400, 400);
       }
-      const tradeNo = token(16); const ts = now(); const type = period === "reset_traffic" ? 4 : Number((user as any).plan_id) === planId ? 2 : Number((user as any).plan_id) ? 3 : 1;
-      await env.XBOARD_DB.prepare("INSERT INTO v2_order(user_id, plan_id, period, trade_no, status, total_amount, type, invite_user_id, created_at, updated_at) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?)")
-        .bind(userId, planId, period, tradeNo, Math.trunc(price), type, (user as any).invite_user_id || null, ts, ts).run();
+      let totalAmount = Math.trunc(price * 100);
+      let discountAmount = 0;
+      let couponId: number | null = null;
+      let couponUpdate: D1PreparedStatement | null = null;
+      const couponCode = String(input.coupon_code || "").trim();
+      if (couponCode) {
+        const coupon = await env.XBOARD_DB.prepare("SELECT * FROM v2_coupon WHERE code = ?").bind(couponCode).first<Record<string, any>>();
+        const ts = now();
+        if (!coupon || !Number(coupon.show)) return fail("优惠券无效", 400, 400);
+        if (coupon.limit_use !== null && Number(coupon.limit_use) <= 0) return fail("优惠券已用完", 400, 400);
+        if (Number(coupon.started_at || 0) > ts || Number(coupon.ended_at || 0) < ts) return fail("优惠券不在有效期内", 400, 400);
+        const limitedPlans = parseJsonArray(coupon.limit_plan_ids).map(Number);
+        if (limitedPlans.length && !limitedPlans.includes(planId)) return fail("优惠券不适用于该套餐", 400, 400);
+        const limitedPeriods = parseJsonArray(coupon.limit_period).map(String);
+        if (limitedPeriods.length && !limitedPeriods.includes(period) && !limitedPeriods.includes(legacyPeriod)) return fail("优惠券不适用于该周期", 400, 400);
+        if (coupon.limit_use_with_user !== null) {
+          const used = await env.XBOARD_DB.prepare("SELECT COUNT(*) AS count FROM v2_order WHERE coupon_id = ? AND user_id = ? AND status NOT IN (0,2)").bind(coupon.id, userId).first<{ count: number }>();
+          if (Number(used?.count || 0) >= Number(coupon.limit_use_with_user)) return fail("优惠券已达到个人使用次数限制", 400, 400);
+        }
+        const couponType = Math.trunc(Number.parseFloat(String(coupon.type || 0)));
+        discountAmount = couponType === 1 ? Number(coupon.value || 0) : couponType === 2 ? totalAmount * Number(coupon.value || 0) / 100 : 0;
+        discountAmount = Math.min(totalAmount, Math.trunc(discountAmount));
+        couponId = Number(coupon.id);
+        if (coupon.limit_use !== null) couponUpdate = env.XBOARD_DB.prepare("UPDATE v2_coupon SET limit_use = limit_use - 1, updated_at = ? WHERE id = ? AND limit_use > 0").bind(ts, coupon.id);
+      }
+      if (Number((user as any).discount || 0) > 0) discountAmount += Math.trunc(totalAmount * Number((user as any).discount) / 100);
+      discountAmount = Math.min(totalAmount, discountAmount);
+      totalAmount -= discountAmount;
+      const tradeNo = token(16); const ts = now();
+      const type = period === "reset_traffic" ? 4
+        : Number((user as any).plan_id) > 0 && Number((user as any).plan_id) !== planId && ((user as any).expired_at === null || Number((user as any).expired_at) > ts) ? 3
+        : Number((user as any).plan_id) === planId && ((user as any).expired_at === null || Number((user as any).expired_at) > ts) ? 2 : 1;
+      const statements = [env.XBOARD_DB.prepare("INSERT INTO v2_order(user_id, plan_id, period, trade_no, status, total_amount, discount_amount, coupon_id, type, invite_user_id, created_at, updated_at) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)")
+        .bind(userId, planId, period, tradeNo, totalAmount, discountAmount, couponId, type, totalAmount > 0 ? (user as any).invite_user_id || null : null, ts, ts)];
+      if (couponUpdate) statements.push(couponUpdate);
+      await env.XBOARD_DB.batch(statements);
       return ok(tradeNo);
     }
     if (request.method === "POST" && route === "/order/checkout") {
@@ -3052,9 +3136,47 @@ async function userApi(request: Request, env: Env, path: string) {
     const id = nullableNumber(new URL(request.url).searchParams.get("id"));
     return ok(id ? available.find(row => Number((row as any).id) === id) || null : available);
   }
-  if (path.includes("/server/fetch")) return ok((await adminServerRows(env)).filter(row => Number((row as any).show ?? 1) === 1 && parseJsonArray((row as any).group_ids).map(Number).includes(Number((user as any).group_id || 0))));
+  if (path.includes("/server/fetch")) {
+    const available = !Number((user as any).banned)
+      && Number((user as any).transfer_enable || 0) > 0
+      && ((user as any).expired_at === null || Number((user as any).expired_at) > now());
+    if (!available) return ok([]);
+    return ok((await adminServerRows(env)).filter(row => Number((row as any).show ?? 1) === 1 && parseJsonArray((row as any).group_ids).map(Number).includes(Number((user as any).group_id || 0))));
+  }
   if (path.includes("/notice/fetch")) return ok((await rows(env.XBOARD_DB, "v2_notice", 50) as any[]).filter(row => Number(row.show ?? 1) === 1));
-  if (path.includes("/knowledge/fetch")) return ok((await rows(env.XBOARD_DB, "v2_knowledge", 50) as any[]).filter(row => Number(row.show ?? 1) === 1));
+  if (path.includes("/knowledge/fetch")) {
+    const url = new URL(request.url);
+    const id = nullableNumber(url.searchParams.get("id"));
+    const language = url.searchParams.get("language");
+    const keyword = String(url.searchParams.get("keyword") || "").trim();
+    const clauses = ["show = 1"];
+    const bindings: unknown[] = [];
+    if (id) { clauses.push("id = ?"); bindings.push(id); }
+    if (language !== null) { clauses.push("language = ?"); bindings.push(language); }
+    if (keyword) { clauses.push("(title LIKE ? OR body LIKE ?)"); bindings.push(`%${keyword}%`, `%${keyword}%`); }
+    const result = await env.XBOARD_DB.prepare(`SELECT * FROM v2_knowledge WHERE ${clauses.join(" AND ")} ORDER BY sort ASC, id ASC`).bind(...bindings).all<Record<string, any>>();
+    const allSettings = await settings(env.XBOARD_DB);
+    const subscription = await subscribeUrl(request, env, String((user as any).token || ""));
+    const available = !Number((user as any).banned)
+      && Number((user as any).transfer_enable || 0) > 0
+      && ((user as any).expired_at === null || Number((user as any).expired_at) > now());
+    const safeBase64 = btoa(subscription).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+    const processRow = (row: Record<string, any>): Record<string, any> => {
+      let content = String(row.body || "");
+      if (!available) content = content.replace(/<!--access start-->(.*?)<!--access end-->/gs, '<div class="v2board-no-access">You must have a valid subscription to view content in this area</div>');
+      content = content
+        .replaceAll("{{siteName}}", String(pickSetting(allSettings, "app_name", "XBoard")))
+        .replaceAll("{{subscribeUrl}}", subscription)
+        .replaceAll("{{urlEncodeSubscribeUrl}}", encodeURIComponent(subscription))
+        .replaceAll("{{safeBase64SubscribeUrl}}", safeBase64);
+      return { ...row, body: content };
+    };
+    const knowledge = (result.results || []).map(processRow);
+    if (id) return knowledge[0] ? ok(knowledge[0]) : fail("Article does not exist", 500, 500);
+    const grouped: Record<string, Record<string, any>[]> = {};
+    for (const row of knowledge) (grouped[String(row.category || "") ] ||= []).push(row);
+    return ok(grouped);
+  }
   if (request.method === "GET" && route === "/ticket/fetch") {
     const id = nullableNumber(new URL(request.url).searchParams.get("id"));
     if (id) {
