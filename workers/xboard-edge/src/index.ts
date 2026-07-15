@@ -153,6 +153,26 @@ const allowedConfigSettings = new Set([
   "password_limit_expire", "default_remind_expire", "default_remind_traffic", "login_with_mail_link_enable", "frontend_admin_path"
 ]);
 
+const integerConfigSettings = new Set([
+  "invite_force", "invite_commission", "invite_gen_limit", "invite_never_expire", "commission_first_time_enable", "commission_auto_check_enable",
+  "withdraw_close_enable", "commission_distribution_enable", "force_https", "stop_register", "try_out_enable", "try_out_plan_id", "ticket_must_wait_reply",
+  "plan_change_enable", "reset_traffic_method", "surplus_enable", "new_order_event_id", "renew_order_event_id", "change_order_event_id",
+  "show_info_to_server_enable", "show_protocol_to_server_enable", "server_pull_interval", "server_push_interval", "device_limit_mode", "server_ws_enable",
+  "remind_mail_enable", "telegram_bot_enable", "email_whitelist_enable", "email_gmail_limit_enable", "captcha_enable", "recaptcha_enable",
+  "email_verify", "safe_mode_enable", "register_limit_by_ip_enable", "register_limit_count", "register_limit_expire", "password_limit_enable",
+  "password_limit_count", "password_limit_expire", "default_remind_expire", "default_remind_traffic", "login_with_mail_link_enable"
+]);
+
+const numericConfigSettings = new Set([
+  "commission_withdraw_limit", "commission_distribution_l1", "commission_distribution_l2", "commission_distribution_l3", "try_out_hour",
+  "recaptcha_v3_score_threshold"
+]);
+
+const urlConfigSettings = new Set([
+  "logo", "app_url", "tos_url", "server_ws_url", "frontend_background_url", "telegram_webhook_url", "telegram_discuss_link",
+  "windows_download_url", "macos_download_url", "android_download_url"
+]);
+
 function adminRouteAllowed(route: string, method: string) {
   if (/^\/traffic-reset\/user\/\d+\/history$/.test(route)) return method === "GET";
   if (/^\/gift-card\/(templates|codes|usages|statistics)$/.test(route)) return method === "GET" || method === "POST";
@@ -1249,23 +1269,73 @@ async function adminServerGroupRows(env: Env) {
   }));
 }
 
+const adminUserFields: Record<string, string> = {
+  id: "u.id", email: "u.email", plan_id: "u.plan_id", group_id: "u.group_id", banned: "u.banned", is_admin: "u.is_admin",
+  is_staff: "u.is_staff", balance: "u.balance", commission_balance: "u.commission_balance", transfer_enable: "u.transfer_enable",
+  u: "u.u", d: "u.d", total_used: "(COALESCE(u.u, 0) + COALESCE(u.d, 0))", created_at: "u.created_at", updated_at: "u.updated_at",
+  expired_at: "u.expired_at", plan_name: "p.name", "plan.name": "p.name", group_name: "g.name", "group.name": "g.name",
+  "invite_user.email": "iu.email", invite_user_id: "u.invite_user_id", group_ids: "u.group_id"
+};
+
+function adminUserQuery(input: Record<string, any>) {
+  const clauses: Array<{ sql: string; logic: "AND" | "OR" }> = [];
+  const bindings: any[] = [];
+  for (const filter of parseJsonArray(input.filter)) {
+    const field = adminUserFields[String(filter?.id || "")];
+    const value = filter?.value;
+    if (!field || value === undefined || value === null || value === "") continue;
+    if (Array.isArray(value)) {
+      if (!value.length) continue;
+      clauses.push({ sql: `${field} IN (${value.map(() => "?").join(",")})`, logic: String(filter?.logic || "and").toLowerCase() === "or" ? "OR" : "AND" });
+      bindings.push(...value);
+      continue;
+    }
+    const match = String(value).match(/^(eq|neq|gt|gte|lt|lte):(.*)$/s);
+    if (match) {
+      const operators: Record<string, string> = { eq: "=", neq: "!=", gt: ">", gte: ">=", lt: "<", lte: "<=" };
+      clauses.push({ sql: `${field} ${operators[match[1]]} ?`, logic: String(filter?.logic || "and").toLowerCase() === "or" ? "OR" : "AND" });
+      bindings.push(match[2]);
+    } else {
+      clauses.push({ sql: `${field} LIKE ?`, logic: String(filter?.logic || "and").toLowerCase() === "or" ? "OR" : "AND" });
+      bindings.push(`%${String(value)}%`);
+    }
+  }
+  const sort = parseJsonArray(input.sort)
+    .map(item => ({ field: adminUserFields[String(item?.id || "")], direction: item?.desc ? "DESC" : "ASC" }))
+    .filter(item => item.field);
+  return {
+    where: clauses.length ? ` WHERE ${clauses.map((clause, index) => `${index ? clause.logic : ""} (${clause.sql})`).join(" ")}` : "",
+    bindings,
+    order: [...sort.map(item => `${item.field} ${item.direction}`), "u.id DESC"].join(", ")
+  };
+}
+
 async function adminUserList(env: Env, request: Request) {
   const input = request.method === "POST" ? await body<Record<string, any>>(request.clone()) : {};
   const url = new URL(request.url);
-  const page = Number(input.page || input.current || url.searchParams.get("page") || 1);
-  const pageSize = Number(input.page_size || input.pageSize || input.limit || url.searchParams.get("page_size") || 20);
-  const result = await list(env.XBOARD_DB, "v2_user", page, pageSize);
-  const inviterIds = [...new Set((result.data as any[]).map(row => Number(row.invite_user_id || 0)).filter(Boolean))];
+  const page = Math.max(1, Number(input.page || input.current || url.searchParams.get("page") || 1));
+  const pageSize = Math.min(100, Math.max(1, Number(input.page_size || input.pageSize || input.limit || url.searchParams.get("page_size") || 20)));
+  const query = adminUserQuery(input);
+  const [usersResult, countResult] = await Promise.all([
+    env.XBOARD_DB.prepare(`SELECT u.* FROM v2_user u LEFT JOIN v2_plan p ON p.id = u.plan_id LEFT JOIN v2_server_group g ON g.id = u.group_id LEFT JOIN v2_user iu ON iu.id = u.invite_user_id${query.where} ORDER BY ${query.order} LIMIT ? OFFSET ?`)
+      .bind(...query.bindings, pageSize, (page - 1) * pageSize).all<Record<string, any>>(),
+    env.XBOARD_DB.prepare(`SELECT COUNT(*) AS count FROM v2_user u LEFT JOIN v2_plan p ON p.id = u.plan_id LEFT JOIN v2_server_group g ON g.id = u.group_id LEFT JOIN v2_user iu ON iu.id = u.invite_user_id${query.where}`)
+      .bind(...query.bindings).first<{ count: number }>()
+  ]);
+  const userRows = usersResult.results || [];
+  const inviterIds = [...new Set(userRows.map(row => Number(row.invite_user_id || 0)).filter(Boolean))];
+  const planIds = [...new Set(userRows.map(row => Number(row.plan_id || 0)).filter(Boolean))];
+  const groupIds = [...new Set(userRows.map(row => Number(row.group_id || 0)).filter(Boolean))];
   const inviters = new Map<number, { id: number; email: string }>();
-  if (inviterIds.length) {
-    const inviterRows = await env.XBOARD_DB.prepare(`SELECT id, email FROM v2_user WHERE id IN (${inviterIds.map(() => "?").join(",")})`).bind(...inviterIds).all<{ id: number; email: string }>();
-    for (const inviter of inviterRows.results || []) inviters.set(Number(inviter.id), { id: Number(inviter.id), email: String(inviter.email || "") });
-  }
-  const data = [];
-  for (const row of result.data as any[]) {
-    const plan = await planById(env, row.plan_id);
-    const group = await groupById(env, row.group_id);
-    data.push({
+  const [inviterRows, planRows, groupRows] = await Promise.all([
+    inviterIds.length ? env.XBOARD_DB.prepare(`SELECT id, email FROM v2_user WHERE id IN (${inviterIds.map(() => "?").join(",")})`).bind(...inviterIds).all<any>() : Promise.resolve({ results: [] }),
+    planIds.length ? env.XBOARD_DB.prepare(`SELECT * FROM v2_plan WHERE id IN (${planIds.map(() => "?").join(",")})`).bind(...planIds).all<any>() : Promise.resolve({ results: [] }),
+    groupIds.length ? env.XBOARD_DB.prepare(`SELECT * FROM v2_server_group WHERE id IN (${groupIds.map(() => "?").join(",")})`).bind(...groupIds).all<any>() : Promise.resolve({ results: [] })
+  ]);
+  for (const inviter of inviterRows.results || []) inviters.set(Number(inviter.id), { id: Number(inviter.id), email: String(inviter.email || "") });
+  const plans = new Map((planRows.results || []).map((row: any) => [Number(row.id), { ...row, prices: parseJsonObject(row.prices), tags: parseJsonArray(row.tags) }]));
+  const groups = new Map((groupRows.results || []).map((row: any) => [Number(row.id), row]));
+  const data = await Promise.all(userRows.map(async row => ({
       ...safeUser(row),
       balance: Number(row.balance || 0) / 100,
       commission_balance: Number(row.commission_balance || 0) / 100,
@@ -1273,13 +1343,12 @@ async function adminUserList(env: Env, request: Request) {
       total_used: Number(row.u || 0) + Number(row.d || 0),
       used_traffic: Number(row.u || 0) + Number(row.d || 0),
       subscribe_url: await subscribeUrl(request, env, row.token),
-      plan,
-      group,
+      plan: plans.get(Number(row.plan_id || 0)) || null,
+      group: groups.get(Number(row.group_id || 0)) || null,
       invite_user: inviters.get(Number(row.invite_user_id || 0)) || null,
       online_count: 0
-    });
-  }
-  return paginated(data, Number(result.total || data.length), page, pageSize);
+    })));
+  return paginated(data, Number(countResult?.count || 0), page, pageSize);
 }
 
 async function adminPlanRows(env: Env) {
@@ -1739,8 +1808,12 @@ async function dumpAdminUsers(request: Request, env: Env) {
   const ids = parseJsonArray(input.user_ids || input.ids).map(Number).filter(Boolean);
   const scope = String(input.scope || (ids.length ? "selected" : "all"));
   if (scope === "selected" && !ids.length) return fail("user_ids不能为空", 422, 422);
-  const query = `SELECT u.*, p.name AS plan_name FROM v2_user u LEFT JOIN v2_plan p ON p.id = u.plan_id${scope === "selected" ? ` WHERE u.id IN (${ids.map(() => "?").join(",")})` : ""} ORDER BY u.id ASC`;
-  const result = scope === "selected" ? await env.XBOARD_DB.prepare(query).bind(...ids).all<Record<string, any>>() : await env.XBOARD_DB.prepare(query).all<Record<string, any>>();
+  const filtered = scope === "filtered" ? adminUserQuery(input) : null;
+  const where = scope === "selected" ? ` WHERE u.id IN (${ids.map(() => "?").join(",")})` : filtered?.where || "";
+  const bindings = scope === "selected" ? ids : filtered?.bindings || [];
+  const order = filtered?.order || "u.id ASC";
+  const query = `SELECT u.*, p.name AS plan_name FROM v2_user u LEFT JOIN v2_plan p ON p.id = u.plan_id LEFT JOIN v2_server_group g ON g.id = u.group_id LEFT JOIN v2_user iu ON iu.id = u.invite_user_id${where} ORDER BY ${order}`;
+  const result = await env.XBOARD_DB.prepare(query).bind(...bindings).all<Record<string, any>>();
   const output: unknown[][] = [["邮箱", "余额", "推广佣金", "总流量", "剩余流量", "套餐到期时间", "订阅计划", "订阅地址"]];
   for (const user of result.results || []) output.push([
     user.email, (Number(user.balance || 0) / 100).toFixed(2), (Number(user.commission_balance || 0) / 100).toFixed(2),
@@ -2812,15 +2885,36 @@ async function adminApi(request: Request, env: Env, path: string) {
     for (const [name, value] of Object.entries(input)) {
       if (await saveSubscribeTemplate(env, name, value)) continue;
       if (!allowedConfigSettings.has(name)) return fail(`不支持的设置项: ${name}`, 422, 422);
+      let storedValue = value;
+      if (integerConfigSettings.has(name) && value !== null && value !== "") {
+        const numeric = typeof value === "boolean" ? Number(value) : Number(value);
+        if (!Number.isFinite(numeric) || !Number.isInteger(numeric)) return fail(`${name} 必须是整数`, 422, 422);
+        storedValue = numeric;
+      }
+      if (numericConfigSettings.has(name) && value !== null && value !== "") {
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) return fail(`${name} 必须是数字`, 422, 422);
+        if (name === "recaptcha_v3_score_threshold" && (numeric < 0 || numeric > 1)) return fail("reCAPTCHA v3 分数阈值必须在 0 到 1 之间", 422, 422);
+        storedValue = numeric;
+      }
+      if (urlConfigSettings.has(name) && value !== null && value !== "") {
+        try {
+          const parsed = new URL(String(value));
+          if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error("protocol");
+        } catch { return fail(`${name} 必须是有效的 HTTP(S) URL`, 422, 422); }
+      }
+      if (name === "server_token" && value !== null && value !== "" && String(value).length < 16) return fail("通讯密钥长度必须大于16位", 422, 422);
+      if (name === "reset_traffic_method" && ![0, 1, 2, 3, 4].includes(Number(storedValue))) return fail("月流量重置方式无效", 422, 422);
+      if (name === "captcha_type" && !["recaptcha", "turnstile", "recaptcha-v3"].includes(String(value))) return fail("人机验证类型无效", 422, 422);
       const emailAliases: Record<string, string> = {
         email_username: "resend_from_name", resend_from_name: "email_username",
         email_from_address: "resend_from_address", resend_from_address: "email_from_address"
       };
       await env.XBOARD_DB.prepare("INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
-        .bind(name, typeof value === "object" ? JSON.stringify(value) : String(value), ts, ts).run();
+        .bind(name, typeof storedValue === "object" ? JSON.stringify(storedValue) : String(storedValue), ts, ts).run();
       if (emailAliases[name]) {
         await env.XBOARD_DB.prepare("INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
-          .bind(emailAliases[name], typeof value === "object" ? JSON.stringify(value) : String(value), ts, ts).run();
+          .bind(emailAliases[name], typeof storedValue === "object" ? JSON.stringify(storedValue) : String(storedValue), ts, ts).run();
       }
     }
     invalidateSettingsCache();

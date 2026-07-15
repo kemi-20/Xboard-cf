@@ -175,9 +175,9 @@ export function buildNodeConfig(node: Row, routeRows: Row[] = []): Row {
   if (outbounds.length) response.custom_outbounds = outbounds;
   if (customRoutes.length) response.custom_routes = customRoutes;
   const cert = objectAt(node.cert_config);
-  if (Object.keys(cert).length) {
+  if (Object.values(cert).some(value => value !== null && value !== undefined && value !== "")) {
     if (cert.mode && !cert.cert_mode) { cert.cert_mode = cert.mode; delete cert.mode; }
-    if (cert.cert_mode !== "none") response.cert_config = cert;
+    if (cert.cert_mode && cert.cert_mode !== "none") response.cert_config = cert;
   }
   return response;
 }
@@ -203,6 +203,7 @@ export function parseTraffic(input: unknown): Array<{ user_id: number; u: number
 }
 
 export async function responseEtag(data: unknown): Promise<string> {
+  // PHP json_encode escapes slashes and each UTF-16 code unit, including surrogate pairs.
   const encoded = JSON.stringify(data)
     .replaceAll("/", "\\/")
     .replace(/[\u0080-\uFFFF]/g, character => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);

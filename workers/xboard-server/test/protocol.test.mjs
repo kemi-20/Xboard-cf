@@ -72,3 +72,10 @@ test("returns only official user fields", () => {
 test("ETag uses PHP json_encode escaping", async () => {
   assert.equal(await responseEtag({ message: "中文/😀" }), '"d73f031c258799442f6ebfc0af123f028f279b2a"');
 });
+
+test("empty certificate configuration is omitted like upstream", () => {
+  const base = { type: "vmess", host: "node.example", server_port: 443, protocol_settings: { network: "tcp" } };
+  assert.equal(buildNodeConfig({ ...base, cert_config: { mode: null } }).cert_config, undefined);
+  assert.equal(buildNodeConfig({ ...base, cert_config: { mode: "none" } }).cert_config, undefined);
+  assert.deepEqual(buildNodeConfig({ ...base, cert_config: { mode: "file", cert: "/cert.pem" } }).cert_config, { cert_mode: "file", cert: "/cert.pem" });
+});

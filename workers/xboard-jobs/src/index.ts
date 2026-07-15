@@ -5,6 +5,7 @@ import { settings as loadSettings } from "./db.ts";
 export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; MAILEROO_API_KEY?: string; BREVO_API_KEY?: string; TELEGRAM_BOT_TOKEN?: string; }
 
 const SHANGHAI_OFFSET = 8 * 3600;
+let statAggregateSchemaReady = false;
 
 function dayStart(ts = now()) {
   return Math.floor((ts + SHANGHAI_OFFSET) / 86400) * 86400 - SHANGHAI_OFFSET;
@@ -23,6 +24,20 @@ function render(source: string, vars: Record<string, unknown>) {
   });
 }
 
+async function ensureStatAggregateSchema(env: Env) {
+  if (statAggregateSchemaReady) return;
+  try {
+    if (await env.XBOARD_KV.get("schema:v2_stat_record_type:v1")) {
+      statAggregateSchemaReady = true;
+      return;
+    }
+  } catch {}
+  await env.XBOARD_DB.prepare("UPDATE v2_stat SET record_type = 'd' WHERE record_type IS NULL OR record_type = ''").run();
+  await env.XBOARD_DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_stat_record_type ON v2_stat(record_at, record_type)").run();
+  statAggregateSchemaReady = true;
+  try { await env.XBOARD_KV.put("schema:v2_stat_record_type:v1", "1"); } catch {}
+}
+
 async function resolveMailContent(env: Env, payload: any) {
   const defaults: Record<string, { subject: string; content: string }> = {
     verify: { subject: "{{name}} - 邮箱验证码", content: "您的验证码是：{{code}}。返回 {{url}}" },
@@ -35,7 +50,7 @@ async function resolveMailContent(env: Env, payload: any) {
   let row = await env.XBOARD_DB.prepare("SELECT subject, content FROM v2_mail_templates WHERE name = ?").bind(name).first<{ subject: string; content: string }>();
   if (!row && legacyAliases[name]) row = await env.XBOARD_DB.prepare("SELECT subject, content FROM v2_mail_templates WHERE name = ?").bind(legacyAliases[name]).first<{ subject: string; content: string }>();
   const template = row || defaults[name] || defaults.notify;
-  const vars = payload.vars || {};
+  const vars = payload.template_value?.vars || payload.vars || {};
   const subject = render(String(template.subject || ""), vars) || render(String(payload.subject || ""), vars);
   const renderedContent = render(String(template.content), vars);
   const text = row || (!payload.html && !payload.text) ? renderedContent : render(String(payload.text || ""), vars);
@@ -61,11 +76,10 @@ async function recordFailure(env: Env, event: any, error: unknown) {
 async function runOnce(env: Env, eventId: string, type: string, payload: unknown, statements: D1PreparedStatement[]) {
   const existing = await env.XBOARD_DB.prepare("SELECT status FROM v2_job_logs WHERE event_id = ?").bind(eventId).first<{ status: string }>();
   if (existing?.status === "done") return null;
-  if (existing) await env.XBOARD_DB.prepare("DELETE FROM v2_job_logs WHERE event_id = ?").bind(eventId).run();
   const ts = now();
   try {
     return await env.XBOARD_DB.batch([
-      env.XBOARD_DB.prepare("INSERT INTO v2_job_logs(event_id, type, status, payload, created_at, updated_at) VALUES (?, ?, 'done', ?, ?, ?)")
+      env.XBOARD_DB.prepare("INSERT INTO v2_job_logs(event_id, type, status, payload, created_at, updated_at) VALUES (?, ?, 'done', ?, ?, ?) ON CONFLICT(event_id) DO UPDATE SET type = excluded.type, status = 'done', payload = excluded.payload, updated_at = excluded.updated_at")
         .bind(eventId, type, JSON.stringify(payload), ts, ts),
       ...statements
     ]);
@@ -79,6 +93,7 @@ async function runOnce(env: Env, eventId: string, type: string, payload: unknown
 }
 
 async function traffic(env: Env, event: any) {
+  await ensureStatAggregateSchema(env);
   const rows = Array.isArray(event.payload) ? event.payload : Array.isArray(event.payload?.data) ? event.payload.data : [event.payload];
   const parsedRate = Number(event.rate);
   const rate = Number.isFinite(parsedRate) ? parsedRate : 1;
@@ -125,10 +140,8 @@ async function traffic(env: Env, event: any) {
     }
   }
   if (userU || userD) {
-    statements.push(env.XBOARD_DB.prepare("UPDATE v2_stat SET transfer_used = transfer_used + ?, updated_at = ? WHERE record_at = ?")
-      .bind(userU + userD, ts, recordAt));
-    statements.push(env.XBOARD_DB.prepare("INSERT INTO v2_stat(record_at, user_count, order_count, transfer_used, created_at, updated_at) SELECT ?, 0, 0, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM v2_stat WHERE record_at = ?)")
-      .bind(recordAt, userU + userD, ts, ts, recordAt));
+    statements.push(env.XBOARD_DB.prepare("INSERT INTO v2_stat(record_at, record_type, user_count, order_count, transfer_used, created_at, updated_at) VALUES (?, 'd', 0, 0, ?, ?, ?) ON CONFLICT(record_at, record_type) DO UPDATE SET transfer_used = v2_stat.transfer_used + excluded.transfer_used, updated_at = excluded.updated_at")
+      .bind(recordAt, userU + userD, ts, ts));
   }
   const results = await runOnce(env, event.event_id, "traffic", event, statements);
   const hasPending = results && pendingResultIndexes.some(index => Number((results[index]?.meta as any)?.changes || 0) > 0);
@@ -190,10 +203,12 @@ async function telegram(env: Env, event: any) {
   const botToken = env.TELEGRAM_BOT_TOKEN || await setting(env, "telegram_bot_token");
   const chatId = payload.chat_id || payload.chatId || await setting(env, "telegram_discuss_id");
   if (!botToken || !chatId || !payload.text) throw new Error("Telegram 任务参数不完整");
+  const parseMode = String(payload.parse_mode || "markdown").toLowerCase();
+  const text = parseMode === "markdown" ? String(payload.text).replaceAll("_", "\\_") : String(payload.text);
   const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text: String(payload.text), parse_mode: payload.parse_mode, disable_web_page_preview: payload.disable_web_page_preview })
+    body: JSON.stringify({ chat_id: chatId, text, parse_mode: parseMode, disable_web_page_preview: payload.disable_web_page_preview })
   });
   if (!response.ok) throw new Error(`Telegram ${response.status}: ${(await response.text()).slice(0, 500)}`);
   await runOnce(env, event.event_id, "telegram", event, []);
@@ -216,8 +231,8 @@ async function handle(env: Env, event: any) {
   else if (event.type === "mail") await mail(env, event);
   else if (event.type === "telegram") await telegram(env, event);
   else if (event.type === "stat") await stat(env, event);
-  else if (event.type === "node_sync") await runOnce(env, event.event_id, "node_sync", { ...event, skipped: "Use the xboard-server service binding for synchronous node updates" }, []);
-  else await runOnce(env, event.event_id, event.type || "unknown", event, []);
+  else if (event.type === "node_sync") throw new Error("node_sync events must use the xboard-server service binding and cannot be acknowledged by xboard-jobs");
+  else throw new Error(`Unsupported queue event type: ${String(event.type || "unknown")}`);
 }
 
 export const __test = { dayStart, render };

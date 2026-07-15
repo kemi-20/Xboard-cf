@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS v2_plan (
   content TEXT,
   tags TEXT,
   show INTEGER NOT NULL DEFAULT 0,
-  sell INTEGER NOT NULL DEFAULT 1,
+  sell INTEGER NOT NULL DEFAULT 0,
   renew INTEGER NOT NULL DEFAULT 1,
   sort INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
@@ -133,7 +133,7 @@ CREATE TABLE IF NOT EXISTS v2_server (
   group_ids TEXT,
   route_ids TEXT,
   host TEXT NOT NULL,
-  port INTEGER NOT NULL,
+  port TEXT NOT NULL,
   server_port INTEGER,
   rate REAL NOT NULL DEFAULT 1,
   tags TEXT,
@@ -299,9 +299,10 @@ CREATE TABLE IF NOT EXISTS v2_stat (
   paid_count INTEGER NOT NULL DEFAULT 0,
   commission_total INTEGER NOT NULL DEFAULT 0,
   commission_count INTEGER NOT NULL DEFAULT 0,
-  record_type TEXT,
+  record_type TEXT NOT NULL DEFAULT 'd',
   created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  UNIQUE(record_at, record_type)
 );
 
 CREATE TABLE IF NOT EXISTS v2_stat_user (

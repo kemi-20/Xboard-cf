@@ -183,6 +183,8 @@ function filterByClientCompatibility(client: Client, request: Request, servers: 
       if (server.type === "trojan" && Number(serverValue(server, "protocol_settings.tls")) === 2) return false;
       if (server.type === "vmess" && serverValue(server, "protocol_settings.network") === "httpupgrade") return false;
       if (info.version) {
+        const baseVersions: Record<string, string> = { anytls: "3.3.0", hysteria: "2.0.0", tuic: "2.3.0", shadowsocks: "2.0.0" };
+        if (baseVersions[server.type] && !versionAtLeast(info.version, baseVersions[server.type])) return false;
         const rules: Record<string, [string, Record<string, string>]> = {
           vless: ["protocol_settings.tls", { "2": "3.1.0" }],
           hysteria: ["protocol_settings.version", { "1": "2.0.0", "2": "2.5.0" }],
@@ -208,6 +210,8 @@ function filterByClientCompatibility(client: Client, request: Request, servers: 
       if (server.type === "trojan" && !["tcp", "ws", "grpc", "h2", "httpupgrade"].includes(String(serverValue(server, "protocol_settings.network") || "tcp"))) return false;
     }
     if (client === "singbox" && name === "sing-box") {
+      const baseVersions: Record<string, string> = { vless: "1.5.0", hysteria: "1.5.0", tuic: "1.5.0", anytls: "1.12.0" };
+      if (baseVersions[server.type] && !versionAtLeast(info.version, baseVersions[server.type])) return false;
       if (["vless", "vmess", "trojan"].includes(server.type) && serverValue(server, "protocol_settings.network") === "xhttp") return false;
       if (server.type === "vless" && !meetsMappedRequirement(server, "protocol_settings.tls", { "2": "1.6.0" }, info.version)) return false;
       if (server.type === "vless" && !meetsMappedRequirement(server, "protocol_settings.flow", { "xtls-rprx-vision": "1.5.0" }, info.version)) return false;
@@ -512,7 +516,7 @@ function singboxOutbound(user: any, server: any) {
   if (server.type === "hysteria") {
     Object.assign(outbound, { up_mbps: ps.bandwidth?.up, down_mbps: ps.bandwidth?.down, server_ports: server.ports ? [String(server.ports).replace("-", ":")] : undefined, hop_interval: ps.hop_interval ? `${ps.hop_interval}s` : undefined });
     if (Number(ps.version || 1) === 2) Object.assign(outbound, { password: server.password || user.uuid, obfs: ps.obfs?.open ? { type: ps.obfs?.type, password: ps.obfs?.password } : undefined });
-    else { delete outbound.password; Object.assign(outbound, { auth_str: server.password || user.uuid, obfs: ps.obfs?.open ? ps.obfs?.password : undefined, disable_mtu_discovery: true }); }
+    else { delete outbound.password; Object.assign(outbound, { auth_str: server.password || user.uuid, obfs: ps.obfs?.password || undefined, disable_mtu_discovery: true }); }
   }
   if (server.type === "tuic") {
     Object.assign(outbound, { congestion_control: ps.congestion_control || "cubic", udp_relay_mode: ps.udp_relay_mode || "native", zero_rtt_handshake: true, heartbeat: "10s" });
@@ -722,7 +726,11 @@ function shadowrocketLine(user: any, server: any) {
     else if (ps.network === "ws") Object.assign(params, { obfs: "websocket", path: ns.path, obfsParam: ns.headers?.Host });
     else if (ps.network === "grpc") Object.assign(params, { obfs: "grpc", path: ns.serviceName, host: ps.tls_settings?.server_name || server.host });
     else if (ps.network === "kcp") Object.assign(params, { obfs: "kcp", path: ns.seed, type: ns.header?.type || "none" });
-    else if (["h2", "httpupgrade", "xhttp"].includes(ps.network)) Object.assign(params, { obfs: ps.network, path: ns.path, obfsParam: Array.isArray(ns.host) ? ns.host[0] : ns.host || server.host, mode: ns.mode });
+    else if (["h2", "httpupgrade", "xhttp"].includes(ps.network)) {
+      const host = Array.isArray(ns.host) ? ns.host[0] : ns.host || server.host;
+      Object.assign(params, { obfs: ps.network, path: ns.path, obfsParam: host, mode: ns.mode });
+      if (server.type === "vmess" && ps.network === "h2") params.peer = host;
+    }
     const info = b64(`auto:${password}@${address}:${server.port}`);
     return `${server.type}://${info}?${query(params)}\r\n`;
   }
@@ -839,7 +847,10 @@ function loonLine(user: any, server: any) {
   } else return "";
   if (["vmess", "trojan", "vless"].includes(server.type)) {
     const tls = Number(ps.tls || 0);
-    if (tls) parts.push("over-tls=true", `skip-cert-verify=${(tls === 2 ? ps.reality_settings?.allow_insecure : ps.tls_settings?.allow_insecure) ? "true" : "false"}`);
+    if (tls) {
+      if (server.type !== "trojan") parts.push("over-tls=true");
+      parts.push(`skip-cert-verify=${(tls === 2 ? ps.reality_settings?.allow_insecure : ps.tls_settings?.allow_insecure) ? "true" : "false"}`);
+    }
     else if (server.type === "vless") parts.push("over-tls=false");
     const serverName = tls === 2 ? ps.reality_settings?.server_name : ps.tls_settings?.server_name;
     if (serverName) parts.push(`${["vmess", "trojan"].includes(server.type) ? "tls-name" : "sni"}=${serverName}`);

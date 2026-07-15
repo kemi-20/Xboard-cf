@@ -1,1 +1,0 @@
-throw new Error("This legacy CLI migration helper is not implemented. Use Admin -> System Management -> Data Migration, which provides validation, backup, rollback, and SQLite compatibility mapping.");

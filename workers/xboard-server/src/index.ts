@@ -131,7 +131,7 @@ async function authenticateV2(env: Env, input: Row, handshake = false): Promise<
     }
     const machine = await getMachine(env, input.machine_id, input.token);
     if (!machine) return apiFailure("Machine not found or invalid token", 401);
-    if (!Number(machine.is_active ?? machine.enabled ?? 1)) return apiFailure("Machine is disabled", 403);
+    if (!Number(machine.is_active ?? 0)) return apiFailure("Machine is disabled", 403);
     let node: Row | undefined;
     if (Number(input.node_id) > 0) {
       const found = await env.XBOARD_DB.prepare("SELECT * FROM v2_server WHERE id = ? AND machine_id = ? AND enabled = 1").bind(Number(input.node_id), Number(machine.id)).first<Row>();
@@ -155,7 +155,7 @@ async function authenticateMachineEndpoint(env: Env, input: Row): Promise<AuthCo
   if (!Number.isInteger(Number(input.machine_id))) return validationFailure("machine_id", "The machine id field is required.");
   if (!input.token) return validationFailure("token");
   const machine = await getMachine(env, input.machine_id, input.token);
-  if (!machine || !Number(machine.is_active ?? machine.enabled ?? 1)) return json({ message: "Machine not found or disabled" }, 403);
+  if (!machine || !Number(machine.is_active ?? 0)) return json({ message: "Machine not found or disabled" }, 403);
   return { input, machine };
 }
 
@@ -311,6 +311,11 @@ async function aggregateDevices(env: Env, users: Row[]) {
   return output;
 }
 
+async function aggregateDeviceCounts(env: Env, users: Row[]) {
+  const devices = await aggregateDevices(env, users);
+  return Object.fromEntries(Object.entries(devices).map(([userId, ips]) => [userId, Array.isArray(ips) ? ips.length : 0]));
+}
+
 async function clearNodeDevices(env: Env, nodeId: number) {
   const key = `node:devices:${nodeId}`;
   const previous = parseJson<Row>(await optionalKvGet(env, key), {});
@@ -347,7 +352,13 @@ async function processStatus(env: Env, node: Row, status: unknown) {
 async function processMetrics(env: Env, node: Row, metrics: unknown) {
   if (!metrics || typeof metrics !== "object" || Array.isArray(metrics)) return;
   const timestamp = now();
-  const value = { ...(metrics as Row), updated_at: timestamp };
+  const raw = metrics as Row;
+  const numberFields = ["uptime", "goroutines", "active_connections", "total_connections", "total_users", "active_users", "inbound_speed", "outbound_speed"];
+  const value: Row = { updated_at: timestamp, kernel_status: Boolean(raw.kernel_status ?? false) };
+  for (const field of numberFields) value[field] = Number.isFinite(Number(raw[field])) ? Math.trunc(Number(raw[field])) : 0;
+  for (const field of ["cpu_per_core", "load", "speed_limiter", "gc", "api", "ws", "limits"]) {
+    value[field] = raw[field] && typeof raw[field] === "object" ? raw[field] : [];
+  }
   await reportStatus(env, "node", Number(node.id), {
     machine_id: Number(node.machine_id || 0) || null,
     metrics: value,
@@ -388,7 +399,7 @@ async function handleUniProxy(request: Request, env: Env, action: string, auth: 
     if (auth.input.__invalid_json || !(await processAlive(env, Number(node.id), auth.input.__raw))) return json({ error: "Invalid online data" }, 400);
     return json({ data: true });
   }
-  if (action === "alivelist") return json({ alive: await aggregateDevices(env, await nodeUsers(env, node)) });
+  if (action === "alivelist") return json({ alive: await aggregateDeviceCounts(env, await nodeUsers(env, node)) });
   if (action === "status") {
     const failure = validateStatus(auth.input);
     if (failure) return failure;
@@ -436,7 +447,7 @@ async function handleTidalab(request: Request, env: Env, family: string, action:
     if (action === "config") {
       if (!auth.input.local_port) return validationFailure("local_port", "本地端口不能为空");
       const config = { run_type: "server", local_addr: "0.0.0.0", local_port: Number(node.server_port), remote_addr: "www.taobao.com", remote_port: 80, password: [], ssl: { cert: "/root/.cert/server.crt", key: "/root/.cert/server.key", sni: protocol.server_name || node.host }, api: { enabled: true, api_addr: "127.0.0.1", api_port: Number(auth.input.local_port) } };
-      return new Response(JSON.stringify(config), { headers: { "content-type": "text/plain; charset=UTF-8" } });
+      return json(config);
     }
   }
   return json({ message: "Not Found" }, 404);
@@ -854,7 +865,7 @@ for (const [family, type, actions] of [
   for (const action of actions) {
     const method = action === "user" || action === "config" ? "GET" : "POST";
     routes.set(`${method} /api/v1/server/${family}/${action}`, async (request, env, input) => {
-      const auth = await authenticateV1(env, input, type);
+      const auth = await authenticateV1(env, input, family === "ShadowsocksTidalab" ? undefined : type);
       return auth instanceof Response ? auth : handleTidalab(request, env, family, action, auth);
     });
   }
@@ -895,10 +906,10 @@ routes.set("POST /api/v2/server/machine/nodes", async (_request, env, input) => 
 });
 
 routes.set("POST /api/v2/server/machine/status", async (_request, env, input) => {
-  const failure = validateStatus(input, true);
-  if (failure) return failure;
   const auth = await authenticateMachineEndpoint(env, input);
   if (auth instanceof Response) return auth;
+  const failure = validateStatus(input, true);
+  if (failure) return failure;
   await saveMachineStatus(env, auth.machine!, input);
   return json({ data: true });
 });

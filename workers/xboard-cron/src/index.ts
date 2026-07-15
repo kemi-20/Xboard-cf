@@ -59,8 +59,8 @@ async function optionalKvGet(env: Env, key: string) {
   try { return await env.XBOARD_KV.get(key); } catch { return null; }
 }
 
-async function optionalKvPut(env: Env, key: string, value: string) {
-  try { await env.XBOARD_KV.put(key, value); } catch {}
+async function optionalKvPut(env: Env, key: string, value: string, expirationTtl?: number) {
+  try { await env.XBOARD_KV.put(key, value, expirationTtl ? { expirationTtl } : undefined); } catch {}
 }
 
 async function setting(env: Env, name: string, fallback = "") {
@@ -92,8 +92,10 @@ async function sendReminders(env: Env, ts: number, day: number) {
       }
       const total = Number(user.transfer_enable || 0);
       const ratio = total > 0 ? (Number(user.u || 0) + Number(user.d || 0)) / total : 0;
-      if (Number(user.remind_traffic) && ratio >= 0.8 && ratio < 1) {
+      const trafficReminderKey = `remind:traffic:${user.id}`;
+      if (Number(user.remind_traffic) && ratio >= 0.8 && ratio < 1 && !await optionalKvGet(env, trafficReminderKey)) {
         events.push({ body: { event_id: `mail:remind-traffic:${day}:${user.id}`, type: "mail", payload: { to: user.email, template_name: "remindTraffic", vars } } });
+        await optionalKvPut(env, trafficReminderKey, String(ts), 86400);
       }
     }
     for (let start = 0; start < events.length; start += 100) await env.MAIL_EVENTS.sendBatch(events.slice(start, start + 100));
@@ -159,8 +161,8 @@ async function resetTraffic(env: Env, ts: number) {
       const method = user.reset_traffic_method === null || user.reset_traffic_method === undefined ? systemMethod : Number(user.reset_traffic_method);
       const resetTypes: Record<number, string> = { 0: "first_day_month", 1: "monthly", 3: "first_day_year", 4: "yearly" };
       await env.XBOARD_DB.batch([
-        env.XBOARD_DB.prepare("UPDATE v2_user SET u = 0, d = 0, reset_count = COALESCE(reset_count, 0) + 1, last_reset_at = ?, next_reset_at = ?, updated_at = ? WHERE id = ? AND next_reset_at IS NOT NULL AND next_reset_at <= ?")
-          .bind(ts, next, ts, user.id, ts),
+        env.XBOARD_DB.prepare("UPDATE v2_user SET u = 0, d = 0, reset_count = COALESCE(reset_count, 0) + 1, last_reset_at = ?, next_reset_at = ?, updated_at = ? WHERE id = ? AND next_reset_at IS NOT NULL AND next_reset_at <= ? AND banned = 0 AND (expired_at IS NULL OR expired_at > ?)")
+          .bind(ts, next, ts, user.id, ts, ts),
         env.XBOARD_DB.prepare(`INSERT INTO v2_traffic_reset_logs(user_id, reset_type, old_u, old_d, old_upload, old_download, old_total, new_upload, new_download, new_total, trigger_source, metadata, reset_time, created_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 'cron', ?, ?, ?)`).bind(user.id, resetTypes[method] || "manual", oldU, oldD, oldU, oldD, oldU + oldD, JSON.stringify({ trigger_source: "cron" }), ts, ts)
       ]);
@@ -290,7 +292,12 @@ async function checkOrders(env: Env, ts: number) {
   const processing = await env.XBOARD_DB.prepare("SELECT * FROM v2_order WHERE status = 1 ORDER BY id ASC LIMIT 200").all<Record<string, any>>();
   for (const order of processing.results || []) {
     try { await openProcessingOrder(env, order, ts); }
-    catch (error) { console.error("Failed to open processing order", { trade_no: order.trade_no, error }); }
+    catch (error) {
+      const message = String((error as any)?.message || error);
+      console.error("Failed to open processing order", { trade_no: order.trade_no, error });
+      await env.XBOARD_DB.prepare("INSERT INTO v2_job_logs(event_id, type, status, payload, error, created_at, updated_at) VALUES (?, 'order_handle', 'failed', ?, ?, ?, ?) ON CONFLICT(event_id) DO UPDATE SET status = 'failed', payload = excluded.payload, error = excluded.error, updated_at = excluded.updated_at")
+        .bind(`order:${order.id}`, JSON.stringify({ id: order.id, trade_no: order.trade_no }), message, ts, ts).run();
+    }
   }
 }
 
@@ -345,8 +352,23 @@ async function resetLogs(env: Env, ts: number) {
   ]);
 }
 
+async function acquireTaskLock(env: Env, task: string, ts: number) {
+  const eventId = `schedule:lock:${task}`;
+  const result = await env.XBOARD_DB.prepare(`INSERT INTO v2_job_logs(event_id, type, status, payload, created_at, updated_at)
+    VALUES (?, 'schedule', 'running', '{}', ?, ?)
+    ON CONFLICT(event_id) DO UPDATE SET status = 'running', updated_at = excluded.updated_at
+    WHERE v2_job_logs.status != 'running' OR v2_job_logs.updated_at < ?`).bind(eventId, ts, ts, ts - 600).run();
+  return Number((result.meta as any)?.changes || 0) === 1;
+}
+
+async function releaseTaskLock(env: Env, task: string, ts: number) {
+  await env.XBOARD_DB.prepare("UPDATE v2_job_logs SET status = 'done', updated_at = ? WHERE event_id = ? AND status = 'running'")
+    .bind(ts, `schedule:lock:${task}`).run();
+}
+
 async function run(env: Env, task = "scheduled") {
   const ts = now();
+  await optionalKvPut(env, "schedule:last_check_at", String(ts), 3600);
   const day = dayStart(ts);
   const time = shanghaiParts(ts);
   const tasks = task === "all"
@@ -359,16 +381,21 @@ async function run(env: Env, task = "scheduled") {
           ...(time.hour === 11 && time.minute === 30 ? ["send:remindMail"] : [])]
       : [task];
   for (const current of tasks) {
-    if (current === "check:order") await checkOrders(env, ts);
-    else if (current === "check:ticket") await checkTickets(env, ts);
-    else if (current === "check:commission") await checkCommission(env, ts);
-    else if (current === "check:traffic-exceeded") await checkTrafficExceeded(env);
-    else if (current === "reset:traffic") await resetTraffic(env, ts);
-    else if (current === "cleanup:online-status") await cleanupOnlineStatus(env, ts);
-    else if (current === "reset:log") await resetLogs(env, ts);
-    else if (current === "xboard:statistics") await statistics(env, ts, day);
-    else if (current === "send:remindMail") await sendReminders(env, ts, day);
-    await optionalKvPut(env, `schedule:last_run:${current}`, String(ts));
+    if (!await acquireTaskLock(env, current, ts)) continue;
+    try {
+      if (current === "check:order") await checkOrders(env, ts);
+      else if (current === "check:ticket") await checkTickets(env, ts);
+      else if (current === "check:commission") await checkCommission(env, ts);
+      else if (current === "check:traffic-exceeded") await checkTrafficExceeded(env);
+      else if (current === "reset:traffic") await resetTraffic(env, ts);
+      else if (current === "cleanup:online-status") await cleanupOnlineStatus(env, ts);
+      else if (current === "reset:log") await resetLogs(env, ts);
+      else if (current === "xboard:statistics") await statistics(env, ts, day);
+      else if (current === "send:remindMail") await sendReminders(env, ts, day);
+      await optionalKvPut(env, `schedule:last_run:${current}`, String(ts));
+    } finally {
+      await releaseTaskLock(env, current, now());
+    }
   }
 }
 

@@ -506,3 +506,31 @@ test("subscription labels and exact traffic boundaries match upstream", () => {
   assert.equal(__test.traffic(1073741824), "1024 MB");
   assert.equal(__test.traffic(1073741825), "1 GB");
 });
+
+test("audited subscription protocol regressions match upstream", () => {
+  const user = { uuid: "uuid" };
+  const vmessH2 = __test.shadowrocketLine(user, {
+    type: "vmess", name: "VMess H2", host: "node.example", port: 443,
+    protocol_settings: { network: "h2", network_settings: { path: "/h2", host: ["cdn.example"] } }
+  });
+  assert.match(vmessH2, /peer=cdn\.example/);
+
+  const hysteria = __test.singboxOutbound(user, {
+    type: "hysteria", name: "Hy1", host: "node.example", port: 443,
+    protocol_settings: { version: 1, obfs: { open: false, password: "secret" }, tls: {} }
+  });
+  assert.equal(hysteria.obfs, "secret");
+
+  const trojan = __test.loonLine(user, {
+    type: "trojan", name: "Trojan", host: "node.example", port: 443,
+    protocol_settings: { tls: 1, tls_settings: { server_name: "sni.example" } }
+  });
+  assert.doesNotMatch(trojan, /over-tls=true/);
+
+  const stashOld = new Request("https://sub.example/s/token", { headers: { "user-agent": "stash/3.2.9" } });
+  assert.deepEqual(__test.filterByClientCompatibility("stash", stashOld, [{ type: "anytls", protocol_settings: {} }]), []);
+  const singboxOld = new Request("https://sub.example/s/token?flag=sing-box/1.4.0");
+  assert.deepEqual(__test.filterByClientCompatibility("singbox", singboxOld, [
+    { type: "tuic", protocol_settings: {} }, { type: "hysteria", protocol_settings: { version: 1 } }, { type: "anytls", protocol_settings: {} }
+  ]), []);
+});
