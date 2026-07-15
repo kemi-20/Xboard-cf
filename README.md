@@ -227,42 +227,6 @@ framework/schedule 锁
 
 真实备份预演覆盖 14,369 行 SQLite 数据和 Redis 12 格式 RDB。迁移器会处理原版与 D1 的字段差异，包括时间戳、`transfer_used_total`、机器启用状态、订阅模板默认字段和 bcrypt 密码标记。
 
-## IP 注册限制
-
-开启“系统管理 -> 系统配置 -> 安全设置 -> IP 注册限制”后，注册次数按访客公网 IP 分开记录在 KV：
-
-```text
-rate:register:{访客IP}
-```
-
-Cloudflare Worker 优先读取 `CF-Connecting-IP`。该请求头由 Cloudflare 写入，表示直接连接 Cloudflare 的访客 IP，并非 Cloudflare 机房节点 IP；缺失时才回退到 `X-Forwarded-For`。注册成功后的自动登录也会保留该 IP，用于更新用户的 `last_login_ip`。
-
-如果用户浏览器直接请求 Worker 或绑定到 Worker 的自定义域名，可获得真实用户 IP。如果请求先经过第三方服务器端反向代理，Cloudflare 看到的将是该代理服务器 IP；纯静态第三方前端不受此限制。
-
-## 节点与服务器状态
-
-节点协议兼容基线固定为：
-
-```text
-cedar2025/Xboard      8e4864b4c7f6240e3ef08ecd7b59447e5d9dd363
-cedar2025/Xboard-Node 0a29338e1f102a462363ce3527417029f89bab28
-```
-
-支持的接口包括：
-
-```text
-/api/v1/server/UniProxy/*
-/api/v1/server/ShadowsocksTidalab/*
-/api/v1/server/TrojanTidalab/*
-/api/v2/server/*
-/api/v2/server/machine/*
-/ws
-```
-
-机器模式会持续上报 CPU、内存、磁盘和网络速率。最近 24 小时的数据保存在 `v2_server_machine_load_history`，后台服务器详情页可切换 `1h`、`6h`、`12h` 和 `24h` 查看折线图。
-
-属于机器的节点会继承该机器的有效心跳和负载状态，因此机器在线时，节点管理页会显示绿色状态点和“运行正常”悬浮详情。
-
 ## 订阅行为
 
 主要订阅入口：
