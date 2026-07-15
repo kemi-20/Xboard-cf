@@ -33,7 +33,8 @@
         <div class="grid">
           <div class="field"><label for="sqlite-file">SQLite3 数据库（必选）</label><input id="sqlite-file" type="file" accept=".db,.sqlite,.sqlite3" required></div>
           <div class="field"><label for="redis-file">Redis RDB / JSON（可选）</label><input id="redis-file" type="file" accept=".rdb,.json,application/json"></div>
-          <div class="field"><label for="mode">冲突策略</label><select id="mode"><option value="overwrite">完整切换（保留原版主键关系）</option><option value="merge">合并并保留 D1 现有记录</option></select></div>
+          <div class="field"><label for="mode">迁入方式</label><select id="mode"><option value="overwrite">完整迁入（删除原数据后切换）</option><option value="merge">合并并保留 D1 现有记录</option></select></div>
+          <div id="mode-note" class="warning check-field"><strong>完整迁入会删除当前数据</strong>迁移前备份完成后，将清空 D1 中现有的用户、登录凭据、套餐、节点、服务器、设置、订单、统计、礼品卡及其他业务记录，再严格导入所选 SQLite 数据。旧运行日志、待检查任务和负载历史会在成功切换时删除。</div>
           <div class="field check-field"><label for="skip-backup"><input id="skip-backup" type="checkbox"><span>跳过完整迁移前备份<small>用户和登录凭据仍会强制备份；其他业务表不建立快照，迁移失败时无法一键完整还原。</small></span></label></div>
         </div>
         <div class="actions"><button class="button primary" id="inspect">开始预检</button><span id="file-status" class="muted"></span></div>

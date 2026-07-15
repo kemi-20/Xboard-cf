@@ -413,7 +413,8 @@ test("overwrite migrations suppress first-run seed data", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /mode = 'overwrite' AND status != 'rolled_back'/);
   assert.match(source, /if \(!preserveMigratedData\) \{[\s\S]*SELECT COUNT\(\*\) AS c FROM v2_user/);
-  assert.match(source, /DELETE FROM v2_user WHERE email = 'admin@admin\.com' AND uuid = '00000000-0000-4000-8000-000000000001'/);
+  assert.doesNotMatch(source, /DELETE FROM v2_user WHERE email = 'admin@admin\.com'/);
+  assert.match(source, /if \(!preserveMigratedData\) \{[\s\S]*Preserve sender identity and initialize the provider choice/);
   assert.doesNotMatch(source, /ON CONFLICT\(email\) DO UPDATE SET password = excluded\.password/);
 });
 
@@ -454,7 +455,7 @@ test("admin migration imports official SQLite data in bounded D1 batches", () =>
   const source = fs.readFileSync("src/migration.ts", "utf8");
   const index = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /sourceRows\.length > 100/);
-  assert.match(source, /INSERT OR REPLACE/);
+  assert.match(source, /run\.mode === "overwrite" \? "INSERT" : "INSERT OR IGNORE"/);
   assert.match(source, /INSERT OR IGNORE/);
   assert.match(source, /transfer_used_total/);
   assert.match(source, /\["v2_stat", "v2_stat_user", "v2_stat_server"\][\s\S]*?row\.record_type = "d"/);
@@ -468,6 +469,24 @@ test("admin migration imports official SQLite data in bounded D1 batches", () =>
   assert.match(source, /access_token_hash = NULL/);
   assert.match(index, /handleAdminMigration/);
   assert.match(index, /\/migration\/status/);
+});
+
+test("complete migration deletes old business data before strict replacement", () => {
+  const source = fs.readFileSync("src/migration.ts", "utf8");
+  const page = fs.readFileSync("public/migration/panel.html", "utf8");
+  const app = fs.readFileSync("public/migration/app.js", "utf8");
+  assert.match(source, /COMPLETE_RESET_TABLES = \["v2_log", "v2_server_machine_load_history", "v2_job_logs", "v2_traffic_pending_check"\]/);
+  assert.match(source, /DELETE FROM sqlite_sequence WHERE name IN/);
+  assert.match(source, /COMPLETE_RESET_TABLES\.map\(\(\) => "\?"\)/);
+  assert.match(source, /rollback_progress = \?[\s\S]*DELETE FROM sqlite_sequence WHERE name IN/);
+  assert.match(source, /targetMismatches/);
+  assert.match(source, /counts\[table\] !== expected/);
+  assert.match(source, /name != 'system_bootstrap_edge_version'/);
+  assert.match(source, /run\.mode === "overwrite"[\s\S]*COMPLETE_RESET_TABLES\.map/);
+  assert.match(source, /完成数据切换失败/);
+  assert.match(page, /完整迁入（删除原数据后切换）/);
+  assert.match(app, /完整迁入会删除当前 D1 的全部旧业务数据/);
+  assert.match(app, /不会保留 admin@admin\.com 或其他旧记录/);
 });
 
 test("migration UI parses SQLite and Redis backups locally", () => {

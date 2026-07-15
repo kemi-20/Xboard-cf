@@ -90,6 +90,14 @@ function renderCounts(counts, skippedCounts = {}) {
   return `<table class="summary"><thead><tr><th>数据表</th><th style="text-align:right">记录数</th></tr></thead><tbody>${entries.map(([table, count]) => `<tr><td>${table}${skipped.has(table) ? " (skip)" : ""}</td><td class="num">${Number(count).toLocaleString()}</td></tr>`).join("")}</tbody></table>`;
 }
 
+function updateModeNote() {
+  const overwrite = $("#mode").value === "overwrite";
+  const note = $("#mode-note");
+  note.innerHTML = overwrite
+    ? "<strong>完整迁入会删除当前数据</strong>迁移前备份完成后，将清空 D1 中现有的用户、登录凭据、套餐、节点、服务器、设置、订单、统计、礼品卡及其他业务记录，再严格导入所选 SQLite 数据。旧运行日志、待检查任务和负载历史会在成功切换时删除。"
+    : "<strong>合并迁入会保留当前数据</strong>只插入 D1 中不存在的主键；发生主键冲突时保留当前 D1 记录，因此结果不会与源库完全相同。";
+}
+
 async function loadSql() {
   if (!state.SQL) state.SQL = await initSqlJs({ locateFile: name => `/migration/${name}` });
   return state.SQL;
@@ -257,7 +265,10 @@ async function inspect() {
       ? `<p class="success">联合校验通过：SQLite ${state.sqliteTotal.toLocaleString()} 行，Redis ${redisCount.toLocaleString()} 个有效键。</p>`
       : `<p class="success">SQLite 校验通过：${state.sqliteTotal.toLocaleString()} 行。</p><div class="warning"><strong>未选择 Redis 备份</strong>核心业务数据可以正常迁移。节点在线状态、近期负载、Metrics、旧 Session 和其他临时缓存不会保留；节点重新连接后会自动重新生成运行状态。</div>`;
     const displayedCounts = { ...state.counts, ...state.skippedCounts };
-    $("#preflight-content").innerHTML = `${sourceSummary}<div class="warning"><strong>以下内容不会迁移</strong>原版 SMTP/邮件驱动设置和任何邮件服务商凭据不会导入，所有插件、插件配置、支付渠道和服务器机器负载历史不会导入，所有旧主题配置也会忽略。Telegram 机器人由 Cloudflare 版本内置实现，不依赖原版插件。迁移完成后仅启用默认 Xboard 主题，请在新后台选择 Maileroo 或 Brevo，并手动配置 API Key、发件人邮箱和发件人名称。</div><p class="muted">邮件模板、订单等可审计业务历史会保留；队列任务、Horizon 监控、调度锁、旧会话、验证码和限流计数不会导入。标记为 (skip) 的数据表仅显示源库行数，不计入迁移进度，也不会备份、导入或导出；服务器负载历史会由节点重新上报生成。</p>${renderCounts(displayedCounts, state.skippedCounts)}`;
+    const modeSummary = $("#mode").value === "overwrite"
+      ? '<div class="warning"><strong>完整迁入：目标旧数据将被删除</strong>完成备份后会先清空当前 D1 业务数据和自增序列，再导入源库；源库没有的业务表会保持为空，不会保留 admin@admin.com 或其他旧记录。</div>'
+      : '<div class="warning"><strong>合并迁入：目标旧数据会保留</strong>主键冲突时保留当前 D1 记录，迁移结果可能与源库不同。</div>';
+    $("#preflight-content").innerHTML = `${sourceSummary}${modeSummary}<div class="warning"><strong>以下内容不会迁移</strong>原版 SMTP/邮件驱动设置和任何邮件服务商凭据不会导入，所有插件、插件配置、支付渠道和服务器机器负载历史不会导入，所有旧主题配置也会忽略。Telegram 机器人由 Cloudflare 版本内置实现，不依赖原版插件。迁移完成后仅启用默认 Xboard 主题，请在新后台选择 Maileroo 或 Brevo，并手动配置 API Key、发件人邮箱和发件人名称。</div><p class="muted">邮件模板、订单等可审计业务历史会保留；队列任务、Horizon 监控、调度锁、旧会话、验证码和限流计数不会导入。标记为 (skip) 的数据表仅显示源库行数，不计入迁移进度，也不会备份、导入或导出；服务器负载历史会由节点重新上报生成。</p>${renderCounts(displayedCounts, state.skippedCounts)}`;
     $("#preflight").hidden = false;
     $("#file-status").textContent = redisFile ? `${sqliteFile.name} + ${redisFile.name}` : `${sqliteFile.name}（未选择 Redis）`;
     setStep(2);
@@ -402,6 +413,7 @@ function showFailure(error) {
 }
 
 async function migrate() {
+  if ($("#mode").value === "overwrite" && !window.confirm("完整迁入会删除当前 D1 的全部旧业务数据，并以所选 SQLite 数据替换。确认继续吗？")) return;
   $("#migrate").disabled = true; $("#running").hidden = false; $("#result").hidden = true; setStep(3);
   state.done = 0; state.runId = null; state.migrationToken = null; state.snapshotComplete = false; state.skipBackup = $("#skip-backup").checked; state.prepared = false; state.phase = "start"; state.table = null; state.offset = 0;
   $("#log").textContent = ""; $("#progress").classList.remove("failed"); $("#rollback").hidden = true; $("#rollback-status").textContent = "";
@@ -487,8 +499,10 @@ $("#migrate").addEventListener("click", migrate);
 $("#export").addEventListener("click", manualExport);
 $("#rollback").addEventListener("click", rollback);
 for (const id of ["#sqlite-file", "#redis-file"]) $(id).addEventListener("change", () => { $("#preflight").hidden = true; });
+$("#mode").addEventListener("change", () => { updateModeNote(); $("#preflight").hidden = true; });
 $("#skip-backup").addEventListener("change", event => {
   $("#backup-note").textContent = event.target.checked
     ? "已跳过完整备份：仍会先强制备份用户和登录凭据，失败后无法一键完整还原。"
     : "执行前会自动导出当前数据，并在 D1 内建立可一键还原的快照。";
 });
+updateModeNote();

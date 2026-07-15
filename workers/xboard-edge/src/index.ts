@@ -590,22 +590,21 @@ async function ensureBootstrap(env: Env) {
         [name, typeof value === "object" ? JSON.stringify(value) : String(value), ts, ts]);
     }
   }
-  // Preserve sender identity and initialize the provider choice for older builds.
-  const emailSettings = await settings(env.XBOARD_DB, env.XBOARD_KV);
-  const legacyEmailUsername = String(firstNonEmpty(emailSettings.email_username, emailSettings.resend_from_name));
-  const emailFromAddress = firstNonEmpty(emailSettings.email_from_address, emailSettings.resend_from_address, legacyEmailUsername.includes("@") ? legacyEmailUsername : "");
-  const emailFromName = firstNonEmpty(legacyEmailUsername.includes("@") ? "" : legacyEmailUsername, emailSettings.resend_from_name, emailSettings.app_name, "XBoard");
-  for (const [name, value] of Object.entries({
-    email_driver: ["maileroo", "brevo"].includes(String(emailSettings.email_driver || "").toLowerCase()) ? String(emailSettings.email_driver).toLowerCase() : "maileroo",
-    email_from_address: emailFromAddress,
-    resend_from_address: emailFromAddress,
-    email_username: emailFromName,
-    resend_from_name: emailFromName
-  })) {
-    await runSqlIgnore(env, "INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at", [name, value, ts, ts]);
-  }
-  if (preserveMigratedData) {
-    await runSqlIgnore(env, "DELETE FROM v2_user WHERE email = 'admin@admin.com' AND uuid = '00000000-0000-4000-8000-000000000001' AND token = 'admin-default-token-change-me' AND password_salt = 'xboard-cloudflare-admin'");
+  if (!preserveMigratedData) {
+    // Preserve sender identity and initialize the provider choice for older builds.
+    const emailSettings = await settings(env.XBOARD_DB, env.XBOARD_KV);
+    const legacyEmailUsername = String(firstNonEmpty(emailSettings.email_username, emailSettings.resend_from_name));
+    const emailFromAddress = firstNonEmpty(emailSettings.email_from_address, emailSettings.resend_from_address, legacyEmailUsername.includes("@") ? legacyEmailUsername : "");
+    const emailFromName = firstNonEmpty(legacyEmailUsername.includes("@") ? "" : legacyEmailUsername, emailSettings.resend_from_name, emailSettings.app_name, "XBoard");
+    for (const [name, value] of Object.entries({
+      email_driver: ["maileroo", "brevo"].includes(String(emailSettings.email_driver || "").toLowerCase()) ? String(emailSettings.email_driver).toLowerCase() : "maileroo",
+      email_from_address: emailFromAddress,
+      resend_from_address: emailFromAddress,
+      email_username: emailFromName,
+      resend_from_name: emailFromName
+    })) {
+      await runSqlIgnore(env, "INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at", [name, value, ts, ts]);
+    }
   }
   if (!preserveMigratedData) {
     await runSqlIgnore(env, "INSERT INTO v2_server_group(id, name, created_at, updated_at) VALUES (1, 'Default', ?, ?) ON CONFLICT(id) DO NOTHING", [ts, ts]);

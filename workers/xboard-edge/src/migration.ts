@@ -28,6 +28,7 @@ const SKIPPED_SOURCE_TABLES = ["v2_log", "v2_server_machine_load_history"] as co
 const tableSet = new Set<string>(MIGRATION_TABLES);
 const tableOrder = Object.fromEntries(MIGRATION_TABLES.map((table, index) => [table, index]));
 const DELETE_TABLES = [...MIGRATION_TABLES].reverse();
+const COMPLETE_RESET_TABLES = ["v2_log", "v2_server_machine_load_history", "v2_job_logs", "v2_traffic_pending_check"] as const;
 
 const NON_MIGRATABLE_SERVICE_TABLES = new Set(["v2_payment", "v2_plugins"]);
 const NON_MIGRATABLE_MAIL_SETTINGS = new Set([
@@ -337,6 +338,12 @@ async function tableCount(db: D1Database, table: string) {
   return Number(row?.count || 0);
 }
 
+async function migratedTableCount(db: D1Database, table: string) {
+  if (table !== "v2_settings") return tableCount(db, table);
+  const row = await db.prepare("SELECT COUNT(*) AS count FROM v2_settings WHERE name != 'system_bootstrap_edge_version'").first<{ count: number }>();
+  return Number(row?.count || 0);
+}
+
 async function migrationStatus(env: MigrationEnv) {
   await ensureMigrationSchema(env);
   const runs = await env.XBOARD_DB.prepare("SELECT * FROM v2_migration_runs ORDER BY created_at DESC LIMIT 10").all<Record<string, unknown>>();
@@ -460,11 +467,14 @@ async function prepareMigration(request: Request, env: MigrationEnv) {
   if (run.prepared_at) return ok({ mode: run.mode, already_prepared: true });
   try {
     if (run.mode === "overwrite") {
-      await env.XBOARD_DB.batch(DELETE_TABLES.map(table => env.XBOARD_DB.prepare(`DELETE FROM ${table}`)));
+      await env.XBOARD_DB.batch([
+        ...DELETE_TABLES.map(table => env.XBOARD_DB.prepare(`DELETE FROM ${table}`)),
+        env.XBOARD_DB.prepare(`DELETE FROM sqlite_sequence WHERE name IN (${MIGRATION_TABLES.map(() => "?").join(",")})`).bind(...MIGRATION_TABLES)
+      ]);
     }
     const ts = now();
     await env.XBOARD_DB.prepare("UPDATE v2_migration_runs SET prepared_at = ?, updated_at = ? WHERE id = ?").bind(ts, ts, runId).run();
-    await logMigration(env, runId, run.mode === "overwrite" ? "已清空目标业务表，开始完整切换" : "保留目标记录，开始合并迁移");
+    await logMigration(env, runId, run.mode === "overwrite" ? "已完全清空目标业务表并重置自增序列，开始完整迁入" : "保留目标记录，开始合并迁移");
     return ok({ mode: run.mode, prepared_at: ts });
   } catch (error) {
     const details = { phase: "prepare", mode: run.mode, error: errorMessage(error) };
@@ -491,7 +501,7 @@ async function importBatch(request: Request, env: MigrationEnv) {
     if (!columns.length) throw new Error(`${table} 没有可导入字段`);
     const quoted = columns.map(column => `\`${column.replace(/`/g, "")}\``).join(",");
     const placeholders = columns.map(() => "?").join(",");
-    const verb = run.mode === "overwrite" ? "INSERT OR REPLACE" : "INSERT OR IGNORE";
+    const verb = run.mode === "overwrite" ? "INSERT" : "INSERT OR IGNORE";
     return env.XBOARD_DB.prepare(`${verb} INTO ${table} (${quoted}) VALUES (${placeholders})`).bind(...columns.map(column => row[column]));
   });
   try {
@@ -653,7 +663,10 @@ async function startRollback(request: Request, env: MigrationEnv) {
   try {
     await env.XBOARD_DB.prepare("UPDATE v2_migration_runs SET status = 'rolling_back', rollback_progress = ?, finished_at = NULL, updated_at = ? WHERE id = ?")
       .bind(JSON.stringify({ phase: "clearing", tables: {} }), now(), runId).run();
-    await env.XBOARD_DB.batch(DELETE_TABLES.map(table => env.XBOARD_DB.prepare(`DELETE FROM ${table}`)));
+    await env.XBOARD_DB.batch([
+      ...DELETE_TABLES.map(table => env.XBOARD_DB.prepare(`DELETE FROM ${table}`)),
+      env.XBOARD_DB.prepare(`DELETE FROM sqlite_sequence WHERE name IN (${MIGRATION_TABLES.map(() => "?").join(",")})`).bind(...MIGRATION_TABLES)
+    ]);
     const progress = { phase: "restoring", tables: {} };
     await env.XBOARD_DB.prepare("UPDATE v2_migration_runs SET rollback_progress = ?, updated_at = ? WHERE id = ?")
       .bind(JSON.stringify(progress), now(), runId).run();
@@ -763,18 +776,24 @@ async function finishMigration(request: Request, env: MigrationEnv) {
   const progress = safeJson(run.progress) as Record<string, any>;
   const counts: Record<string, number> = {};
   const warnings: string[] = [];
+  const targetMismatches: Array<{ table: string; expected: number; actual: number }> = [];
   if (run.source_type !== "redis") {
     for (const table of MIGRATION_TABLES) {
-      if (sourceCounts[table] === undefined) continue;
-      counts[table] = await tableCount(env.XBOARD_DB, table);
-      const received = Number(progress[table]?.received || 0);
-      if (received !== Number(sourceCounts[table])) warnings.push(`${table}: 源库 ${sourceCounts[table]} 行，实际接收 ${received} 行`);
+      if (sourceCounts[table] !== undefined) {
+        const received = Number(progress[table]?.received || 0);
+        if (received !== Number(sourceCounts[table])) warnings.push(`${table}: 源库 ${sourceCounts[table]} 行，实际接收 ${received} 行`);
+      }
+      if (run.mode === "overwrite" || sourceCounts[table] !== undefined) counts[table] = await migratedTableCount(env.XBOARD_DB, table);
+      if (run.mode === "overwrite") {
+        const expected = Number(progress[table]?.inserted || 0);
+        if (counts[table] !== expected) targetMismatches.push({ table, expected, actual: counts[table] });
+      }
     }
   }
-  if (warnings.length) {
-    const details = { phase: "finish_validation", mismatches: warnings };
+  if (warnings.length || targetMismatches.length) {
+    const details = { phase: "finish_validation", source_mismatches: warnings, target_mismatches: targetMismatches };
     await markMigrationFailed(env, runId, "迁移数据接收数量校验失败", details);
-    return migrationError("迁移数据接收数量校验失败，任务已中断，可一键还原", 409, details);
+    return migrationError("完整迁入校验失败，目标库可能仍含旧数据或缺少新数据，任务已中断，可一键还原", 409, details);
   }
   try {
     await setDefaultTheme(env.XBOARD_DB);
@@ -782,19 +801,6 @@ async function finishMigration(request: Request, env: MigrationEnv) {
     const details = { phase: "default_theme", error: errorMessage(error) };
     await markMigrationFailed(env, runId, "设置默认主题失败", details);
     return migrationError(`设置默认主题失败：${details.error}`, 500, details);
-  }
-  try {
-    await env.XBOARD_DB.batch([
-      env.XBOARD_DB.prepare("DELETE FROM v2_server_machine_load_history"),
-      env.XBOARD_DB.prepare("DELETE FROM failed_jobs WHERE failed_at < ?").bind(now() - FAILED_JOB_RETENTION_SECONDS),
-      env.XBOARD_DB.prepare("DELETE FROM v2_job_logs WHERE COALESCE(updated_at, created_at) < ?").bind(now() - FAILED_JOB_RETENTION_SECONDS),
-      env.XBOARD_DB.prepare("UPDATE v2_server_machine SET last_seen_at = NULL, load_status = NULL"),
-      env.XBOARD_DB.prepare("UPDATE v2_server SET last_check_at = NULL, last_push_at = NULL, online_user = 0, metrics = NULL")
-    ]);
-  } catch (error) {
-    const details = { phase: "runtime_status_cleanup", error: errorMessage(error) };
-    await markMigrationFailed(env, runId, "清理旧运行状态失败", details);
-    return migrationError(`清理旧运行状态失败：${details.error}`, 500, details);
   }
   const report = {
     source_type: run.source_type,
@@ -808,8 +814,29 @@ async function finishMigration(request: Request, env: MigrationEnv) {
     theme: "Xboard"
   };
   const ts = now();
-  await env.XBOARD_DB.prepare("UPDATE v2_migration_runs SET status = 'completed', report = ?, access_token_hash = NULL, finished_at = ?, updated_at = ? WHERE id = ?")
-    .bind(JSON.stringify(report), ts, ts, runId).run();
+  try {
+    const cleanup = run.mode === "overwrite"
+      ? [
+          ...COMPLETE_RESET_TABLES.map(table => env.XBOARD_DB.prepare(`DELETE FROM ${table}`)),
+          env.XBOARD_DB.prepare(`DELETE FROM sqlite_sequence WHERE name IN (${COMPLETE_RESET_TABLES.map(() => "?").join(",")})`).bind(...COMPLETE_RESET_TABLES)
+        ]
+      : [
+          env.XBOARD_DB.prepare("DELETE FROM v2_server_machine_load_history"),
+          env.XBOARD_DB.prepare("DELETE FROM failed_jobs WHERE failed_at < ?").bind(ts - FAILED_JOB_RETENTION_SECONDS),
+          env.XBOARD_DB.prepare("DELETE FROM v2_job_logs WHERE COALESCE(updated_at, created_at) < ?").bind(ts - FAILED_JOB_RETENTION_SECONDS)
+        ];
+    await env.XBOARD_DB.batch([
+      ...cleanup,
+      env.XBOARD_DB.prepare("UPDATE v2_server_machine SET last_seen_at = NULL, load_status = NULL"),
+      env.XBOARD_DB.prepare("UPDATE v2_server SET last_check_at = NULL, last_push_at = NULL, online_user = 0, metrics = NULL"),
+      env.XBOARD_DB.prepare("UPDATE v2_migration_runs SET status = 'completed', report = ?, access_token_hash = NULL, finished_at = ?, updated_at = ? WHERE id = ?")
+        .bind(JSON.stringify(report), ts, ts, runId)
+    ]);
+  } catch (error) {
+    const details = { phase: "complete_switch", mode: run.mode, error: errorMessage(error) };
+    await markMigrationFailed(env, runId, "完成数据切换失败", details);
+    return migrationError(`完成数据切换失败：${details.error}`, 500, details);
+  }
   for (const key of ["settings:all", "settings_version", "servers_version"]) {
     try { await env.XBOARD_KV.delete(key); } catch { /* D1 remains authoritative. */ }
   }
