@@ -192,7 +192,7 @@ async function statistics(env: Env, ts: number, day: number) {
 
 async function cleanupOnlineStatus(env: Env, ts: number) {
   try {
-    await env.XBOARD_DB.prepare("UPDATE v2_user SET online_count = 0 WHERE last_online_at IS NULL OR last_online_at < ?").bind(ts - 600).run();
+    await env.XBOARD_DB.prepare("UPDATE v2_user SET online_count = 0 WHERE online_count > 0 AND (last_online_at IS NULL OR last_online_at < ?)").bind(ts - 600).run();
   } catch {}
   await env.XBOARD_DB.prepare("UPDATE v2_gift_card_code SET status = 2, updated_at = ? WHERE status = 0 AND expires_at IS NOT NULL AND expires_at < ?").bind(ts, ts).run();
 }
@@ -267,8 +267,20 @@ async function openProcessingOrder(env: Env, order: Record<string, any>, ts: num
 }
 
 async function checkOrders(env: Env, ts: number) {
-  await env.XBOARD_DB.prepare("UPDATE v2_order SET status = 2, updated_at = ? WHERE status = 0 AND created_at <= ?")
-    .bind(ts, ts - 7200).run();
+  while (true) {
+    const expired = await env.XBOARD_DB.prepare("SELECT id, user_id, balance_amount FROM v2_order WHERE status = 0 AND created_at <= ? ORDER BY id ASC LIMIT 200")
+      .bind(ts - 7200).all<Record<string, any>>();
+    if (!(expired.results || []).length) break;
+    for (const order of expired.results || []) {
+      const statements = [];
+      if (Number(order.balance_amount || 0) > 0) {
+        statements.push(env.XBOARD_DB.prepare("UPDATE v2_user SET balance = COALESCE(balance, 0) + (SELECT COALESCE(balance_amount, 0) FROM v2_order WHERE id = ? AND status = 0), updated_at = ? WHERE id = ?")
+          .bind(order.id, ts, order.user_id));
+      }
+      statements.push(env.XBOARD_DB.prepare("UPDATE v2_order SET status = 2, updated_at = ? WHERE id = ? AND status = 0").bind(ts, order.id));
+      await env.XBOARD_DB.batch(statements);
+    }
+  }
   const processing = await env.XBOARD_DB.prepare("SELECT * FROM v2_order WHERE status = 1 ORDER BY id ASC LIMIT 200").all<Record<string, any>>();
   for (const order of processing.results || []) {
     try { await openProcessingOrder(env, order, ts); }

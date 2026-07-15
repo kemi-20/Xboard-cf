@@ -223,7 +223,7 @@ function shouldNotifyNodeSync(pathname: string, method: string) {
     "/server/group/save", "/server/group/drop",
     "/server/machine/save", "/server/machine/update", "/server/machine/drop",
     "/user/update", "/user/destroy", "/user/ban", "/user/resetSecret", "/user/generate",
-    "/plan/save", "/plan/drop"
+    "/plan/save", "/plan/drop", "/order/paid"
   ].some(suffix => pathname.endsWith(suffix));
 }
 
@@ -1247,6 +1247,12 @@ async function adminUserList(env: Env, request: Request) {
   const page = Number(input.page || input.current || url.searchParams.get("page") || 1);
   const pageSize = Number(input.page_size || input.pageSize || input.limit || url.searchParams.get("page_size") || 20);
   const result = await list(env.XBOARD_DB, "v2_user", page, pageSize);
+  const inviterIds = [...new Set((result.data as any[]).map(row => Number(row.invite_user_id || 0)).filter(Boolean))];
+  const inviters = new Map<number, { id: number; email: string }>();
+  if (inviterIds.length) {
+    const inviterRows = await env.XBOARD_DB.prepare(`SELECT id, email FROM v2_user WHERE id IN (${inviterIds.map(() => "?").join(",")})`).bind(...inviterIds).all<{ id: number; email: string }>();
+    for (const inviter of inviterRows.results || []) inviters.set(Number(inviter.id), { id: Number(inviter.id), email: String(inviter.email || "") });
+  }
   const data = [];
   for (const row of result.data as any[]) {
     const plan = await planById(env, row.plan_id);
@@ -1261,7 +1267,7 @@ async function adminUserList(env: Env, request: Request) {
       subscribe_url: await subscribeUrl(request, env, row.token),
       plan,
       group,
-      invite_user: null,
+      invite_user: inviters.get(Number(row.invite_user_id || 0)) || null,
       online_count: 0
     });
   }
@@ -1671,6 +1677,16 @@ function csvCell(value: unknown) {
   return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }
 
+function trafficConvert(value: unknown) {
+  const bytes = Number(value || 0);
+  if (bytes < 0) return 0;
+  const units: [number, string][] = [[1073741824, "GB"], [1048576, "MB"], [1024, "KB"]];
+  for (const [size, unit] of units) {
+    if (bytes > size) return `${Math.round(bytes / size * 100) / 100} ${unit}`;
+  }
+  return `${Math.round(bytes * 100) / 100} B`;
+}
+
 function csvResponse(filename: string, rows: unknown[][]) {
   const content = `\uFEFF${rows.map(row => row.map(csvCell).join(",")).join("\r\n")}\r\n`;
   return new Response(content, {
@@ -1720,7 +1736,7 @@ async function dumpAdminUsers(request: Request, env: Env) {
   const output: unknown[][] = [["邮箱", "余额", "推广佣金", "总流量", "剩余流量", "套餐到期时间", "订阅计划", "订阅地址"]];
   for (const user of result.results || []) output.push([
     user.email, (Number(user.balance || 0) / 100).toFixed(2), (Number(user.commission_balance || 0) / 100).toFixed(2),
-    Number(user.transfer_enable || 0), Math.max(0, Number(user.transfer_enable || 0) - Number(user.u || 0) - Number(user.d || 0)),
+    trafficConvert(user.transfer_enable), trafficConvert(Number(user.transfer_enable || 0) - Number(user.u || 0) - Number(user.d || 0)),
     user.expired_at || "长期有效", user.plan_name || "无订阅", await subscribeUrl(request, env, user.token)
   ]);
   return csvResponse(`users_${new Date().toISOString().replace(/[:T]/g, "-").slice(0, 19)}.csv`, output);
@@ -2388,13 +2404,20 @@ async function orderRows(env: Env, input: Record<string, any>) {
 async function orderDetail(env: Env, id: number) {
   const row = await env.XBOARD_DB.prepare("SELECT o.*, u.email AS user_email, p.name AS plan_name, iu.email AS invite_email FROM v2_order o LEFT JOIN v2_user u ON u.id=o.user_id LEFT JOIN v2_plan p ON p.id=o.plan_id LEFT JOIN v2_user iu ON iu.id=o.invite_user_id WHERE o.id=?").bind(id).first<Record<string, any>>();
   if (!row) return null;
+  const surplusOrderIds = parseJsonArray(row.surplus_order_ids).map(Number).filter(Boolean);
+  const [surplusResult, commissionResult] = await Promise.all([
+    surplusOrderIds.length
+      ? env.XBOARD_DB.prepare(`SELECT * FROM v2_order WHERE id IN (${surplusOrderIds.map(() => "?").join(",")}) ORDER BY id ASC`).bind(...surplusOrderIds).all<Record<string, any>>()
+      : Promise.resolve({ results: [] } as { results: Record<string, any>[] }),
+    env.XBOARD_DB.prepare("SELECT * FROM v2_commission_log WHERE trade_no = ? ORDER BY id ASC").bind(String(row.trade_no || "")).all<Record<string, any>>()
+  ]);
   return {
     ...row, status: Number(row.status), type: Number(row.type || 1), commission_status: Number(row.commission_status || 0),
     total_amount: Number(row.total_amount || 0), period: legacyOrderPeriod(row.period),
     user: row.user_id ? { id: Number(row.user_id), email: row.user_email || "" } : null,
     plan: row.plan_id ? { id: Number(row.plan_id), name: row.plan_name || "" } : null,
     invite_user: row.invite_user_id ? { id: Number(row.invite_user_id), email: row.invite_email || "" } : null,
-    commission_log: [], surplus_orders: []
+    commission_log: commissionResult.results || [], surplus_orders: surplusResult.results || []
   };
 }
 

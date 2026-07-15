@@ -489,6 +489,24 @@ test("admin orders are persisted and exposed through the official route set", ()
   assert.doesNotMatch(source, /path\.match\(\/order\|coupon/);
   assert.match(source, /ALTER TABLE v2_order ADD COLUMN plan_id/);
   assert.match(source, /UPDATE v2_order SET status = 2 WHERE status IS NULL/);
+  assert.match(source, /"\/plan\/save", "\/plan\/drop", "\/order\/paid"/);
+  assert.match(source, /surplusOrderIds = parseJsonArray\(row\.surplus_order_ids\)/);
+  assert.match(source, /SELECT \* FROM v2_commission_log WHERE trade_no = \?/);
+});
+
+test("admin user relations, CSV units and smoke tests cover functional paths", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const smoke = fs.readFileSync("../../scripts/smoke-test.ts", "utf8");
+  assert.match(source, /SELECT id, email FROM v2_user WHERE id IN/);
+  assert.match(source, /invite_user: inviters\.get/);
+  assert.match(source, /function trafficConvert/);
+  assert.match(source, /trafficConvert\(user\.transfer_enable\)/);
+  assert.match(smoke, /admin shell/);
+  assert.match(smoke, /guest config/);
+  assert.match(smoke, /guest plans/);
+  assert.match(smoke, /admin login/);
+  assert.match(smoke, /admin config/);
+  assert.match(smoke, /XBOARD_SUBSCRIBE_TOKEN/);
 });
 
 test("traffic history exposes the official server_rate field", () => {

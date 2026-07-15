@@ -368,10 +368,15 @@ function clashProxy(user: any, server: any, client: Client = "clashmeta") {
     else if (ps.network === "grpc") Object.assign(base, { network: "grpc", "grpc-opts": { "grpc-service-name": ns.serviceName } });
     else if (ps.network === "h2") Object.assign(base, { network: "h2", "h2-opts": { path: ns.path, host: Array.isArray(ns.host) ? ns.host : ns.host ? [ns.host] : undefined } });
     else if (ps.network === "httpupgrade") Object.assign(base, { network: "ws", "ws-opts": { "v2ray-http-upgrade": true, path: ns.path, headers: ns.host ? { Host: ns.host } : undefined } });
-    else if (ps.network === "xhttp") Object.assign(base, { network: "xhttp", "xhttp-opts": { path: ns.path, host: ns.host, mode: ns.mode } });
+    else if (ps.network === "xhttp") {
+      base.network = "xhttp";
+      const options = compactObject({ path: ns.path, host: ns.host, mode: ns.mode });
+      if (Object.keys(options).length) base["xhttp-opts"] = options;
+    }
     else base.network = "tcp";
     if (client !== "clash" && ps.multiplex?.enabled) base.smux = { enabled: true, protocol: ps.multiplex.protocol || "yamux", "max-connections": ps.multiplex.max_connections, padding: ps.multiplex.padding ? true : undefined, "brutal-opts": ps.multiplex.brutal?.enabled ? { enabled: true, up: ps.multiplex.brutal.up_mbps, down: ps.multiplex.brutal.down_mbps } : undefined };
-    if (client !== "clash" && Number(ps.tls) === 1 && ps.tls_settings?.ech?.enabled) base["ech-opts"] = { enable: true, config: ps.tls_settings.ech.config, "query-server-name": ps.tls_settings.ech.query_server_name };
+    const echOptions = client === "clash" ? undefined : clashEchOptions(ps.tls_settings?.ech);
+    if (echOptions) base["ech-opts"] = echOptions;
   }
   else if (server.type === "trojan") {
     Object.assign(base, { password: server.password || user.uuid, sni: ps.reality_settings?.server_name || ps.tls_settings?.server_name, network: ps.network || "tcp", "skip-cert-verify": Number(ps.tls) === 2 ? Boolean(ps.reality_settings?.allow_insecure) : Boolean(ps.tls_settings?.allow_insecure) });
@@ -381,7 +386,7 @@ function clashProxy(user: any, server: any, client: Client = "clashmeta") {
   }
   else if (server.type === "hysteria") {
     const version = Number(ps.version || 1);
-    const common = { sni: ps.tls?.server_name, "skip-cert-verify": Boolean(ps.tls?.allow_insecure), ports: server.ports, "hop-interval": ps.hop_interval !== undefined ? Number(ps.hop_interval) : undefined };
+    const common = { sni: ps.tls?.server_name, "skip-cert-verify": Boolean(ps.tls?.allow_insecure), ports: server.ports, "hop-interval": ps.hop_interval ? Number(ps.hop_interval) : undefined };
     if (version === 2) Object.assign(base, client === "stash"
       ? { ...common, type: "hysteria2", auth: server.password || user.uuid, "up-speed": ps.bandwidth?.up, "down-speed": ps.bandwidth?.down, "fast-open": true, obfs: ps.obfs?.open ? ps.obfs?.type || "salamander" : undefined, "obfs-password": ps.obfs?.open ? ps.obfs?.password : undefined }
       : { ...common, type: "hysteria2", password: server.password || user.uuid, obfs: ps.obfs?.open ? ps.obfs?.type : undefined, "obfs-password": ps.obfs?.open ? ps.obfs?.password : undefined });
@@ -394,7 +399,11 @@ function clashProxy(user: any, server: any, client: Client = "clashmeta") {
     const credentials = Number(ps.version) === 4 ? { token: server.password || user.uuid } : { uuid: server.password || user.uuid, password: server.password || user.uuid };
     Object.assign(base, common, credentials, client === "stash" ? { "reduce-rtt": true, "fast-open": true, "heartbeat-interval": 10000, "request-timeout": 8000, "max-udp-relay-packet-size": 1500, version: Number(ps.version || 5) } : {});
   }
-  else if (server.type === "anytls") Object.assign(base, { password: server.password || user.uuid, sni: ps.tls?.server_name, "skip-cert-verify": Boolean(ps.tls?.allow_insecure), alpn: ps.alpn });
+  else if (server.type === "anytls") {
+    Object.assign(base, { password: server.password || user.uuid, sni: ps.tls?.server_name, "skip-cert-verify": Boolean(ps.tls?.allow_insecure), alpn: ps.alpn });
+    const echOptions = client === "clash" ? undefined : clashEchOptions(ps.tls?.ech);
+    if (echOptions) base["ech-opts"] = echOptions;
+  }
   else Object.assign(base, { username: server.password || user.uuid, password: server.password || user.uuid, tls: Boolean(ps.tls), sni: ps.tls_settings?.server_name, "skip-cert-verify": Boolean(ps.tls_settings?.allow_insecure) });
   return Object.fromEntries(Object.entries(base).filter(([, value]) => value !== undefined));
 }
@@ -425,7 +434,7 @@ function applyClashTransport(base: Config, ps: any, server: any) {
   else if (ps.network === "ws") Object.assign(base, { network: "ws", "ws-opts": { path: ns.path, headers: ns.headers?.Host ? { Host: ns.headers.Host } : undefined } });
   else if (ps.network === "grpc") Object.assign(base, { network: "grpc", "grpc-opts": { "grpc-service-name": ns.serviceName } });
   else if (ps.network === "h2") Object.assign(base, { network: "h2", "h2-opts": { path: ns.path, host: Array.isArray(ns.host) ? ns.host : ns.host ? [ns.host] : undefined } });
-  else if (ps.network === "httpupgrade") Object.assign(base, { network: "ws", "ws-opts": { "v2ray-http-upgrade": true, path: ns.path, headers: { Host: ns.host || server.host } } });
+  else if (ps.network === "httpupgrade") Object.assign(base, { network: "ws", "ws-opts": { "v2ray-http-upgrade": true, path: ns.path, headers: ns.host ? { Host: ns.host } : undefined } });
   else if (ps.network === "xhttp") Object.assign(base, { network: "xhttp", "xhttp-opts": { path: ns.path, host: ns.host, mode: ns.mode } });
   else base.network = "tcp";
 }
@@ -434,7 +443,29 @@ function applyClashExtras(base: Config, ps: any, client: Client) {
   if (client === "clash") return;
   if (tlsFingerprint(ps)) base["client-fingerprint"] = tlsFingerprint(ps);
   if (ps.multiplex?.enabled) base.smux = { enabled: true, protocol: ps.multiplex.protocol || "yamux", "max-connections": ps.multiplex.max_connections, padding: ps.multiplex.padding ? true : undefined, "brutal-opts": ps.multiplex.brutal?.enabled ? { enabled: true, up: ps.multiplex.brutal.up_mbps, down: ps.multiplex.brutal.down_mbps } : undefined };
-  if (Number(ps.tls) === 1 && ps.tls_settings?.ech?.enabled) base["ech-opts"] = { enable: true, config: ps.tls_settings.ech.config, "query-server-name": ps.tls_settings.ech.query_server_name };
+  if (Number(ps.tls) === 1) {
+    const echOptions = clashEchOptions(ps.tls_settings?.ech);
+    if (echOptions) base["ech-opts"] = echOptions;
+  }
+}
+
+function compactObject(value: Record<string, unknown>) {
+  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined && item !== null && item !== ""));
+}
+
+function mihomoEchConfig(value: unknown) {
+  const config = String(value || "").trim();
+  if (!config) return undefined;
+  if (config.startsWith("-----BEGIN")) {
+    const match = config.match(/-----BEGIN ECH CONFIGS-----\s*([\s\S]*?)\s*-----END ECH CONFIGS-----/);
+    return match ? match[1].replace(/\s+/g, "") : undefined;
+  }
+  return config.replace(/\s+/g, "");
+}
+
+function clashEchOptions(ech: any) {
+  if (!ech || !ech.enabled) return undefined;
+  return compactObject({ enable: true, config: mihomoEchConfig(ech.config), "query-server-name": String(ech.query_server_name || "").trim() || undefined });
 }
 
 function regexValue(value: unknown) {
@@ -490,7 +521,9 @@ function singboxOutbound(user: any, server: any) {
   }
   if (server.type === "socks") Object.assign(outbound, { version: "5", username: server.password || user.uuid, udp_over_tcp: ps.udp_over_tcp ? true : undefined });
   if (server.type === "http") Object.assign(outbound, { username: server.password || user.uuid, path: ps.path, headers: ps.headers });
-  if (ps.tls || ps.tls_settings || ps.reality_settings || ps.tls?.server_name || ["trojan", "hysteria", "tuic", "anytls"].includes(server.type)) {
+  const tlsEnabled = ["trojan", "hysteria", "tuic", "anytls"].includes(server.type)
+    || (["vmess", "vless", "http"].includes(server.type) && Boolean(ps.tls));
+  if (tlsEnabled) {
     outbound.tls = { enabled: true, server_name: ps.reality_settings?.server_name || ps.tls_settings?.server_name || ps.tls?.server_name, insecure: Number(ps.tls) === 2 ? Boolean(ps.reality_settings?.allow_insecure) : Boolean(ps.tls_settings?.allow_insecure || ps.tls?.allow_insecure), alpn: ps.alpn || (["tuic", "anytls"].includes(server.type) ? ["h3"] : undefined) };
     if (Number(ps.tls) === 2) outbound.tls.reality = { enabled: true, public_key: ps.reality_settings?.public_key, short_id: ps.reality_settings?.short_id };
     if (tlsFingerprint(ps)) outbound.tls.utls = { enabled: true, fingerprint: tlsFingerprint(ps) };
@@ -866,7 +899,7 @@ function textTemplateProfile(client: "surge" | "surfboard", template: string, co
   const names = servers.map(server => server.name).join(", ");
   return String(template || "")
     .replaceAll("$subs_link", subscriptionUrl(request, config, token, client === "surge"))
-    .replaceAll("$subs_domain", new URL(request.url).hostname)
+    .replaceAll("$subs_domain", request.headers.get("host") || new URL(request.url).host)
     .replaceAll("$proxies", proxies)
     .replaceAll("$proxy_group", names)
     .replaceAll("$subscribe_info", subscribeInfo(config, user))

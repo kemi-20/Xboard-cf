@@ -30,6 +30,32 @@ test("subscription output reads saved settings and templates", () => {
   assert.match(source, /replaceAll\("\$app_name"/);
 });
 
+test("Clash and Sing-box protocol details match upstream edge cases", () => {
+  const user = { uuid: "00000000-0000-4000-8000-000000000000" };
+  const base = { id: 1, name: "Node", host: "node.example", port: 443, password: "secret" };
+  const socks = __test.singboxOutbound(user, { ...base, type: "socks", protocol_settings: { tls: 1, tls_settings: { server_name: "wrong.example" } } });
+  assert.equal(socks.tls, undefined);
+
+  const pem = "-----BEGIN ECH CONFIGS-----\nYWJj ZA==\n-----END ECH CONFIGS-----";
+  const vless = __test.clashProxy(user, { ...base, type: "vless", protocol_settings: { tls: 1, tls_settings: { ech: { enabled: 1, config: pem, query_server_name: " ech.example " } }, network: "xhttp", network_settings: {} } }, "clashmeta");
+  assert.deepEqual(vless["ech-opts"], { enable: true, config: "YWJjZA==", "query-server-name": "ech.example" });
+  assert.equal(vless["xhttp-opts"], undefined);
+
+  const anytls = __test.clashProxy(user, { ...base, type: "anytls", protocol_settings: { tls: { server_name: "tls.example", ech: { enabled: true, config: " Zm9v \n" } } } }, "clashmeta");
+  assert.deepEqual(anytls["ech-opts"], { enable: true, config: "Zm9v" });
+
+  const vmess = __test.clashProxy(user, { ...base, type: "vmess", protocol_settings: { network: "httpupgrade", network_settings: {} } }, "clashmeta");
+  assert.equal(vmess["ws-opts"].headers, undefined);
+
+  const hysteria = __test.clashProxy(user, { ...base, type: "hysteria", protocol_settings: { version: 2, hop_interval: 0, tls: {} } }, "clashmeta");
+  assert.equal(hysteria["hop-interval"], undefined);
+});
+
+test("Surge template subscription domain preserves a non-standard port", () => {
+  const output = __test.textTemplateProfile("surge", "$subs_domain", {}, {}, [], new Request("https://panel.example:8443/s/token", { headers: { host: "panel.example:8443" } }), "token");
+  assert.equal(output, "panel.example:8443");
+});
+
 test("subscription cache varies by filters and hostname", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /searchParams\.get\("types"\)/);
