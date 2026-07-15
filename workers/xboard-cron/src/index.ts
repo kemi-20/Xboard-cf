@@ -1,5 +1,5 @@
 import type { D1Database, Fetcher, KVNamespace, Queue } from "./types.ts";
-import { now, ok } from "./compat.ts";
+import { json, now, ok } from "./compat.ts";
 import { settings as loadSettings } from "./db.ts";
 
 export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; MAIL_EVENTS: Queue; XBOARD_SERVER: Fetcher; }
@@ -375,9 +375,12 @@ async function run(env: Env, task = "scheduled") {
 export const __test = { dayStart, nextResetAt, addOrderMonths };
 
 export default {
-  async fetch(request: Request, env: Env) {
-    await run(env, new URL(request.url).searchParams.get("task") || "all");
-    return ok({ service: "xboard-cron", time: now() });
+  async fetch(request: Request) {
+    const url = new URL(request.url);
+    if (request.method === "GET" && url.pathname === "/health") {
+      return ok({ service: "xboard-cron", time: now() });
+    }
+    return json({ message: "Not Found" }, 404);
   },
   async scheduled(_event: unknown, env: Env) {
     await run(env, "scheduled");

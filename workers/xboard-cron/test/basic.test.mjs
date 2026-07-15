@@ -1,11 +1,29 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { __test } from "../src/index.ts";
+import cronWorker, { __test } from "../src/index.ts";
 
 test("xboard-cron has an entrypoint", () => {
   assert.ok(fs.existsSync("src/index.ts"));
   assert.match(fs.readFileSync("src/index.ts", "utf8"), /export default/);
+});
+
+test("public HTTP requests cannot execute cron maintenance", async () => {
+  const forbiddenEnv = new Proxy({}, {
+    get() { throw new Error("The public HTTP handler accessed a runtime binding"); }
+  });
+  for (const url of [
+    "https://audit.invalid/",
+    "https://audit.invalid/?task=all",
+    "https://audit.invalid/?task=check:order"
+  ]) {
+    const response = await cronWorker.fetch(new Request(url), forbiddenEnv);
+    assert.equal(response.status, 404);
+    assert.deepEqual(await response.json(), { message: "Not Found" });
+  }
+  const health = await cronWorker.fetch(new Request("https://audit.invalid/health"), forbiddenEnv);
+  assert.equal(health.status, 200);
+  assert.equal((await health.json()).data.service, "xboard-cron");
 });
 
 test("order month arithmetic uses the Asia/Shanghai calendar", () => {
