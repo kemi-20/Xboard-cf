@@ -2,7 +2,7 @@ import type { D1Database, D1PreparedStatement, KVNamespace, MessageBatch } from 
 import { now, ok } from "./compat";
 import { settings as loadSettings } from "./db";
 
-export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; RESEND_API_KEY?: string; RESEND_API_URL?: string; TELEGRAM_BOT_TOKEN?: string; }
+export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; MAILEROO_API_KEY?: string; BREVO_API_KEY?: string; TELEGRAM_BOT_TOKEN?: string; }
 
 const SHANGHAI_OFFSET = 8 * 3600;
 
@@ -129,35 +129,46 @@ async function traffic(env: Env, event: any) {
 async function mail(env: Env, event: any) {
   if (await alreadyDone(env, event.event_id)) return;
   const payload = await resolveMailContent(env, event.payload || {});
-  const apiKey = env.RESEND_API_KEY || await setting(env, "resend_api_key");
-  const endpoint = (env.RESEND_API_URL || await setting(env, "resend_api_url") || "https://api.resend.com").replace(/\/$/, "");
-  const fromAddress = await setting(env, "resend_from_address") || await setting(env, "email_from_address");
-  const fromName = (await setting(env, "resend_from_name") || await setting(env, "app_name") || "XBoard").trim().replace(/[<>]/g, "");
-  if (!apiKey) throw new Error("Resend API Key 未配置");
-  if (!fromAddress) throw new Error("Resend 发件人地址未配置");
+  const provider = String(await setting(env, "email_driver")).toLowerCase() === "brevo" ? "brevo" : "maileroo";
+  const apiKey = (provider === "brevo" ? env.BREVO_API_KEY : env.MAILEROO_API_KEY) || await setting(env, "email_password");
+  const fromAddress = await setting(env, "email_from_address");
+  const fromName = (await setting(env, "email_username") || await setting(env, "app_name") || "XBoard").trim().replace(/[<>]/g, "");
+  const providerName = provider === "brevo" ? "Brevo" : "Maileroo";
+  if (!apiKey) throw new Error(`${providerName} API Key 未配置`);
+  if (!fromAddress) throw new Error(`${providerName} 发件人地址未配置`);
   if (!payload.to || !payload.subject || (!payload.html && !payload.text)) throw new Error("邮件任务参数不完整");
-  const response = await fetch(`${endpoint}/emails`, {
+  const recipients: string[] = Array.isArray(payload.to) ? payload.to.map(String) : [String(payload.to)];
+  const endpoint = provider === "brevo" ? "https://api.brevo.com/v3/smtp/email" : "https://smtp.maileroo.com/api/v2/emails";
+  const response = await fetch(endpoint, provider === "brevo" ? {
     method: "POST",
-    headers: {
-      authorization: `Bearer ${apiKey}`,
-      "content-type": "application/json",
-      "idempotency-key": String(event.event_id)
-    },
+    headers: { "api-key": apiKey, "content-type": "application/json", accept: "application/json", "idempotency-key": String(event.event_id) },
     body: JSON.stringify({
-      from: fromName ? `${fromName} <${fromAddress}>` : fromAddress,
-      to: Array.isArray(payload.to) ? payload.to.map(String) : [String(payload.to)],
+      sender: { email: fromAddress, name: fromName || undefined },
+      to: recipients.map(email => ({ email })),
+      subject: String(payload.subject),
+      htmlContent: payload.html ? String(payload.html) : undefined,
+      textContent: payload.text ? String(payload.text) : undefined
+    })
+  } : {
+    method: "POST",
+    headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json", accept: "application/json", "idempotency-key": String(event.event_id) },
+    body: JSON.stringify({
+      from: { address: fromAddress, display_name: fromName || undefined },
+      to: recipients.map(address => ({ address })),
       subject: String(payload.subject),
       html: payload.html ? String(payload.html) : undefined,
-      text: payload.text ? String(payload.text) : undefined
+      plain: payload.text ? String(payload.text) : undefined
     })
   });
   const responseText = await response.text();
-  if (!response.ok) throw new Error(`Resend ${response.status}: ${responseText.slice(0, 500)}`);
-  let resendId = "";
-  try { resendId = String(JSON.parse(responseText)?.id || ""); } catch {}
+  if (!response.ok) throw new Error(`${providerName} ${response.status}: ${responseText.slice(0, 500)}`);
+  let providerId = "";
+  try {
+    const result = JSON.parse(responseText);
+    providerId = String(result?.messageId || result?.data?.reference_id || result?.reference_id || "");
+  } catch {}
   const ts = now();
-  const recipients: string[] = Array.isArray(payload.to) ? payload.to.map(String) : [String(payload.to)];
-  await runOnce(env, event.event_id, "mail", { ...event, resend_id: resendId }, recipients.map(email =>
+  await runOnce(env, event.event_id, "mail", { ...event, provider, provider_id: providerId }, recipients.map(email =>
     env.XBOARD_DB.prepare("INSERT INTO v2_mail_log(email, subject, template_name, error, created_at, updated_at) VALUES (?, ?, ?, NULL, ?, ?)")
       .bind(email, String(payload.subject), String(payload.template_name || "notify"), ts, ts)
   ));

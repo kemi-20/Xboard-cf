@@ -330,14 +330,15 @@ test("revenue overview reads the migrated daily statistics table", () => {
   assert.match(stats, /avg_commission_amount/);
 });
 
-test("English and Russian email settings describe Resend instead of SMTP", () => {
+test("email settings describe Maileroo and Brevo instead of SMTP or Resend", () => {
+  const chinese = fs.readFileSync("public/locales/zh-CN.js", "utf8");
   const english = fs.readFileSync("public/locales/en-US.js", "utf8");
   const russian = fs.readFileSync("public/locales/ru-RU.js", "utf8");
-  assert.match(english, /Resend API URL/);
-  assert.match(english, /Resend API Key/);
+  assert.match(chinese, /选择 Maileroo 或 Brevo/);
+  assert.match(english, /Choose Maileroo or Brevo/);
   assert.doesNotMatch(english.slice(english.indexOf('"email": {'), english.indexOf('"telegram": {')), /SMTP/);
-  assert.match(russian, /URL API Resend/);
-  assert.match(russian, /API-ключ Resend/);
+  assert.doesNotMatch(english.slice(english.indexOf('"email": {'), english.indexOf('"telegram": {')), /Resend/);
+  assert.match(russian, /Выберите Maileroo или Brevo/);
   assert.doesNotMatch(russian.slice(russian.indexOf('"email": {'), russian.indexOf('"telegram": {')), /SMTP/);
 });
 
@@ -381,7 +382,7 @@ test("migration UI parses SQLite and Redis backups locally", () => {
   assert.match(app, /localStorage, sessionStorage/);
   assert.match(app, /parsed\?\.value\?\.auth_data/);
   assert.match(app, /api\/v2\/admin\/migration/);
-  assert.match(app, /手动配置 Resend API Key/);
+  assert.match(app, /选择 Maileroo 或 Brevo，并手动配置 API Key/);
   assert.match(app, /所有插件、插件配置、支付渠道和服务器机器负载历史不会导入/);
   assert.match(page, /id="skip-backup"/);
   assert.match(app, /skip_backup: state\.skipBackup/);
@@ -460,11 +461,12 @@ test("plan traffic is converted from gigabytes to user bytes", () => {
   assert.match(source, /v2_plan\.transfer_enable = v2_user\.transfer_enable/);
 });
 
-test("Resend settings persist through the official email field names", () => {
+test("Maileroo and Brevo settings persist through the official email field names", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
-  assert.match(source, /email_password: firstNonEmpty\(all\.email_password, all\.resend_api_key\)/);
+  assert.match(source, /email_driver: \["maileroo", "brevo"\]/);
+  assert.match(source, /email_password: firstNonEmpty\(all\.email_password\)/);
   assert.match(source, /email_from_address: firstNonEmpty\(all\.email_from_address, all\.resend_from_address\)/);
-  assert.match(source, /email_password: "resend_api_key", resend_api_key: "email_password"/);
+  assert.match(source, /邮件服务商只能是 Maileroo 或 Brevo/);
   assert.match(source, /email_from_address: "resend_from_address", resend_from_address: "email_from_address"/);
 });
 
@@ -547,22 +549,28 @@ test("fresh D1 schema follows upstream visibility and expiry defaults", () => {
   assert.doesNotMatch(schema, /show INTEGER NOT NULL DEFAULT 1/);
 });
 
-test("mail APIs enqueue Resend jobs instead of returning SMTP placeholders", () => {
+test("mail APIs support Maileroo and Brevo without SMTP fields", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   const adminBundle = fs.readFileSync("public/assets/index-CF20260713.js", "utf8");
   const wrangler = fs.readFileSync("wrangler.toml", "utf8");
   assert.match(source, /MAIL_EVENTS: Queue/);
   assert.match(source, /type: "mail"/);
-  assert.match(source, /resend_api_key/);
+  assert.match(source, /normalizeEmailProvider/);
+  assert.match(source, /smtp\.maileroo\.com\/api\/v2\/emails/);
+  assert.match(source, /api\.brevo\.com\/v3\/smtp\/email/);
   assert.doesNotMatch(source, /testSendMail"\) return fail\("未配置邮件队列发送服务"/);
   assert.match(wrangler, /binding = "MAIL_EVENTS"/);
   assert.match(wrangler, /queue = "mail-events"/);
   assert.match(source, /async function sendTestMail/);
-  assert.match(source, /driver: "resend"/);
+  assert.match(source, /driver: provider/);
   assert.match(source, /return ok\(await sendTestMail/);
   assert.doesNotMatch(source, /queued: true, event_id/);
   assert.doesNotMatch(source, /email_encryption/);
   assert.doesNotMatch(adminBundle, /email_encryption/);
+  assert.match(adminBundle, /name:"email_driver"/);
+  assert.match(adminBundle, /value:"maileroo",children:"Maileroo"/);
+  assert.match(adminBundle, /value:"brevo",children:"Brevo"/);
+  assert.doesNotMatch(adminBundle, /name:"email_port"/);
 });
 
 test("Telegram webhook setup and join requests use the official Bot API", () => {

@@ -7,11 +7,13 @@ test("xboard-jobs has an entrypoint", () => {
   assert.match(fs.readFileSync("src/index.ts", "utf8"), /export default/);
 });
 
-test("mail events are delivered through the Resend HTTP API with idempotency", () => {
+test("mail events support Maileroo and Brevo HTTP APIs with idempotency", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /async function mail/);
-  assert.match(source, /api\.resend\.com/);
+  assert.match(source, /smtp\.maileroo\.com\/api\/v2\/emails/);
+  assert.match(source, /api\.brevo\.com\/v3\/smtp\/email/);
   assert.match(source, /authorization: `Bearer \$\{apiKey\}`/);
+  assert.match(source, /"api-key": apiKey/);
   assert.match(source, /"idempotency-key": String\(event\.event_id\)/);
   assert.match(source, /message\.retry\(\)/);
 });
@@ -23,11 +25,12 @@ test("traffic statistics persist the official server_rate field", () => {
   assert.match(source, /SET u = u \+ \?, d = d \+ \?, t = \?, updated_at = \?/);
 });
 
-test("mail templates override fallbacks and Resend credentials stay protocol-specific", () => {
+test("mail templates override fallbacks and provider credentials stay protocol-specific", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.doesNotMatch(source, /if \(payload\.html \|\| payload\.text\) return payload/);
   assert.match(source, /render\(String\(template\.subject \|\| ""\), vars\) \|\| render\(String\(payload\.subject \|\| ""\), vars\)/);
-  assert.doesNotMatch(source, /setting\(env, "email_password"\)/);
+  assert.match(source, /setting\(env, "email_password"\)/);
+  assert.doesNotMatch(source, /resend_api_key/);
   assert.match(source, /replace\(\/\[<>\]\/g, ""\)/);
   assert.match(source, /const html = row[\s\S]*?\? renderedContent/);
   assert.match(source, /remindExpire/);

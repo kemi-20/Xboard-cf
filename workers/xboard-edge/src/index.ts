@@ -143,7 +143,7 @@ const allowedConfigSettings = new Set([
   "plan_change_enable", "reset_traffic_method", "surplus_enable", "new_order_event_id", "renew_order_event_id", "change_order_event_id",
   "show_info_to_server_enable", "show_protocol_to_server_enable", "subscribe_path", "server_token", "server_pull_interval", "server_push_interval",
   "device_limit_mode", "server_ws_enable", "server_ws_url", "frontend_theme", "frontend_theme_sidebar", "frontend_theme_header", "frontend_theme_color",
-  "frontend_background_url", "email_host", "email_port", "email_username", "email_password", "email_from_address",
+  "frontend_background_url", "email_driver", "email_host", "email_port", "email_username", "email_password", "email_from_address",
   "remind_mail_enable", "resend_api_url", "resend_api_key", "resend_from_name", "resend_from_address", "telegram_bot_enable", "telegram_bot_token",
   "telegram_webhook_url", "telegram_discuss_id", "telegram_channel_id", "telegram_discuss_link", "windows_version", "windows_download_url",
   "macos_version", "macos_download_url", "android_version", "android_download_url", "email_whitelist_enable", "email_whitelist_suffix",
@@ -552,8 +552,8 @@ async function ensureBootstrap(env: Env) {
     captcha_enable: 0, captcha_type: "recaptcha", recaptcha_key: "", recaptcha_site_key: "", recaptcha_v3_secret_key: "",
     recaptcha_v3_site_key: "", recaptcha_v3_score_threshold: 0.5, turnstile_secret_key: "", turnstile_site_key: "",
     register_limit_by_ip_enable: 0, register_limit_count: 3, register_limit_expire: 60, password_limit_enable: 1,
-    password_limit_count: 5, password_limit_expire: 60, login_with_mail_link_enable: 0, resend_api_url: "https://api.resend.com", resend_api_key: "",
-    resend_from_address: "", resend_from_name: "XBoard", email_host: "https://api.resend.com", email_port: "443", email_username: "XBoard",
+    password_limit_count: 5, password_limit_expire: 60, login_with_mail_link_enable: 0, resend_api_url: "", resend_api_key: "",
+    resend_from_address: "", resend_from_name: "XBoard", email_driver: "maileroo", email_host: "", email_port: "", email_username: "XBoard",
     email_password: "", email_from_address: "", remind_mail_enable: 0,
     telegram_bot_enable: 0, telegram_bot_token: "", telegram_webhook_url: "", telegram_discuss_link: "",
     windows_version: "", windows_download_url: "", macos_version: "", macos_download_url: "", android_version: "", android_download_url: ""
@@ -564,19 +564,13 @@ async function ensureBootstrap(env: Env) {
         [name, typeof value === "object" ? JSON.stringify(value) : String(value), ts, ts]);
     }
   }
-  // Older Resend builds saved values under the original email_* setting names.
-  // Synchronize both representations so an upgrade cannot make saved values disappear.
+  // Preserve sender identity and initialize the provider choice for older builds.
   const emailSettings = await settings(env.XBOARD_DB);
-  const emailHost = firstNonEmpty(emailSettings.email_host, emailSettings.resend_api_url, "https://api.resend.com");
-  const emailPassword = firstNonEmpty(emailSettings.email_password, emailSettings.resend_api_key);
   const legacyEmailUsername = String(firstNonEmpty(emailSettings.email_username, emailSettings.resend_from_name));
   const emailFromAddress = firstNonEmpty(emailSettings.email_from_address, emailSettings.resend_from_address, legacyEmailUsername.includes("@") ? legacyEmailUsername : "");
   const emailFromName = firstNonEmpty(legacyEmailUsername.includes("@") ? "" : legacyEmailUsername, emailSettings.resend_from_name, emailSettings.app_name, "XBoard");
   for (const [name, value] of Object.entries({
-    email_host: emailHost,
-    resend_api_url: emailHost,
-    email_password: emailPassword,
-    resend_api_key: emailPassword,
+    email_driver: ["maileroo", "brevo"].includes(String(emailSettings.email_driver || "").toLowerCase()) ? String(emailSettings.email_driver).toLowerCase() : "maileroo",
     email_from_address: emailFromAddress,
     resend_from_address: emailFromAddress,
     email_username: emailFromName,
@@ -699,10 +693,9 @@ async function adminConfig(env: Env, request: Request) {
       server_ws_url: pickSetting(all, "server_ws_url", "")
     },
     email: {
-      email_host: firstNonEmpty(all.email_host, all.resend_api_url, "https://api.resend.com"),
-      email_port: 443,
+      email_driver: ["maileroo", "brevo"].includes(String(all.email_driver || "").toLowerCase()) ? String(all.email_driver).toLowerCase() : "maileroo",
       email_username: firstNonEmpty(all.email_username, all.resend_from_name, all.app_name, "XBoard"),
-      email_password: firstNonEmpty(all.email_password, all.resend_api_key),
+      email_password: firstNonEmpty(all.email_password),
       email_from_address: firstNonEmpty(all.email_from_address, all.resend_from_address),
       remind_mail_enable: !!pickSetting(all, "remind_mail_enable", 0)
     },
@@ -1845,35 +1838,65 @@ async function queueTemplateMail(env: Env, name: string, email: string, vars: Re
   });
 }
 
+type EmailProvider = "maileroo" | "brevo";
+
+function normalizeEmailProvider(value: unknown): EmailProvider {
+  return String(value || "").toLowerCase() === "brevo" ? "brevo" : "maileroo";
+}
+
+async function sendProviderEmail(provider: EmailProvider, apiKey: string, fromAddress: string, fromName: string, recipients: string[], subject: string, html: string, text: string) {
+  if (!apiKey) throw new Error(`${provider === "brevo" ? "Brevo" : "Maileroo"} API Key 未配置`);
+  if (!fromAddress) throw new Error(`${provider === "brevo" ? "Brevo" : "Maileroo"} 发件人地址未配置`);
+  const endpoint = provider === "brevo"
+    ? "https://api.brevo.com/v3/smtp/email"
+    : "https://smtp.maileroo.com/api/v2/emails";
+  const response = await fetch(endpoint, provider === "brevo" ? {
+    method: "POST",
+    headers: { "api-key": apiKey, "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify({
+      sender: { email: fromAddress, name: fromName || undefined },
+      to: recipients.map(address => ({ email: address })),
+      subject,
+      htmlContent: html,
+      textContent: text
+    })
+  } : {
+    method: "POST",
+    headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify({
+      from: { address: fromAddress, display_name: fromName || undefined },
+      to: recipients.map(address => ({ address })),
+      subject,
+      html,
+      plain: text
+    })
+  });
+  const responseText = await response.text();
+  if (!response.ok) throw new Error(`${provider === "brevo" ? "Brevo" : "Maileroo"} ${response.status}: ${responseText.slice(0, 500)}`);
+  return responseText;
+}
+
 async function sendTestMail(env: Env, email: string) {
   const all = await settings(env.XBOARD_DB);
   const template = await adminMailTemplateGet(env, "notify");
-  const endpoint = String(firstNonEmpty(all.email_host, all.resend_api_url, "https://api.resend.com")).replace(/\/$/, "");
-  const apiKey = String(firstNonEmpty(all.email_password, all.resend_api_key));
+  const provider = normalizeEmailProvider(all.email_driver);
+  const apiKey = String(firstNonEmpty(all.email_password));
   const fromAddress = String(firstNonEmpty(all.email_from_address, all.resend_from_address));
   const fromName = String(firstNonEmpty(all.email_username, all.resend_from_name, all.app_name, "XBoard"));
   const subject = "This is xboard test email";
   const vars = { name: pickSetting(all, "app_name", "XBoard"), content: subject, url: pickSetting(all, "app_url", "") };
   const content = renderMailText(template?.content || mailTemplateDefaults.notify.content, vars);
   const config = {
-    driver: "resend",
-    host: endpoint,
+    driver: provider,
+    host: provider === "brevo" ? "https://api.brevo.com/v3/smtp/email" : "https://smtp.maileroo.com/api/v2/emails",
     port: 443,
-    encryption: "HTTPS/TLS",
+    encryption: "HTTPS",
     from: { address: fromAddress, name: fromName },
     username: fromName
   };
   let error: string | null = null;
   try {
-    if (!apiKey) throw new Error("Resend API Key 未配置");
-    if (!fromAddress) throw new Error("Resend 发件人地址未配置");
-    const response = await fetch(`${endpoint}/emails`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
-      body: JSON.stringify({ from: `${fromName} <${fromAddress}>`, to: [email], subject, html: mailHtml(content), text: content })
-    });
-    const responseText = await response.text();
-    if (!response.ok) throw new Error(`Resend ${response.status}: ${responseText.slice(0, 500)}`);
+    await sendProviderEmail(provider, apiKey, fromAddress, fromName, [email], subject, mailHtml(content), content);
   } catch (caught: any) {
     error = String(caught?.message || caught);
   }
@@ -2728,14 +2751,16 @@ async function adminApi(request: Request, env: Env, path: string) {
       if (!/^[A-Za-z0-9_-]+$/.test(securePath)) return fail("后台路径只能为字母、数字、下划线或短横线", 422, 422);
       input.secure_path = securePath;
     }
+    if (Object.prototype.hasOwnProperty.call(input, "email_driver")) {
+      input.email_driver = String(input.email_driver || "").toLowerCase();
+      if (!["maileroo", "brevo"].includes(input.email_driver)) return fail("邮件服务商只能是 Maileroo 或 Brevo", 422, 422);
+    }
     const ts = now();
     for (const [name, value] of Object.entries(input)) {
       if (await saveSubscribeTemplate(env, name, value)) continue;
       if (!allowedConfigSettings.has(name)) return fail(`不支持的设置项: ${name}`, 422, 422);
       const emailAliases: Record<string, string> = {
-        email_host: "resend_api_url", resend_api_url: "email_host",
         email_username: "resend_from_name", resend_from_name: "email_username",
-        email_password: "resend_api_key", resend_api_key: "email_password",
         email_from_address: "resend_from_address", resend_from_address: "email_from_address"
       };
       await env.XBOARD_DB.prepare("INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")

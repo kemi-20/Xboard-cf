@@ -347,7 +347,7 @@ async function exportManifest(env: MigrationEnv) {
     template: "/migration/xboard-template.db",
     tables: MIGRATION_TABLES,
     counts: await allTableCounts(env.XBOARD_DB),
-    excluded: ["邮件与 Resend 凭据会导出为空值", "所有插件、插件配置与支付渠道不会导出", "服务器机器负载历史不会导出", "主题固定为 Xboard 默认主题"]
+    excluded: ["邮件服务商与 API 凭据会导出为空值", "所有插件、插件配置与支付渠道不会导出", "服务器机器负载历史不会导出", "主题固定为 Xboard 默认主题"]
   });
 }
 
@@ -776,7 +776,7 @@ async function finishMigration(request: Request, env: MigrationEnv) {
     target_counts: counts,
     progress,
     warnings,
-    skipped_service_config: ["原 SMTP/邮件驱动设置", "Resend 凭据", "所有插件及插件配置", "支付渠道配置", "原主题与主题配置", "服务器机器负载历史"],
+    skipped_service_config: ["原 SMTP/邮件驱动设置", "邮件服务商 API 凭据", "所有插件及插件配置", "支付渠道配置", "原主题与主题配置", "服务器机器负载历史"],
     skip_backup: Boolean(Number(run.skip_backup || 0)),
     theme: "Xboard"
   };

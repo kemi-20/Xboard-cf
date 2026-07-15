@@ -9,7 +9,7 @@ XBoard CF 是基于 Cloudflare Workers、D1、KV、Queues、Durable Objects 和 
 - 官方 XBoard 后台 WebUI，入口为 `/admin`
 - 用户、套餐、权限组、节点、服务器、路由、公告、知识库和工单管理
 - 系统设置、订阅设置、订阅模板和邮件模板管理
-- Resend 邮件发送、测试邮件、模板测试、批量用户邮件和提醒邮件队列
+- Maileroo/Brevo 邮件发送、测试邮件、模板测试、批量用户邮件和提醒邮件队列
 - 原版礼品卡模板、批量兑换码、条件与次数限制、盲盒奖励、兑换记录和统计
 - 用户 API 与第三方用户前端兼容接口
 - Base64、Clash、Clash Meta、Surge、Shadowrocket、Quantumult X 和 Loon 订阅输出
@@ -65,7 +65,7 @@ https://你的域名/admin
 | `xboard-edge` | `workers/xboard-edge` | 后台 WebUI、后台 API、用户 API、节点接口代理 |
 | `xboard-subscription` | `workers/xboard-subscription` | 订阅校验、订阅格式生成和短缓存 |
 | `xboard-server` | `workers/xboard-server` | 节点 HTTP、机器模式、状态上报和 WebSocket |
-| `xboard-jobs` | `workers/xboard-jobs` | Queue 消费、流量和统计写入、Resend 邮件发送 |
+| `xboard-jobs` | `workers/xboard-jobs` | Queue 消费、流量和统计写入、Maileroo/Brevo 邮件发送 |
 | `xboard-cron` | `workers/xboard-cron` | 流量重置、过期检查、统计和清理任务 |
 
 Worker 之间没有依赖仓库根目录的共享运行时代码，因此 Cloudflare 可以直接把每个目录设置为独立的构建根目录。
@@ -94,25 +94,27 @@ Queue Producer：MAIL_EVENTS -> mail-events
 
 D1 保存用户、套餐、节点、服务器、权限、设置、流量和统计等正式数据。KV 用于 Session、验证码、版本号、订阅缓存和设备限制等短期状态。全部机器与节点的实时运行状态及 24 小时负载采样由 `xboard-server` 中唯一的全局 `StatusHub` Durable Object 持久化，D1 不再写入高频心跳；`xboard-edge` 对完整 `v2_settings` 使用 60 秒实例内存缓存，其他 Worker 只缓存各自实际使用的设置白名单。
 
-## Resend 邮件
+## 邮件服务
 
-邮件不再使用 SMTP，`xboard-edge` 将邮件任务写入 `mail-events`，`xboard-jobs` 通过 Resend HTTPS API 发送。后台“邮件设置”中的字段含义为：
+邮件不再使用 SMTP，`xboard-edge` 将邮件任务写入 `mail-events`，`xboard-jobs` 根据后台选择通过 Maileroo 或 Brevo 的 HTTPS API 发送。后台“邮件设置”中的字段含义为：
 
 ```text
-Resend API 地址：默认 https://api.resend.com
-发件人名称：Resend 邮件显示名称
-Resend API Key：以 re_ 开头的 API Key
-发件人地址：已在 Resend 验证的域名邮箱
+邮件服务商：Maileroo 或 Brevo，默认 Maileroo
+发件人名称：邮件中显示的名称
+API Key：所选服务商创建的 API Key
+发件人地址：已在所选服务商验证的域名邮箱
 ```
 
-生产环境推荐把 API Key 配置为 `xboard-jobs` 的 Worker Secret：
+生产环境也可以把 API Key 配置为 `xboard-jobs` 的 Worker Secret，Secret 会覆盖后台保存值：
 
 ```bash
 cd workers/xboard-jobs
-npx wrangler secret put RESEND_API_KEY
+npx wrangler secret put MAILEROO_API_KEY
+# 或
+npx wrangler secret put BREVO_API_KEY
 ```
 
-后台保存的 API Key 作为兼容回退。邮件 Queue 使用稳定事件 ID 和 Resend `Idempotency-Key`，队列重试不会重复发送同一封邮件。
+Maileroo 免费层通常为每月 3,000 封，Brevo 免费层通常为每天 300 封，实际额度以服务商最新政策为准。邮件 Queue 使用稳定事件 ID 做幂等处理。
 
 ## 礼品卡
 
@@ -217,7 +219,7 @@ framework/schedule 锁
 邮箱验证码、密码错误次数和注册限流计数
 ```
 
-第 2 步“数据预检”会明确列出无法自动切换的外部服务配置。原版 SMTP/邮件驱动设置、Resend 凭据、所有插件、插件配置和支付渠道都不会导入或导出；迁移完成后必须在新后台的邮件设置中手动填写 Resend API Key、发件人邮箱和发件人名称。Telegram 机器人由 Worker 内置实现，不依赖原版插件。所有旧主题和主题配置也会忽略，迁移后固定使用内置 `Xboard` 默认主题。邮件模板、订单等可审计业务历史仍会保留，但真实支付能力不会因此启用。
+第 2 步“数据预检”会明确列出无法自动切换的外部服务配置。原版 SMTP/邮件驱动设置、任何邮件服务商凭据、所有插件、插件配置和支付渠道都不会导入或导出；迁移完成后必须在新后台选择 Maileroo 或 Brevo，并手动填写 API Key、发件人邮箱和发件人名称。Telegram 机器人由 Worker 内置实现，不依赖原版插件。所有旧主题和主题配置也会忽略，迁移后固定使用内置 `Xboard` 默认主题。邮件模板、订单等可审计业务历史仍会保留，但真实支付能力不会因此启用。
 
 默认“完整切换”会以原版主键数据为准，以保持用户、套餐、权限组、节点、机器、订单和统计之间的 ID 关系。“合并”只补充 D1 不存在的数据，适合已有 Cloudflare 数据时谨慎使用。迁移过程中即使原版设置覆盖了后台路径和访问令牌，迁移任务也会使用一次性迁移凭据继续执行；任务完成后该凭据立即失效。
 

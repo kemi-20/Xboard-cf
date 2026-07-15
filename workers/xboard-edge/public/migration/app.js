@@ -257,7 +257,7 @@ async function inspect() {
       ? `<p class="success">联合校验通过：SQLite ${state.sqliteTotal.toLocaleString()} 行，Redis ${redisCount.toLocaleString()} 个有效键。</p>`
       : `<p class="success">SQLite 校验通过：${state.sqliteTotal.toLocaleString()} 行。</p><div class="warning"><strong>未选择 Redis 备份</strong>核心业务数据可以正常迁移。节点在线状态、近期负载、Metrics、旧 Session 和其他临时缓存不会保留；节点重新连接后会自动重新生成运行状态。</div>`;
     const displayedCounts = { ...state.counts, ...state.skippedCounts };
-    $("#preflight-content").innerHTML = `${sourceSummary}<div class="warning"><strong>以下内容不会迁移</strong>原版 SMTP/邮件驱动设置和 Resend 凭据不会导入，所有插件、插件配置、支付渠道和服务器机器负载历史不会导入，所有旧主题配置也会忽略。Telegram 机器人由 Cloudflare 版本内置实现，不依赖原版插件。迁移完成后仅启用默认 Xboard 主题，请在新后台手动配置 Resend API Key、发件人邮箱和发件人名称。</div><p class="muted">邮件模板、订单等可审计业务历史会保留；队列任务、Horizon 监控、调度锁、旧会话、验证码和限流计数不会导入。标记为 (skip) 的数据表仅显示源库行数，不计入迁移进度，也不会备份、导入或导出；服务器负载历史会由节点重新上报生成。</p>${renderCounts(displayedCounts, state.skippedCounts)}`;
+    $("#preflight-content").innerHTML = `${sourceSummary}<div class="warning"><strong>以下内容不会迁移</strong>原版 SMTP/邮件驱动设置和任何邮件服务商凭据不会导入，所有插件、插件配置、支付渠道和服务器机器负载历史不会导入，所有旧主题配置也会忽略。Telegram 机器人由 Cloudflare 版本内置实现，不依赖原版插件。迁移完成后仅启用默认 Xboard 主题，请在新后台选择 Maileroo 或 Brevo，并手动配置 API Key、发件人邮箱和发件人名称。</div><p class="muted">邮件模板、订单等可审计业务历史会保留；队列任务、Horizon 监控、调度锁、旧会话、验证码和限流计数不会导入。标记为 (skip) 的数据表仅显示源库行数，不计入迁移进度，也不会备份、导入或导出；服务器负载历史会由节点重新上报生成。</p>${renderCounts(displayedCounts, state.skippedCounts)}`;
     $("#preflight").hidden = false;
     $("#file-status").textContent = redisFile ? `${sqliteFile.name} + ${redisFile.name}` : `${sqliteFile.name}（未选择 Redis）`;
     setStep(2);

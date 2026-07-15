@@ -1327,28 +1327,24 @@ window.XBOARD_TRANSLATIONS['ru-RU'] = {
     },
     "email": {
       "title": "Настройки почты",
-      "description": "Настройка сервиса Resend для отправки кодов подтверждения, сброса пароля, уведомлений и напоминаний.",
+      "description": "Отправка кодов подтверждения, сброса пароля, уведомлений и напоминаний через HTTPS API Maileroo или Brevo.",
       "tab_settings": "Настройки",
       "tab_templates": "Шаблоны",
       "email_host": {
-        "title": "URL API Resend",
-        "description": "По умолчанию используется https://api.resend.com; обычно изменять не требуется."
-      },
-      "email_port": {
-        "title": "Порт HTTPS",
-        "description": "API Resend использует порт 443."
+        "title": "Почтовый сервис",
+        "description": "Выберите Maileroo или Brevo."
       },
       "email_username": {
         "title": "Имя отправителя",
         "description": "Отображаемое имя отправителя письма."
       },
       "email_password": {
-        "title": "API-ключ Resend",
-        "description": "API-ключ Resend, начинающийся с re_. Его также можно задать в секрете RESEND_API_KEY воркера xboard-jobs."
+        "title": "API-ключ",
+        "description": "Введите API-ключ, созданный у выбранного почтового сервиса."
       },
       "email_from": {
         "title": "Адрес отправителя",
-        "description": "Подтвержденный в Resend адрес электронной почты отправителя."
+        "description": "Подтвержденный адрес отправителя у выбранного сервиса."
       },
       "email_from_name": {
         "title": "Имя отправителя",

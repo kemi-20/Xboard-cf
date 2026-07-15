@@ -2,6 +2,9 @@ import type { D1Database } from "./types";
 const SETTINGS_CACHE_TTL_MS = 60_000;
 const SETTINGS_NAMES = [
   "app_name",
+  "email_driver",
+  "email_password",
+  "email_username",
   "email_from_address",
   "resend_api_key",
   "resend_api_url",

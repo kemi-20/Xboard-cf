@@ -1295,24 +1295,20 @@ window.XBOARD_TRANSLATIONS['zh-CN'] = {
     },
     "email": {
       "title": "邮件设置",
-      "description": "配置 Resend 邮件服务，用于发送验证码、密码重置、通知和提醒邮件。",
+      "description": "通过 Maileroo 或 Brevo 的 HTTPS API 发送验证码、密码重置、通知和提醒邮件。",
       "tab_settings": "基本设置",
       "tab_templates": "模板管理",
       "email_host": {
-        "title": "Resend API 地址",
-        "description": "默认使用 https://api.resend.com，通常无需修改"
-      },
-      "email_port": {
-        "title": "HTTPS 端口",
-        "description": "Resend API 固定使用 443"
+        "title": "邮件服务商",
+        "description": "选择 Maileroo 或 Brevo"
       },
       "email_username": {
         "title": "发件人名称",
         "description": "邮件中显示的发件人名称"
       },
       "email_password": {
-        "title": "Resend API Key",
-        "description": "以 re_ 开头的 Resend API Key，也可以配置为 xboard-jobs 的 RESEND_API_KEY Secret"
+        "title": "API Key",
+        "description": "填写所选邮件服务商创建的 API Key"
       },
       "email_from": {
         "title": "发件人地址",

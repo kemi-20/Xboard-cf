@@ -1385,28 +1385,24 @@ window.XBOARD_TRANSLATIONS['en-US'] = {
     },
     "email": {
       "title": "Email Settings",
-      "description": "Configure the Resend email service for verification codes, password resets, notifications, and reminders.",
+      "description": "Send verification codes, password resets, notifications, and reminders through the Maileroo or Brevo HTTPS API.",
       "tab_settings": "Settings",
       "tab_templates": "Templates",
       "email_host": {
-        "title": "Resend API URL",
-        "description": "Uses https://api.resend.com by default and normally does not need to be changed."
-      },
-      "email_port": {
-        "title": "HTTPS Port",
-        "description": "The Resend API uses port 443."
+        "title": "Email Provider",
+        "description": "Choose Maileroo or Brevo."
       },
       "email_username": {
         "title": "Sender Name",
         "description": "Display name shown as the email sender."
       },
       "email_password": {
-        "title": "Resend API Key",
-        "description": "Resend API Key beginning with re_. It can also be configured as the xboard-jobs RESEND_API_KEY secret."
+        "title": "API Key",
+        "description": "Enter the API key created by the selected email provider."
       },
       "email_from": {
         "title": "Sender Address",
-        "description": "Verified sender email address in Resend."
+        "description": "Verified sender email address at the selected provider."
       },
       "email_from_name": {
         "title": "From Name",
