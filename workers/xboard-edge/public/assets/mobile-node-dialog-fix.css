@@ -1,0 +1,35 @@
+@media (max-width: 767px) {
+  .xboard-mobile-node-dialog {
+    height: min(90dvh, calc(var(--xboard-visual-viewport-height, 100dvh) - 8px)) !important;
+    max-height: min(90dvh, calc(var(--xboard-visual-viewport-height, 100dvh) - 8px)) !important;
+    overflow: hidden !important;
+    overscroll-behavior: contain;
+  }
+
+  .xboard-mobile-node-dialog-form {
+    display: flex;
+    flex: 1 1 auto;
+    min-height: 0;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .xboard-mobile-node-dialog-body {
+    display: flex !important;
+    flex: 1 1 auto !important;
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: hidden;
+  }
+
+  .xboard-mobile-node-dialog-body > div {
+    min-height: 0;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+  }
+
+  .xboard-mobile-node-dialog-form > :last-child {
+    flex: 0 0 auto;
+    padding-bottom: max(1rem, env(safe-area-inset-bottom));
+  }
+}

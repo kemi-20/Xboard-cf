@@ -4012,6 +4012,8 @@ async function adminUi(request: Request, env: Env, securePath: string) {
     <script src="/locales/ru-RU.js"></script>
     <script type="module" crossorigin src="/assets/index-CF20260713.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-DiYa-_z_.css">
+    <link rel="stylesheet" href="/assets/mobile-node-dialog-fix.css">
+    <script defer src="/assets/mobile-node-dialog-fix.js"></script>
     <style>
       aside nav li:has(> a[href$="#/config/plugin"]),
       aside nav li:has(> a[href$="#/config/payment"]),

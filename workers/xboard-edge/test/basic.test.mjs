@@ -97,6 +97,28 @@ test("admin shell references the current bundle without caching", () => {
   assert.doesNotMatch(source, /position:fixed;left:16px;bottom:12px/);
 });
 
+test("mobile node editor remains inside the visual viewport after keyboard dismissal", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const html = fs.readFileSync("public/index.html", "utf8");
+  const script = fs.readFileSync("public/assets/mobile-node-dialog-fix.js", "utf8");
+  const style = fs.readFileSync("public/assets/mobile-node-dialog-fix.css", "utf8");
+
+  for (const document of [source, html]) {
+    assert.match(document, /\/assets\/mobile-node-dialog-fix\.css/);
+    assert.match(document, /\/assets\/mobile-node-dialog-fix\.js/);
+  }
+  assert.match(script, /window\.visualViewport\?\.height \|\| window\.innerHeight/);
+  assert.match(script, /visualViewport\?\.addEventListener\("resize"/);
+  assert.match(script, /document\.addEventListener\("focusout"/);
+  assert.match(script, /\[50, 200, 500\]/);
+  assert.match(script, /h-\[75vh\]/);
+  assert.match(script, /min-h-\[500px\]/);
+  assert.match(style, /@media \(max-width: 767px\)/);
+  assert.match(style, /--xboard-visual-viewport-height/);
+  assert.match(style, /\.xboard-mobile-node-dialog-form/);
+  assert.match(style, /padding-bottom: max\(1rem, env\(safe-area-inset-bottom\)\)/);
+});
+
 test("admin search hides reserved pages and includes data migration", () => {
   const bundle = fs.readFileSync("public/assets/index-CF20260713.js", "utf8");
   const zh = fs.readFileSync("public/locales/zh-CN.js", "utf8");
