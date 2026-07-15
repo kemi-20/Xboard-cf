@@ -2,7 +2,7 @@
 
 XBoard CF 是基于 Cloudflare Workers、D1、KV、Queues、Durable Objects 和 Static Assets 重写的 XBoard。项目保留官方后台 WebUI、用户 API、订阅接口和节点协议，不需要部署 Laravel、PHP、MySQL 或 Redis。
 
-> 当前仅暂缓需要真实收款、支付回调或资金提现的功能。礼品卡兑换、余额奖励、套餐奖励、流量奖励和邮件发送均为真实业务实现。
+> 当前仅暂缓需要真实收款、支付回调或资金提现的功能。余额、套餐、流量、邮件和其他非支付业务均使用真实数据处理。
 
 ## 主要功能
 
@@ -10,7 +10,6 @@ XBoard CF 是基于 Cloudflare Workers、D1、KV、Queues、Durable Objects 和 
 - 用户、套餐、权限组、节点、服务器、路由、公告、知识库和工单管理
 - 系统设置、订阅设置、订阅模板和邮件模板管理
 - Maileroo/Brevo 邮件发送、测试邮件、模板测试、批量用户邮件和提醒邮件队列
-- 原版礼品卡模板、批量兑换码、条件与次数限制、盲盒奖励、兑换记录和统计
 - 用户 API 与第三方用户前端兼容接口
 - Base64、Clash、Clash Meta、Surge、Shadowrocket、Quantumult X 和 Loon 订阅输出
 - UniProxy、ShadowsocksTidalab、TrojanTidalab 和 V2 节点接口
@@ -72,27 +71,24 @@ Worker 之间没有依赖仓库根目录的共享运行时代码，因此 Cloudf
 
 ## Cloudflare 资源
 
-默认资源和绑定：
+以下资源均由首次 GitHub Actions 自动创建或复用：
 
-```text
-D1 数据库：xboard-db
-D1 绑定：XBOARD_DB
+| 资源 | 名称或绑定 | 用途 |
+| --- | --- | --- |
+| D1 | `xboard-db` / `XBOARD_DB` | 用户、套餐、节点、订单、设置、流量和统计等正式业务数据 |
+| KV | `xboard-kv` / `XBOARD_KV` | Session、验证码、限流、缓存和版本标记 |
+| Queue | `traffic-events` | 节点流量异步入库，由 `xboard-jobs` 消费 |
+| Queue | `mail-events` | 邮件任务，由 `xboard-jobs` 消费 |
+| Durable Object | `NodeHub` / `NODE_HUB` | 节点和机器 WebSocket 连接、同步事件与休眠连接管理 |
+| Durable Object | `StatusHub` / `STATUS_HUB` | 全局节点与机器实时状态、设备状态及 24 小时负载采样 |
+| Static Assets | `ASSETS` | `xboard-edge` 托管后台 WebUI、语言包和静态文件 |
+| Service Binding | `XBOARD_SERVER` | `xboard-edge`、`xboard-cron` 调用 `xboard-server` |
+| Service Binding | `XBOARD_SUBSCRIPTION` | `xboard-edge` 转发订阅请求到 `xboard-subscription` |
+| Queue Producer | `TRAFFIC_EVENTS` | `xboard-server` 写入 `traffic-events` |
+| Queue Producer | `MAIL_EVENTS` | `xboard-edge`、`xboard-cron` 写入 `mail-events` |
+| Cron Triggers | `* * * * *`、`10 0 * * *` | `xboard-cron` 的周期检查、统计和清理任务 |
 
-KV Namespace：xboard-kv
-KV 绑定：XBOARD_KV
-
-Queues：
-traffic-events
-mail-events
-
-Durable Object：NodeHub
-Static Assets 绑定：ASSETS
-Service Binding：XBOARD_SERVER -> xboard-server
-Service Binding：XBOARD_SUBSCRIPTION -> xboard-subscription
-Queue Producer：MAIL_EVENTS -> mail-events
-```
-
-D1 保存用户、套餐、节点、服务器、权限、设置、流量和统计等正式数据。KV 用于 Session、验证码、版本号、订阅缓存和设备限制等短期状态。全部机器与节点的实时运行状态及 24 小时负载采样由 `xboard-server` 中唯一的全局 `StatusHub` Durable Object 持久化，D1 不再写入高频心跳；`xboard-edge` 对完整 `v2_settings` 使用 60 秒实例内存缓存，其他 Worker 只缓存各自实际使用的设置白名单。
+五个 Worker 都绑定同一个 D1 和 KV。D1 是正式业务数据的唯一权威来源；KV 只保存可重新生成的短期数据。高频机器心跳不写入 D1，而是进入 `StatusHub`。`xboard-edge` 对完整 `v2_settings` 使用 60 秒实例内存缓存，其他 Worker 只缓存各自需要的设置。
 
 ## 邮件服务
 
@@ -116,19 +112,6 @@ npx wrangler secret put BREVO_API_KEY
 
 Maileroo 免费层通常为每月 3,000 封，Brevo 免费层通常为每天 300 封，实际额度以服务商最新政策为准。邮件 Queue 使用稳定事件 ID 做幂等处理。
 
-## 礼品卡
-
-礼品卡接口与官方 XBoard 保持一致，包含：
-
-```text
-后台：模板创建/编辑/删除、兑换码批量生成、启停、导出、记录和统计
-用户：兑换码检查、奖励预览、兑换、历史记录和详情
-奖励：余额、流量、设备数、有效期、流量重置、套餐、邀请人奖励、盲盒和节日倍率
-限制：新用户、付费用户、指定套餐、邀请人、每用户次数和冷却时间
-```
-
-兑换会同步更新 D1 中的用户、兑换码、兑换记录和流量重置日志。
-
 ## 首次部署与仓库自动部署
 
 最终部署结构是五个 Worker 分别连接同一个 GitHub 仓库，由 Cloudflare Workers Builds 监听 `master`。每个 Worker 使用自己的根目录，后续 push 不依赖 GitHub Actions 执行 `wrangler deploy`。
@@ -147,13 +130,13 @@ Maileroo 免费层通常为每月 3,000 封，Brevo 免费层通常为每天 300
 
    ![配置 CLOUDFLARE_API_TOKEN](https://github.com/lyc8503/UptimeFlare/assets/36782264/3e5e23a9-8163-49fb-9acf-530174cdd107)
 
-首次创建 D1、KV、Queues 和五个 Worker 时，使用仓库内只允许手动触发的 `.github/workflows/deploy.yml`：
+首次部署使用仓库内只允许手动触发的 `.github/workflows/deploy.yml`：
 
 ```text
 CLOUDFLARE_API_TOKEN
 ```
 
-然后打开 `Actions -> Bootstrap XBoard on Cloudflare -> Run workflow`。workflow 会自动识别 Token 所属账号，创建或复用 `xboard-db`、`xboard-kv`、`traffic-events` 和 `mail-events`，初始化 D1，并按依赖顺序创建或更新全部 Worker。它只配置了 `workflow_dispatch`，不会在每次 push 时运行。
+然后打开 `Actions -> Bootstrap XBoard on Cloudflare -> Run workflow`。workflow 会自动识别 Token 所属账号，创建或复用 `xboard-db`、`xboard-kv`、`traffic-events` 和 `mail-events`，自动执行 D1 schema 与 seed，创建 Durable Objects、Cron Triggers、Static Assets 和 Service Bindings，并按依赖顺序创建或更新五个 Worker。它只配置了 `workflow_dispatch`，不会在每次 push 时运行。
 
 API Token 至少需要该账号下 Workers Scripts、D1、Workers KV Storage、Queues 和 Account Settings 的读取/编辑权限。若 Token 可访问多个账号，workflow 使用 Cloudflare API 返回的第一个账号。
 
@@ -183,17 +166,6 @@ workers/xboard-cron
 workflow 的运行摘要会生成五个 Worker 的 Builds 设置直达链接和对应根目录，方便逐项连接。连接完成后，推送 `master` 会由 Cloudflare Workers Builds 自动构建和部署对应 Worker；GitHub Actions 只负责首次创建资源和 Worker，不负责后续 push 部署。
 
 Cloudflare 官方说明：[Workers Builds](https://developers.cloudflare.com/workers/ci-cd/builds/) 和 [GitHub integration](https://developers.cloudflare.com/workers/ci-cd/builds/git-integration/github-integration/)。
-
-## 初始化数据库
-
-创建资源后执行：
-
-```bash
-npx wrangler d1 execute xboard-db --remote --config workers/xboard-edge/wrangler.toml --file schema/d1.sql
-npx wrangler d1 execute xboard-db --remote --config workers/xboard-edge/wrangler.toml --file schema/seed.sql
-```
-
-`schema/seed.sql` 会创建或重置默认管理员。Schema 和 seed 都按幂等方式设计；已有数据库升级时应保留现有用户、节点、服务器和统计数据。
 
 ## 从原版迁移
 
@@ -229,22 +201,6 @@ framework/schedule 锁
 
 真实备份预演覆盖 14,369 行 SQLite 数据和 Redis 12 格式 RDB。迁移器会处理原版与 D1 的字段差异，包括时间戳、`transfer_used_total`、机器启用状态、订阅模板默认字段和 bcrypt 密码标记。
 
-## 订阅行为
-
-主要订阅入口：
-
-```text
-GET /s/:token
-GET /sub/:token
-GET /api/v1/client/subscribe
-```
-
-订阅 Worker 会读取站点订阅设置、订阅 URL、节点完整配置和订阅模板。默认 URI 订阅以 Base64 文本返回，响应使用 `text/plain`，访问链接时直接显示内容，不强制下载 TXT 文件。
-
-`xboard-edge` 通过 `XBOARD_SUBSCRIPTION` Service Binding 原样转发 `/s/*`、`/sub/*` 和 `/api/v1/client/subscribe`，因此官方客户端可以继续使用面板主域名。
-
-KV 仅作为订阅短缓存。KV 读写失败时会回退到 D1 实时生成，不应导致有效订阅不可用。
-
 ## 本地检查
 
 检查所有 Worker：
@@ -276,7 +232,7 @@ npx wrangler deploy --dry-run --outdir ../../.tmp/xboard-edge-dry-run
 
 Cloudflare Workers 无法在运行时解压并执行 Laravel Blade 主题或任意 PHP 插件。主题配置、插件管理和支付配置目前在菜单和全局搜索中隐藏，相关路由、表结构和兼容代码仍保留，便于未来升级为 Cloudflare-native 实现；上传 PHP/Blade ZIP 包不会被执行。Telegram 机器人是内置功能，不需要安装插件。
 
-礼品卡不在暂缓范围内，已经执行真实奖励发放。支付相关表和兼容接口仍然保留，用于避免后台页面崩溃。
+支付相关表和兼容接口仍然保留，用于避免后台页面崩溃。
 
 ## 上游项目与许可
 
