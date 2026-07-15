@@ -559,7 +559,7 @@ export function appendMachineHistory(history: Row[], point: Row, recordedAt: num
   return history
     .filter(item => Number(item.recorded_at || 0) >= cutoff)
     .concat(point)
-    .slice(-288);
+    .slice(-1440);
 }
 
 export class StatusHub {

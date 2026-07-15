@@ -76,9 +76,9 @@ test("machine load history appends every report like upstream", () => {
   const second = { cpu: 20, recorded_at: recent };
   assert.deepEqual(appendMachineHistory([first], second, recent), [first, second]);
 
-  const oversized = Array.from({ length: 288 }, (_, index) => ({ cpu: index, recorded_at: recent - 287 + index }));
+  const oversized = Array.from({ length: 1440 }, (_, index) => ({ cpu: index, recorded_at: recent - 1439 + index }));
   const trimmed = appendMachineHistory(oversized, { cpu: 999, recorded_at: recent + 1 }, recent + 1);
-  assert.equal(trimmed.length, 288);
+  assert.equal(trimmed.length, 1440);
   assert.equal(trimmed[0].cpu, 1);
   assert.equal(trimmed.at(-1).cpu, 999);
 
