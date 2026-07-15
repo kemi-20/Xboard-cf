@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { OFFICIAL_HTTP_ROUTES, OFFICIAL_WS_EVENTS } from "../src/contracts.ts";
-import { REGISTERED_HTTP_ROUTES } from "../src/index.ts";
+import { appendMachineHistory, REGISTERED_HTTP_ROUTES } from "../src/index.ts";
 
 test("xboard-server has an entrypoint", () => {
   assert.ok(fs.existsSync("src/index.ts"));
@@ -62,12 +62,28 @@ test("node and machine runtime status persist in the global StatusHub", () => {
   assert.match(source, /const STATUS_HUB_ID = "global"/);
   assert.match(source, /env\.STATUS_HUB\.idFromName\(STATUS_HUB_ID\)/);
   assert.match(source, /this\.state\.storage\.put\(writes\)/);
-  assert.match(source, /writes\[historyKey\] = history\.slice\(-288\)/);
+  assert.match(source, /writes\[historyKey\] = appendMachineHistory\(history, point, updatedAt\)/);
   assert.match(wrangler, /name = "STATUS_HUB"/);
   assert.match(wrangler, /class_name = "StatusHub"/);
   assert.match(wrangler, /tag = "v2"[\s\S]*new_sqlite_classes = \["StatusHub"\]/);
   assert.doesNotMatch(source, /UPDATE v2_server SET metrics = \?, last_push_at = \?, updated_at = \?/);
   assert.doesNotMatch(source, /INSERT INTO v2_server_machine_load_history/);
+});
+
+test("machine load history appends every report like upstream", () => {
+  const recent = 2_000_000_000;
+  const first = { cpu: 10, recorded_at: recent - 299 };
+  const second = { cpu: 20, recorded_at: recent };
+  assert.deepEqual(appendMachineHistory([first], second, recent), [first, second]);
+
+  const oversized = Array.from({ length: 288 }, (_, index) => ({ cpu: index, recorded_at: recent - 287 + index }));
+  const trimmed = appendMachineHistory(oversized, { cpu: 999, recorded_at: recent + 1 }, recent + 1);
+  assert.equal(trimmed.length, 288);
+  assert.equal(trimmed[0].cpu, 1);
+  assert.equal(trimmed.at(-1).cpu, 999);
+
+  const stale = { cpu: 1, recorded_at: recent - 86401 };
+  assert.deepEqual(appendMachineHistory([stale], second, recent), [second]);
 });
 
 test("settings use a coalesced sixty-second instance cache", () => {

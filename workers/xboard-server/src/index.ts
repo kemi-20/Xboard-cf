@@ -554,6 +554,14 @@ function wsMessage(event: string, data: Row = {}) {
   return JSON.stringify({ event, data, timestamp: now() });
 }
 
+export function appendMachineHistory(history: Row[], point: Row, recordedAt: number) {
+  const cutoff = recordedAt - 86400;
+  return history
+    .filter(item => Number(item.recorded_at || 0) >= cutoff)
+    .concat(point)
+    .slice(-288);
+}
+
 export class StatusHub {
   private state: DurableObjectState;
 
@@ -599,12 +607,9 @@ export class StatusHub {
       const writes: Record<string, unknown> = { [key]: next };
       if (kind === "machine" && input.history && input.state.load_status && typeof input.state.load_status === "object") {
         const historyKey = `history:${id}`;
-        const cutoff = updatedAt - 86400;
-        const history = (await this.state.storage.get<Row[]>(historyKey) || []).filter(item => Number(item.recorded_at || 0) >= cutoff);
         const point = this.historyPoint(input.state.load_status as Row, updatedAt);
-        if (history.length && updatedAt - Number(history[history.length - 1].recorded_at || 0) < 300) history[history.length - 1] = point;
-        else history.push(point);
-        writes[historyKey] = history.slice(-288);
+        const history = await this.state.storage.get<Row[]>(historyKey) || [];
+        writes[historyKey] = appendMachineHistory(history, point, updatedAt);
       }
       await this.state.storage.put(writes);
       return json({ data: true });
