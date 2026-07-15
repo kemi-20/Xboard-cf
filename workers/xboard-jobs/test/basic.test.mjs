@@ -46,8 +46,18 @@ test("mail templates override fallbacks and provider credentials stay protocol-s
   assert.match(source, /recipients\.map\(email/);
 });
 
-test("traffic events retain the reported users for the exceeded-traffic check", () => {
+test("traffic events use event-level idempotency and conditional exceeded checks", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
+  const wrangler = fs.readFileSync("wrangler.toml", "utf8");
+  assert.doesNotMatch(source, /event\.event_id}:user:/);
+  assert.match(source, /const users = new Map/);
+  assert.match(source, /const results = await runOnce\(env, event\.event_id, "traffic"/);
   assert.match(source, /INSERT INTO v2_traffic_pending_check/);
+  assert.match(source, /u \+ d >= transfer_enable/);
   assert.match(source, /ON CONFLICT\(user_id\) DO UPDATE/);
+  assert.match(source, /pendingResultIndexes\.some/);
+  assert.match(wrangler, /dead_letter_queue = "traffic-events-dlq"/);
+  assert.match(wrangler, /dead_letter_queue = "mail-events-dlq"/);
+  assert.match(wrangler, /max_retries = 5/);
+  assert.match(wrangler, /queue = "traffic-events"[\s\S]*?max_batch_size = 1/);
 });

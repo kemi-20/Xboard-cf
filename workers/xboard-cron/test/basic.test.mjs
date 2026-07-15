@@ -6,6 +6,9 @@ import cronWorker, { __test } from "../src/index.ts";
 test("xboard-cron has an entrypoint", () => {
   assert.ok(fs.existsSync("src/index.ts"));
   assert.match(fs.readFileSync("src/index.ts", "utf8"), /export default/);
+  const wrangler = fs.readFileSync("wrangler.toml", "utf8");
+  assert.match(wrangler, /crons = \["\* \* \* \* \*"\]/);
+  assert.doesNotMatch(wrangler, /10 0 \* \* \*/);
 });
 
 test("public HTTP requests cannot execute cron maintenance", async () => {

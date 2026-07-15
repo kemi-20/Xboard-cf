@@ -175,7 +175,7 @@ function isNodeProtocolPath(pathname: string, method = "GET") {
 }
 
 async function internalSyncToken(env: Env) {
-  const values = await settings(env.XBOARD_DB);
+  const values = await settings(env.XBOARD_DB, env.XBOARD_KV);
   return String(values.internal_sync_token || values.server_token || "");
 }
 
@@ -565,7 +565,7 @@ async function ensureBootstrap(env: Env) {
     }
   }
   // Preserve sender identity and initialize the provider choice for older builds.
-  const emailSettings = await settings(env.XBOARD_DB);
+  const emailSettings = await settings(env.XBOARD_DB, env.XBOARD_KV);
   const legacyEmailUsername = String(firstNonEmpty(emailSettings.email_username, emailSettings.resend_from_name));
   const emailFromAddress = firstNonEmpty(emailSettings.email_from_address, emailSettings.resend_from_address, legacyEmailUsername.includes("@") ? legacyEmailUsername : "");
   const emailFromName = firstNonEmpty(legacyEmailUsername.includes("@") ? "" : legacyEmailUsername, emailSettings.resend_from_name, emailSettings.app_name, "XBoard");
@@ -631,7 +631,7 @@ function firstNonEmpty(...values: unknown[]) {
 }
 
 async function adminConfig(env: Env, request: Request) {
-  const all = await settings(env.XBOARD_DB);
+  const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
   const templates = await subscribeTemplateMap(env);
   const config: Record<string, any> = {
     invite: {
@@ -828,7 +828,7 @@ function paginated<T extends Record<string, any>>(data: T[], total: number, page
 }
 
 async function subscribeUrl(request: Request, env: Env, userToken: string) {
-  const values = await settings(env.XBOARD_DB);
+  const values = await settings(env.XBOARD_DB, env.XBOARD_KV);
   const configuredList = String(values.subscribe_url || new URL(request.url).origin).split(",").map(value => value.trim()).filter(Boolean);
   const selectedBase = configuredList[Math.floor(Math.random() * configuredList.length)] || new URL(request.url).origin;
   const configuredBase = selectedBase
@@ -845,7 +845,7 @@ async function subscribeUrl(request: Request, env: Env, userToken: string) {
 
 async function guestApi(request: Request, env: Env, path: string) {
   if (request.method === "POST" && path === "/api/v1/guest/telegram/webhook") {
-    const all = await settings(env.XBOARD_DB); const botToken = String(pickSetting(all, "telegram_bot_token", ""));
+    const all = await settings(env.XBOARD_DB, env.XBOARD_KV); const botToken = String(pickSetting(all, "telegram_bot_token", ""));
     if (new URL(request.url).searchParams.get("access_token") !== md5(botToken)) return fail("access_token is error", 401, 401);
     const update = await body<Record<string, any>>(request);
     const join = update.chat_join_request;
@@ -860,7 +860,7 @@ async function guestApi(request: Request, env: Env, path: string) {
     return ok((await adminPlanRows(env)).filter(row => Number((row as any).show ?? 1) === 1 && Number((row as any).sell ?? 1) === 1));
   }
   if (request.method === "GET" && path === "/api/v1/guest/comm/config") {
-    const all = await settings(env.XBOARD_DB);
+    const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
     return ok({
       tos_url: pickSetting(all, "tos_url", ""),
       is_email_verify: Number(Boolean(pickSetting(all, "email_verify", 0))),
@@ -895,7 +895,7 @@ async function clientUser(request: Request, env: Env) {
 async function clientApi(request: Request, env: Env, path: string) {
   const user = await clientUser(request, env);
   if (!user) return fail(new URL(request.url).searchParams.get("token") ? "token is error" : "token is null", 403, 403);
-  const all = await settings(env.XBOARD_DB);
+  const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
   if (request.method === "GET" && path.endsWith("/app/getVersion")) {
     const userAgent = request.headers.get("user-agent") || "";
     if (/tidalab\/4\.0\.0|tunnelab\/4\.0\.0/i.test(userAgent)) {
@@ -1477,7 +1477,7 @@ function shellQuote(value: string) {
 }
 
 async function machineInstallCommand(request: Request, env: Env, machineToken: string, machineId: number) {
-  const configured = await settings(env.XBOARD_DB);
+  const configured = await settings(env.XBOARD_DB, env.XBOARD_KV);
   const panelUrl = String(configured.app_url || new URL(request.url).origin).replace(/\/$/, "");
   const installerUrl = "https://raw.githubusercontent.com/cedar2025/xboard-node/dev/install.sh";
   return `curl -fsSL ${installerUrl} | sudo bash -s -- --mode machine --panel ${shellQuote(panelUrl)} --token ${shellQuote(machineToken)} --machine-id ${machineId}`;
@@ -1901,7 +1901,7 @@ async function sendProviderEmail(provider: EmailProvider, apiKey: string, fromAd
 }
 
 async function sendTestMail(env: Env, email: string) {
-  const all = await settings(env.XBOARD_DB);
+  const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
   const template = await adminMailTemplateGet(env, "notify");
   const provider = normalizeEmailProvider(all.email_driver);
   const apiKey = String(firstNonEmpty(all.email_password));
@@ -1988,7 +1988,7 @@ async function login(request: Request, env: Env, admin = false) {
   const input = await body<any>(request);
   const email = String(input.email || input.username || "").trim().toLowerCase();
   const password = String(input.password || "");
-  const all = await settings(env.XBOARD_DB); const limitEnabled = !!pickSetting(all, "password_limit_enable", 1);
+  const all = await settings(env.XBOARD_DB, env.XBOARD_KV); const limitEnabled = !!pickSetting(all, "password_limit_enable", 1);
   const limit = Math.max(1, Number(pickSetting(all, "password_limit_count", 5))); const windowSeconds = Math.max(0, Number(pickSetting(all, "password_limit_expire", 60)) * 60);
   const rateKey = `rate:login:${email}`; const attempts = Number(await optionalKvGet(env, rateKey) || 0);
   if (limitEnabled && windowSeconds > 0 && attempts >= limit) return fail("登录尝试次数过多，请稍后再试", 429, 429);
@@ -2041,7 +2041,7 @@ async function verifyCaptcha(request: Request, input: Record<string, any>, all: 
 
 async function registerUser(request: Request, env: Env) {
   const input = await body<Record<string, any>>(request);
-  const all = await settings(env.XBOARD_DB);
+  const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
   const email = String(input.email || "").trim().toLowerCase();
   const passwordText = String(input.password || "");
   if (!email) return fail("Email can not be empty", 422, 422);
@@ -2204,7 +2204,7 @@ async function adminTicket(request: Request, env: Env, route: string, adminId: n
       const recipient = await env.XBOARD_DB.prepare("SELECT email FROM v2_user WHERE id = ?").bind(ticket.user_id).first<{ email: string }>();
       if (recipient?.email) {
         try {
-          const all = await settings(env.XBOARD_DB);
+          const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
           await queueTemplateMail(env, "notify", recipient.email, {
             name: pickSetting(all, "app_name", "XBoard"),
             url: pickSetting(all, "app_url", ""),
@@ -2314,7 +2314,7 @@ async function adminCoupon(request: Request, env: Env, route: string): Promise<R
 
 async function themeApi(request: Request, env: Env, route: string): Promise<Response | null> {
   if (!route.startsWith("/theme/")) return null;
-  const all = await settings(env.XBOARD_DB); const input = request.method === "POST" ? await body<Record<string, any>>(request.clone()) : {};
+  const all = await settings(env.XBOARD_DB, env.XBOARD_KV); const input = request.method === "POST" ? await body<Record<string, any>>(request.clone()) : {};
   if (route === "/theme/getThemes") return ok({ themes: { Xboard: { name: "Xboard", version: "Cloudflare", description: "Cloudflare bundled user theme", configs: [], can_delete: false, is_system: true } }, active: pickSetting(all, "frontend_theme", "Xboard") });
   const name = String(input.name || "");
   if (!name) return fail("主题名称不能为空", 422, 422);
@@ -2506,12 +2506,12 @@ async function orderCommission(env: Env, user: Record<string, any>, totalAmount:
   const inviter = await env.XBOARD_DB.prepare("SELECT id, commission_type, commission_rate FROM v2_user WHERE id = ?").bind(inviteUserId).first<Record<string, any>>();
   if (!inviter) return { inviteUserId, commissionBalance: 0 };
   let commissionType = Number(inviter.commission_type || 0);
-  if (commissionType === 0) commissionType = Number(pickSetting(await settings(env.XBOARD_DB), "commission_first_time_enable", 1)) ? 2 : 1;
+  if (commissionType === 0) commissionType = Number(pickSetting(await settings(env.XBOARD_DB, env.XBOARD_KV), "commission_first_time_enable", 1)) ? 2 : 1;
   if (commissionType === 2) {
     const valid = await env.XBOARD_DB.prepare("SELECT id FROM v2_order WHERE user_id = ? AND status NOT IN (0, 2) LIMIT 1").bind(user.id).first();
     if (valid) return { inviteUserId, commissionBalance: 0 };
   }
-  const all = await settings(env.XBOARD_DB);
+  const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
   const rate = Number(inviter.commission_rate || pickSetting(all, "invite_commission", 10));
   return { inviteUserId, commissionBalance: Math.trunc(totalAmount * rate / 100) };
 }
@@ -2580,7 +2580,7 @@ async function adminOrder(request: Request, env: Env, route: string): Promise<Re
       statements.push(env.XBOARD_DB.prepare(`UPDATE v2_order SET status=4,updated_at=? WHERE id IN (${surplusOrderIds.map(() => "?").join(",")}) AND ${orderGuard}`)
         .bind(ts, ...surplusOrderIds, order.id));
     }
-    const allSettings = await settings(env.XBOARD_DB);
+    const allSettings = await settings(env.XBOARD_DB, env.XBOARD_KV);
     const eventSetting = Number(order.type) === 1 ? "new_order_event_id" : Number(order.type) === 2 ? "renew_order_event_id" : Number(order.type) === 3 ? "change_order_event_id" : "";
     const orderEventId = eventSetting ? Number(pickSetting(allSettings, eventSetting, 0)) : 0;
     let resetTraffic = orderEventId === 1;
@@ -2834,7 +2834,7 @@ async function adminApi(request: Request, env: Env, path: string) {
     return ok(await sendTestMail(env, String((admin as any).email)));
   }
   if (request.method === "POST" && route === "/config/setTelegramWebhook") {
-    const input = await body<Record<string, any>>(request); const all = await settings(env.XBOARD_DB);
+    const input = await body<Record<string, any>>(request); const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
     const botToken = String(input.telegram_bot_token || pickSetting(all, "telegram_bot_token", ""));
     const custom = String(pickSetting(all, "telegram_webhook_url", "")).trim();
     const base = (custom || String(pickSetting(all, "app_url", "")) || new URL(request.url).origin).replace(/\/$/, "");
@@ -2938,7 +2938,7 @@ async function adminApi(request: Request, env: Env, path: string) {
     const input = await body<Record<string, any>>(request);
     const name = String(input.name || "");
     if (!mailTemplateMeta[name]) return fail("模板不存在", 404, 404);
-    const all = await settings(env.XBOARD_DB);
+    const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
     const vars = { name: pickSetting(all, "app_name", "XBoard"), code: "123456", content: "This is xboard test email", url: pickSetting(all, "app_url", "") };
     await queueTemplateMail(env, name, String(input.email || (admin as any).email), vars, `XBoard ${mailTemplateMeta[name].label}测试`);
     return ok(true);
@@ -3200,7 +3200,7 @@ async function adminApi(request: Request, env: Env, path: string) {
     const users = scope === "selected"
       ? await env.XBOARD_DB.prepare(`SELECT u.*, p.name AS plan_name FROM v2_user u LEFT JOIN v2_plan p ON p.id = u.plan_id WHERE u.id IN (${ids.map(() => "?").join(",")})`).bind(...ids).all<Record<string, any>>()
       : await env.XBOARD_DB.prepare("SELECT u.*, p.name AS plan_name FROM v2_user u LEFT JOIN v2_plan p ON p.id = u.plan_id ORDER BY u.id DESC").all<Record<string, any>>();
-    const all = await settings(env.XBOARD_DB);
+    const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
     for (const recipient of users.results || []) {
       const vars = {
         "app.name": pickSetting(all, "app_name", "XBoard"), "app.url": pickSetting(all, "app_url", ""),
@@ -3286,7 +3286,7 @@ async function userApi(request: Request, env: Env, path: string) {
   if (request.method === "GET" && path.includes("/passport/auth/token2Login")) {
     const url = new URL(request.url); const directToken = url.searchParams.get("token"); const verify = url.searchParams.get("verify");
     if (directToken) {
-      const all = await settings(env.XBOARD_DB); const base = String(pickSetting(all, "app_url", "") || url.origin).replace(/\/$/, "");
+      const all = await settings(env.XBOARD_DB, env.XBOARD_KV); const base = String(pickSetting(all, "app_url", "") || url.origin).replace(/\/$/, "");
       return Response.redirect(`${base}/#/login?verify=${encodeURIComponent(directToken)}&redirect=${encodeURIComponent(url.searchParams.get("redirect") || "dashboard")}`, 302);
     }
     if (verify) {
@@ -3308,14 +3308,14 @@ async function userApi(request: Request, env: Env, path: string) {
     const target = await currentUser(authRequest, env.XBOARD_DB, env.XBOARD_KV, false);
     if (!target) return json({ message: "Unauthorized or expired" }, 401);
     const verify = randomString(32); await optionalKvPutTtl(env, `quick_login:${verify}`, String((target as any).id), 60);
-    const all = await settings(env.XBOARD_DB); const base = String(pickSetting(all, "app_url", "") || new URL(request.url).origin).replace(/\/$/, "");
+    const all = await settings(env.XBOARD_DB, env.XBOARD_KV); const base = String(pickSetting(all, "app_url", "") || new URL(request.url).origin).replace(/\/$/, "");
     return ok(`${base}/#/login?verify=${verify}&redirect=${encodeURIComponent(String(input.redirect || "dashboard"))}`);
   }
   if (request.method === "POST" && path.includes("/passport/auth/loginWithMailLink")) {
     const input = await body<Record<string, any>>(request);
     const email = String(input.email || "").trim().toLowerCase();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return fail("Email format is incorrect", 422, 422);
-    const all = await settings(env.XBOARD_DB);
+    const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
     if (!Number(pickSetting(all, "login_with_mail_link_enable", 0))) return fail("Not Found", 404, 404);
     if (await optionalKvGet(env, `mail_login:last:${email}`)) return fail("Sending frequently, please try again later", 429, 429);
     const target = await env.XBOARD_DB.prepare("SELECT id,email FROM v2_user WHERE email = ?").bind(email).first<Record<string, any>>();
@@ -3338,7 +3338,7 @@ async function userApi(request: Request, env: Env, path: string) {
     const input = await body<Record<string, any>>(request);
     const email = String(input.email || "").trim().toLowerCase();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return fail("Email format is incorrect", 422, 422);
-    const all = await settings(env.XBOARD_DB);
+    const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
     if (!(await verifyCaptcha(request, input, all))) return fail("Invalid code is incorrect", 400, 400);
     if (pickSetting(all, "email_whitelist_enable", 0)) {
       const registered = await env.XBOARD_DB.prepare("SELECT id FROM v2_user WHERE email = ?").bind(email).first();
@@ -3389,7 +3389,7 @@ async function userApi(request: Request, env: Env, path: string) {
     return ok(true);
   }
   if (request.method === "GET" && route === "/invite/save") {
-    const all = await settings(env.XBOARD_DB);
+    const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
     const limit = Number(pickSetting(all, "invite_gen_limit", 5));
     const count = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_invite_code WHERE user_id = ${Number((user as any).id)} AND status = 0`);
     if (count >= limit) return fail("已达到最大创建数量", 400, 400);
@@ -3398,7 +3398,7 @@ async function userApi(request: Request, env: Env, path: string) {
     return ok(true);
   }
   if (request.method === "GET" && route === "/invite/fetch") {
-    const all = await settings(env.XBOARD_DB);
+    const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
     const codes = await env.XBOARD_DB.prepare("SELECT id, code, status, pv, created_at, updated_at FROM v2_invite_code WHERE user_id = ? AND status = 0 ORDER BY id DESC").bind((user as any).id).all();
     const invited = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE invite_user_id = ${Number((user as any).id)}`);
     const commission = await firstNumber(env, `SELECT COALESCE(SUM(get_amount), 0) AS c FROM v2_commission_log WHERE invite_user_id = ${Number((user as any).id)}`);
@@ -3419,7 +3419,7 @@ async function userApi(request: Request, env: Env, path: string) {
     return json({ data: result.results || [], total });
   }
   if (request.method === "GET" && route === "/comm/config") {
-    const all = await settings(env.XBOARD_DB);
+    const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
     return ok({
       is_telegram: Number(Boolean(pickSetting(all, "telegram_bot_enable", 0))),
       telegram_discuss_link: pickSetting(all, "telegram_discuss_link", ""),
@@ -3435,7 +3435,7 @@ async function userApi(request: Request, env: Env, path: string) {
     });
   }
   if (request.method === "GET" && route === "/telegram/getBotInfo") {
-    const all = await settings(env.XBOARD_DB);
+    const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
     return ok({ enabled: Boolean(pickSetting(all, "telegram_bot_enable", 0)), username: pickSetting(all, "telegram_bot_username", ""), discuss_link: pickSetting(all, "telegram_discuss_link", "") });
   }
   if (request.method === "GET" && route === "/knowledge/getCategory") {
@@ -3524,7 +3524,7 @@ async function userApi(request: Request, env: Env, path: string) {
   if (request.method === "POST" && route === "/getQuickLoginUrl") {
     const input = await body<Record<string, any>>(request); const verify = randomString(32);
     await optionalKvPutTtl(env, `quick_login:${verify}`, String((user as any).id), 60);
-    const all = await settings(env.XBOARD_DB); const base = String(pickSetting(all, "app_url", "") || new URL(request.url).origin).replace(/\/$/, "");
+    const all = await settings(env.XBOARD_DB, env.XBOARD_KV); const base = String(pickSetting(all, "app_url", "") || new URL(request.url).origin).replace(/\/$/, "");
     return ok(`${base}/#/login?verify=${verify}&redirect=${encodeURIComponent(String(input.redirect || "dashboard"))}`);
   }
   if (request.method === "POST" && route === "/coupon/check") {
@@ -3576,7 +3576,7 @@ async function userApi(request: Request, env: Env, path: string) {
       const surplusResult = surplusOrderIds.length
         ? await env.XBOARD_DB.prepare(`SELECT * FROM v2_order WHERE user_id = ? AND id IN (${surplusOrderIds.map(() => "?").join(",")}) ORDER BY id ASC`).bind(userId, ...surplusOrderIds).all<Record<string, any>>()
         : { results: [] as Record<string, any>[] };
-      return ok({ ...value, try_out_plan_id: Number(pickSetting(await settings(env.XBOARD_DB), "try_out_plan_id", 0)), surplus_orders: surplusResult.results || [] });
+      return ok({ ...value, try_out_plan_id: Number(pickSetting(await settings(env.XBOARD_DB, env.XBOARD_KV), "try_out_plan_id", 0)), surplus_orders: surplusResult.results || [] });
     }
     if (request.method === "GET" && route === "/order/check") {
       const order = await env.XBOARD_DB.prepare("SELECT status FROM v2_order WHERE user_id = ? AND trade_no = ?").bind(userId, String(input.trade_no || "")).first<{ status: number }>();
@@ -3638,7 +3638,7 @@ async function userApi(request: Request, env: Env, path: string) {
       const type = period === "reset_traffic" ? 4
         : Number((user as any).plan_id) > 0 && Number((user as any).plan_id) !== planId && ((user as any).expired_at === null || Number((user as any).expired_at) > ts) ? 3
         : Number((user as any).plan_id) === planId && ((user as any).expired_at === null || Number((user as any).expired_at) > ts) ? 2 : 1;
-      const allSettings = await settings(env.XBOARD_DB);
+      const allSettings = await settings(env.XBOARD_DB, env.XBOARD_KV);
       if (type === 3 && !Number(pickSetting(allSettings, "plan_change_enable", 1))) return fail("目前不允许更改订阅，请联系客服或提交工单操作", 400, 400);
       const currentUser = await env.XBOARD_DB.prepare("SELECT * FROM v2_user WHERE id = ?").bind(userId).first<Record<string, any>>() || user as Record<string, any>;
       let surplusAmount = 0;
@@ -3725,7 +3725,7 @@ async function userApi(request: Request, env: Env, path: string) {
     }
     const selected = id ? "*" : "id, category, title, updated_at, body";
     const result = await env.XBOARD_DB.prepare(`SELECT ${selected} FROM v2_knowledge WHERE ${clauses.join(" AND ")} ORDER BY sort ASC, id ASC`).bind(...bindings).all<Record<string, any>>();
-    const allSettings = await settings(env.XBOARD_DB);
+    const allSettings = await settings(env.XBOARD_DB, env.XBOARD_KV);
     const subscription = await subscribeUrl(request, env, String((user as any).token || ""));
     const available = userIsAvailable(user as Record<string, any>);
     const safeBase64 = btoa(subscription).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
@@ -3779,7 +3779,7 @@ async function userApi(request: Request, env: Env, path: string) {
     const ticket = await env.XBOARD_DB.prepare("SELECT id, status, reply_status, last_reply_user_id FROM v2_ticket WHERE id = ? AND user_id = ?").bind(input.id, (user as any).id).first<Record<string, any>>();
     if (!ticket) return fail("工单不存在", 400, 400);
     if (Number(ticket.status)) return fail("工单已关闭，无法回复", 400, 400);
-    const config = await settings(env.XBOARD_DB);
+    const config = await settings(env.XBOARD_DB, env.XBOARD_KV);
     if (Number(pickSetting(config, "ticket_must_wait_reply", 0)) && Number(ticket.last_reply_user_id) === Number((user as any).id)) return fail("请等待客服回复后再发送消息", 400, 400);
     const ts = now();
     await env.XBOARD_DB.batch([
@@ -3789,7 +3789,7 @@ async function userApi(request: Request, env: Env, path: string) {
     return ok(true);
   }
   if (request.method === "POST" && route === "/ticket/withdraw") {
-    const input = await body<Record<string, any>>(request); const all = await settings(env.XBOARD_DB);
+    const input = await body<Record<string, any>>(request); const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
     if (Number(pickSetting(all, "withdraw_close_enable", 0))) return fail("Unsupported withdraw", 400, 400);
     const methods = pickSetting(all, "commission_withdraw_method", ["USDT", "支付宝"]);
     if (!Array.isArray(methods) || !methods.includes(input.withdraw_method)) return fail("Unsupported withdrawal method", 422, 422);
@@ -3818,12 +3818,12 @@ function normalizeSecurePath(value: unknown) {
 }
 
 async function currentSecurePath(env: Env) {
-  const values = await settings(env.XBOARD_DB);
+  const values = await settings(env.XBOARD_DB, env.XBOARD_KV);
   return normalizeSecurePath(values.secure_path || "admin");
 }
 
 async function currentSubscribePath(env: Env) {
-  const values = await settings(env.XBOARD_DB);
+  const values = await settings(env.XBOARD_DB, env.XBOARD_KV);
   return String(values.subscribe_path || "s").trim().replace(/^\/+|\/+$/g, "") || "s";
 }
 

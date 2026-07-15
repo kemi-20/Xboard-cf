@@ -21,4 +21,4 @@ binding = "XBOARD_SERVER"
 service = "xboard-server"
 
 [triggers]
-crons = ["* * * * *", "10 0 * * *"]
+crons = ["* * * * *"]

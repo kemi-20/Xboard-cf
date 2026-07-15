@@ -57,7 +57,7 @@ async function readInput(request: Request): Promise<Row> {
 }
 
 async function setting(env: Env, name: string, fallback = "") {
-  const values = await loadSettings(env.XBOARD_DB);
+  const values = await loadSettings(env.XBOARD_DB, env.XBOARD_KV);
   return values[name] ?? fallback;
 }
 
@@ -228,7 +228,18 @@ async function enqueueTraffic(env: Env, node: Row, raw: unknown) {
   const payload = parseTraffic(raw);
   if (!payload.length) return;
   const ts = now();
-  await env.TRAFFIC_EVENTS.send({ event_id: crypto.randomUUID(), type: "traffic", server_id: Number(node.id), server_type: String(node.type), rate: currentRate(node), payload, created_at: ts });
+  const rate = currentRate(node);
+  const events = [];
+  for (let offset = 0; offset < payload.length; offset += 10) {
+    events.push({
+      body: {
+        event_id: crypto.randomUUID(), type: "traffic", server_id: Number(node.id),
+        server_type: String(node.type), rate, payload: payload.slice(offset, offset + 10), created_at: ts
+      }
+    });
+  }
+  if (events.length === 1) await env.TRAFFIC_EVENTS.send(events[0].body);
+  else await env.TRAFFIC_EVENTS.sendBatch(events);
   await reportStatus(env, "node", Number(node.id), {
     machine_id: Number(node.machine_id || 0) || null,
     last_push_at: ts,

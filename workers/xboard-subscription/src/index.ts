@@ -995,7 +995,7 @@ async function build(request: Request, env: Env, token: string) {
   if (user.expired_at !== null && Number(user.expired_at) < now()) return { status: 403, body: "", headers: { "content-type": "text/plain" } };
   if (Number(user.transfer_enable || 0) <= 0) return { status: 403, body: "", headers: { "content-type": "text/plain" } };
 
-  const config = await loadSettings(env.XBOARD_DB);
+  const config = await loadSettings(env.XBOARD_DB, env.XBOARD_KV);
   const templateMap = await templates(env);
   const url = new URL(request.url);
   const requestedTypeInput = url.searchParams.get("types") || "all";
@@ -1044,7 +1044,7 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === "/health") return new Response(JSON.stringify({ data: { service: "xboard-subscription", time: now() } }), { headers: { "content-type": "application/json" } });
     if (url.pathname !== "/api/v1/client/subscribe") {
-      const configured = await loadSettings(env.XBOARD_DB);
+      const configured = await loadSettings(env.XBOARD_DB, env.XBOARD_KV);
       if (!matchesConfiguredSubscribePath(url.pathname, configured.subscribe_path)) return fail("Not Found", 404);
     }
     const token = url.pathname === "/api/v1/client/subscribe"

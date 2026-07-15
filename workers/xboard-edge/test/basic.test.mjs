@@ -200,6 +200,24 @@ test("cache version bumps cannot turn successful D1 saves into API errors", () =
   assert.match(source, /try[\s\S]*await kv\.put\(key, String\(Date\.now\(\)\)\)[\s\S]*catch/);
 });
 
+test("worker settings use memory, versioned KV snapshots and D1 fallback", () => {
+  for (const file of [
+    "src/db.ts",
+    "../xboard-server/src/db.ts",
+    "../xboard-subscription/src/db.ts",
+    "../xboard-jobs/src/db.ts",
+    "../xboard-cron/src/db.ts"
+  ]) {
+    const source = fs.readFileSync(file, "utf8");
+    assert.match(source, /const SETTINGS_CACHE_TTL_MS = 300_000/);
+    assert.match(source, /const SETTINGS_VERSION_CHECK_MS = 30_000/);
+    assert.match(source, /settings:snapshot:/);
+    assert.match(source, /kv\.get\("settings_version"\)/);
+    assert.match(source, /expirationTtl: SETTINGS_SNAPSHOT_TTL_SECONDS/);
+    assert.match(source, /SELECT name, value FROM v2_settings/);
+  }
+});
+
 test("settings saves invalidate the xboard-server instance cache", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   const migration = fs.readFileSync("src/migration.ts", "utf8");
@@ -254,7 +272,7 @@ test("machine tokens match Laravel Str::random(32) format", () => {
 
 test("generated subscription URLs honor configured domain and path", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
-  assert.match(source, /const values = await settings\(env\.XBOARD_DB\)/);
+  assert.match(source, /const values = await settings\(env\.XBOARD_DB, env\.XBOARD_KV\)/);
   assert.match(source, /values\.subscribe_url/);
   assert.match(source, /values\.subscribe_path/);
   assert.match(source, /configuredList\[Math\.floor\(Math\.random\(\) \* configuredList\.length\)\]/);

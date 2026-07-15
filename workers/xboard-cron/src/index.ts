@@ -64,7 +64,7 @@ async function optionalKvPut(env: Env, key: string, value: string) {
 }
 
 async function setting(env: Env, name: string, fallback = "") {
-  const values = await loadSettings(env.XBOARD_DB);
+  const values = await loadSettings(env.XBOARD_DB, env.XBOARD_KV);
   return values[name] ?? fallback;
 }
 
@@ -75,7 +75,7 @@ function booleanSetting(value: unknown, fallback = false) {
 }
 
 async function sendReminders(env: Env, ts: number, day: number) {
-  const config = await loadSettings(env.XBOARD_DB);
+  const config = await loadSettings(env.XBOARD_DB, env.XBOARD_KV);
   if (!booleanSetting(config.remind_mail_enable)) return;
   let cursor = 0;
   for (;;) {

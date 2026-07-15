@@ -22,7 +22,7 @@ test("saved subscription paths are enforced instead of accepting arbitrary alias
 
 test("subscription output reads saved settings and templates", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
-  assert.match(source, /await loadSettings\(env\.XBOARD_DB\)/);
+  assert.match(source, /await loadSettings\(env\.XBOARD_DB, env\.XBOARD_KV\)/);
   assert.match(source, /FROM v2_subscribe_templates/);
   assert.match(source, /show_info_to_server_enable/);
   assert.match(source, /show_protocol_to_server_enable/);

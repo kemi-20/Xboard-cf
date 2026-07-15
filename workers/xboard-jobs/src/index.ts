@@ -11,7 +11,7 @@ function dayStart(ts = now()) {
 }
 
 async function setting(env: Env, name: string) {
-  const values = await loadSettings(env.XBOARD_DB);
+  const values = await loadSettings(env.XBOARD_DB, env.XBOARD_KV);
   return values[name] || "";
 }
 
@@ -60,19 +60,18 @@ async function recordFailure(env: Env, event: any, error: unknown) {
 
 async function runOnce(env: Env, eventId: string, type: string, payload: unknown, statements: D1PreparedStatement[]) {
   const existing = await env.XBOARD_DB.prepare("SELECT status FROM v2_job_logs WHERE event_id = ?").bind(eventId).first<{ status: string }>();
-  if (existing?.status === "done") return false;
+  if (existing?.status === "done") return null;
   if (existing) await env.XBOARD_DB.prepare("DELETE FROM v2_job_logs WHERE event_id = ?").bind(eventId).run();
   const ts = now();
   try {
-    await env.XBOARD_DB.batch([
+    return await env.XBOARD_DB.batch([
       env.XBOARD_DB.prepare("INSERT INTO v2_job_logs(event_id, type, status, payload, created_at, updated_at) VALUES (?, ?, 'done', ?, ?, ?)")
         .bind(eventId, type, JSON.stringify(payload), ts, ts),
       ...statements
     ]);
-    return true;
   } catch (error: any) {
     const completed = await env.XBOARD_DB.prepare("SELECT status FROM v2_job_logs WHERE event_id = ?").bind(eventId).first<{ status: string }>();
-    if (completed?.status === "done") return false;
+    if (completed?.status === "done") return null;
     await env.XBOARD_DB.prepare("INSERT INTO v2_job_logs(event_id, type, status, payload, error, created_at, updated_at) VALUES (?, ?, 'failed', ?, ?, ?, ?) ON CONFLICT(event_id) DO UPDATE SET status = 'failed', error = excluded.error, updated_at = excluded.updated_at")
       .bind(eventId, type, JSON.stringify(payload), String(error?.message || error), ts, now()).run();
     throw error;
@@ -84,6 +83,7 @@ async function traffic(env: Env, event: any) {
   const parsedRate = Number(event.rate);
   const rate = Number.isFinite(parsedRate) ? parsedRate : 1;
   const recordAt = dayStart();
+  const users = new Map<number, { u: number; d: number }>();
   let serverU = 0;
   let serverD = 0;
   let userU = 0;
@@ -100,34 +100,41 @@ async function traffic(env: Env, event: any) {
     serverD += rawD;
     userU += u;
     userD += d;
-    const ts = now();
-    await runOnce(env, `${event.event_id}:user:${uid}`, "traffic:user", row, [
-      env.XBOARD_DB.prepare("UPDATE v2_user SET u = u + ?, d = d + ?, t = ?, updated_at = ? WHERE id = ?").bind(u, d, ts, ts, uid),
-      env.XBOARD_DB.prepare("INSERT INTO v2_traffic_pending_check(user_id, updated_at) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET updated_at = excluded.updated_at").bind(uid, ts),
-      env.XBOARD_DB.prepare("INSERT INTO v2_stat_user(user_id, server_id, server_type, u, d, rate, server_rate, record_type, record_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'd', ?, ?, ?) ON CONFLICT(user_id, server_id, server_type, record_at) DO UPDATE SET u = u + excluded.u, d = d + excluded.d, rate = excluded.rate, server_rate = excluded.server_rate, updated_at = excluded.updated_at")
-        .bind(uid, event.server_id || 0, event.server_type || "unknown", u, d, rate, rate, recordAt, ts, ts)
-    ]);
+    const current = users.get(uid) || { u: 0, d: 0 };
+    current.u += u; current.d += d;
+    users.set(uid, current);
   }
 
   const ts = now();
-  const aggregate: D1PreparedStatement[] = [];
+  const statements: D1PreparedStatement[] = [];
+  const pendingResultIndexes: number[] = [];
+  for (const [uid, value] of users) {
+    statements.push(env.XBOARD_DB.prepare("UPDATE v2_user SET u = u + ?, d = d + ?, t = ?, updated_at = ? WHERE id = ?").bind(value.u, value.d, ts, ts, uid));
+    pendingResultIndexes.push(statements.length + 1);
+    statements.push(env.XBOARD_DB.prepare(`INSERT INTO v2_traffic_pending_check(user_id, updated_at)
+      SELECT id, ? FROM v2_user WHERE id = ? AND banned = 0 AND transfer_enable > 0 AND u + d >= transfer_enable
+      ON CONFLICT(user_id) DO UPDATE SET updated_at = excluded.updated_at`).bind(ts, uid));
+    statements.push(env.XBOARD_DB.prepare("INSERT INTO v2_stat_user(user_id, server_id, server_type, u, d, rate, server_rate, record_type, record_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'd', ?, ?, ?) ON CONFLICT(user_id, server_id, server_type, record_at) DO UPDATE SET u = u + excluded.u, d = d + excluded.d, rate = excluded.rate, server_rate = excluded.server_rate, updated_at = excluded.updated_at")
+      .bind(uid, event.server_id || 0, event.server_type || "unknown", value.u, value.d, rate, rate, recordAt, ts, ts));
+  }
   if (event.server_id && (serverU || serverD)) {
-    aggregate.push(env.XBOARD_DB.prepare("UPDATE v2_server SET u = u + ?, d = d + ?, updated_at = ? WHERE id = ?").bind(serverU, serverD, ts, event.server_id));
+    statements.push(env.XBOARD_DB.prepare("UPDATE v2_server SET u = u + ?, d = d + ?, updated_at = ? WHERE id = ?").bind(serverU, serverD, ts, event.server_id));
     if (event.server_type) {
-      aggregate.push(env.XBOARD_DB.prepare("INSERT INTO v2_stat_server(server_id, server_type, u, d, record_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(server_id, server_type, record_at) DO UPDATE SET u = u + excluded.u, d = d + excluded.d, updated_at = excluded.updated_at")
+      statements.push(env.XBOARD_DB.prepare("INSERT INTO v2_stat_server(server_id, server_type, u, d, record_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(server_id, server_type, record_at) DO UPDATE SET u = u + excluded.u, d = d + excluded.d, updated_at = excluded.updated_at")
         .bind(event.server_id, event.server_type, serverU, serverD, recordAt, ts, ts));
     }
   }
   if (userU || userD) {
-    aggregate.push(env.XBOARD_DB.prepare("UPDATE v2_stat SET transfer_used = transfer_used + ?, updated_at = ? WHERE record_at = ?")
+    statements.push(env.XBOARD_DB.prepare("UPDATE v2_stat SET transfer_used = transfer_used + ?, updated_at = ? WHERE record_at = ?")
       .bind(userU + userD, ts, recordAt));
-    aggregate.push(env.XBOARD_DB.prepare("INSERT INTO v2_stat(record_at, user_count, order_count, transfer_used, created_at, updated_at) SELECT ?, 0, 0, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM v2_stat WHERE record_at = ?)")
+    statements.push(env.XBOARD_DB.prepare("INSERT INTO v2_stat(record_at, user_count, order_count, transfer_used, created_at, updated_at) SELECT ?, 0, 0, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM v2_stat WHERE record_at = ?)")
       .bind(recordAt, userU + userD, ts, ts, recordAt));
   }
-  await runOnce(env, event.event_id, "traffic", event, aggregate);
-  try {
-    await env.XBOARD_KV.put("traffic:pending_check", String(ts), { expirationTtl: 3600 });
-  } catch {}
+  const results = await runOnce(env, event.event_id, "traffic", event, statements);
+  const hasPending = results && pendingResultIndexes.some(index => Number((results[index]?.meta as any)?.changes || 0) > 0);
+  if (hasPending) {
+    try { await env.XBOARD_KV.put("traffic:pending_check", String(ts), { expirationTtl: 3600 }); } catch {}
+  }
 }
 
 async function mail(env: Env, event: any) {

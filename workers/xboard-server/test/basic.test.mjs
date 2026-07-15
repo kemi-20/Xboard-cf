@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { OFFICIAL_HTTP_ROUTES, OFFICIAL_WS_EVENTS } from "../src/contracts.ts";
 import { appendMachineHistory, REGISTERED_HTTP_ROUTES } from "../src/index.ts";
+import { invalidateSettingsCache, settings } from "../src/db.ts";
 
 test("xboard-server has an entrypoint", () => {
   assert.ok(fs.existsSync("src/index.ts"));
@@ -86,12 +87,40 @@ test("machine load history appends every report like upstream", () => {
   assert.deepEqual(appendMachineHistory([stale], second, recent), [second]);
 });
 
-test("settings use a coalesced sixty-second instance cache", () => {
+test("settings use a coalesced memory and KV snapshot cache", () => {
   const source = fs.readFileSync("src/db.ts", "utf8");
-  assert.match(source, /const SETTINGS_CACHE_TTL_MS = 60_000/);
+  assert.match(source, /const SETTINGS_CACHE_TTL_MS = 300_000/);
+  assert.match(source, /const SETTINGS_VERSION_CHECK_MS = 30_000/);
+  assert.match(source, /settings:snapshot:/);
+  assert.match(source, /kv\.get\("settings_version"\)/);
   assert.match(source, /let settingsPromise: Promise<Record<string, string>> \| null = null/);
   assert.match(source, /SELECT name, value FROM v2_settings/);
   assert.doesNotMatch(source, /SELECT value FROM v2_settings WHERE name = \?/);
+});
+
+test("a versioned KV settings snapshot avoids a D1 read", async () => {
+  invalidateSettingsCache();
+  const db = new Proxy({}, {
+    get() { throw new Error("D1 must not be accessed on a KV snapshot hit"); }
+  });
+  const kv = {
+    async get(key) {
+      if (key === "settings_version") return "test-version";
+      if (key === "settings:snapshot:server:test-version") return JSON.stringify({ server_token: "cached-token" });
+      return null;
+    },
+    async put() { throw new Error("KV must not be written on a snapshot hit"); },
+    async delete() {}
+  };
+  assert.equal((await settings(db, kv)).server_token, "cached-token");
+  invalidateSettingsCache();
+});
+
+test("large traffic reports are split before entering the queue", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /offset \+= 10/);
+  assert.match(source, /payload\.slice\(offset, offset \+ 10\)/);
+  assert.match(source, /TRAFFIC_EVENTS\.sendBatch\(events\)/);
 });
 
 test("admin changes and migrations can invalidate the server settings cache immediately", () => {
