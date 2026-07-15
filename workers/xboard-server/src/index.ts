@@ -1,5 +1,6 @@
 import type { D1Database, KVNamespace, Queue, DurableObjectState, ExecutionContext } from "./types.ts";
 import { now } from "./compat.ts";
+import { settings as loadSettings } from "./db.ts";
 import {
   availableUser, buildNodeConfig, isValidNodeType, normalizeNodeType,
   parseJson, parseTraffic, responseEtag, type Row
@@ -10,11 +11,10 @@ export interface Env {
   XBOARD_KV: KVNamespace;
   TRAFFIC_EVENTS: Queue;
   NODE_HUB: any;
+  STATUS_HUB: any;
 }
 
 type AuthContext = { input: Row; node?: Row; machine?: Row };
-
-let schemaPromise: Promise<void> | undefined;
 
 function json(data: unknown, status = 200, headers: HeadersInit = {}) {
   return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json; charset=utf-8", ...headers } });
@@ -31,30 +31,6 @@ function apiFailure(message: string, status = 400, error: unknown = null) {
 function validationFailure(field: string, message?: string) {
   const text = message || `The ${field.replaceAll("_", " ")} field is required.`;
   return json({ message: text, errors: { [field]: [text] } }, 422);
-}
-
-async function runIgnore(db: D1Database, sql: string) {
-  try { await db.prepare(sql).run(); } catch { /* Existing columns and indexes are expected. */ }
-}
-
-async function ensureSchema(env: Env) {
-  if (!schemaPromise) {
-    schemaPromise = (async () => {
-      for (const sql of [
-        "ALTER TABLE v2_server_machine_load_history ADD COLUMN cpu REAL NOT NULL DEFAULT 0",
-        "ALTER TABLE v2_server_machine_load_history ADD COLUMN mem_total INTEGER NOT NULL DEFAULT 0",
-        "ALTER TABLE v2_server_machine_load_history ADD COLUMN mem_used INTEGER NOT NULL DEFAULT 0",
-        "ALTER TABLE v2_server_machine_load_history ADD COLUMN disk_total INTEGER NOT NULL DEFAULT 0",
-        "ALTER TABLE v2_server_machine_load_history ADD COLUMN disk_used INTEGER NOT NULL DEFAULT 0",
-        "ALTER TABLE v2_server_machine_load_history ADD COLUMN net_in_speed REAL",
-        "ALTER TABLE v2_server_machine_load_history ADD COLUMN net_out_speed REAL",
-        "ALTER TABLE v2_server_machine_load_history ADD COLUMN recorded_at INTEGER",
-        "ALTER TABLE v2_server_machine_load_history ADD COLUMN updated_at INTEGER",
-        "CREATE INDEX IF NOT EXISTS idx_machine_load_recorded ON v2_server_machine_load_history(machine_id, recorded_at)"
-      ]) await runIgnore(env.XBOARD_DB, sql);
-    })();
-  }
-  await schemaPromise;
 }
 
 async function readInput(request: Request): Promise<Row> {
@@ -81,8 +57,26 @@ async function readInput(request: Request): Promise<Row> {
 }
 
 async function setting(env: Env, name: string, fallback = "") {
-  const row = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = ?").bind(name).first<{ value: string }>();
-  return row?.value ?? fallback;
+  const values = await loadSettings(env.XBOARD_DB);
+  return values[name] ?? fallback;
+}
+
+const STATUS_HUB_ID = "global";
+
+function statusHub(env: Env) {
+  return env.STATUS_HUB.get(env.STATUS_HUB.idFromName(STATUS_HUB_ID));
+}
+
+async function reportStatus(env: Env, kind: "machine" | "node", id: number, state: Row, history = false) {
+  try {
+    await statusHub(env).fetch("https://status-hub.internal/report", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind, id, state, history })
+    });
+  } catch {
+    // Runtime status is best effort; formal configuration and traffic remain durable elsewhere.
+  }
 }
 
 async function getNode(env: Env, identifier: unknown, type?: string | null): Promise<Row | null> {
@@ -136,7 +130,7 @@ async function authenticateV2(env: Env, input: Row, handshake = false): Promise<
       if (!found) return apiFailure("Node not found on this machine");
       node = found;
     }
-    await env.XBOARD_DB.prepare("UPDATE v2_server_machine SET last_seen_at = ?, updated_at = ? WHERE id = ?").bind(now(), now(), machine.id).run();
+    await reportStatus(env, "machine", Number(machine.id), { last_seen_at: now() });
     return { input, machine, node };
   }
   if (!input.token) return validationFailure("token");
@@ -154,7 +148,6 @@ async function authenticateMachineEndpoint(env: Env, input: Row): Promise<AuthCo
   if (!input.token) return validationFailure("token");
   const machine = await getMachine(env, input.machine_id, input.token);
   if (!machine || !Number(machine.is_active ?? machine.enabled ?? 1)) return json({ message: "Machine not found or disabled" }, 403);
-  await env.XBOARD_DB.prepare("UPDATE v2_server_machine SET last_seen_at = ?, updated_at = ? WHERE id = ?").bind(now(), now(), machine.id).run();
   return { input, machine };
 }
 
@@ -192,10 +185,7 @@ async function etagResponse(request: Request, data: unknown) {
 
 async function touchNode(env: Env, node: Row) {
   const ts = now();
-  await Promise.all([
-    optionalKvPut(env, `node:last_check:${node.id}`, String(ts), { expirationTtl: 3600 }),
-    env.XBOARD_DB.prepare("UPDATE v2_server SET last_check_at = ? WHERE id = ?").bind(ts, node.id).run()
-  ]);
+  await reportStatus(env, "node", Number(node.id), { machine_id: Number(node.machine_id || 0) || null, last_check_at: ts });
 }
 
 async function optionalKvPut(env: Env, key: string, value: string, options?: { expirationTtl?: number }) {
@@ -231,11 +221,11 @@ async function enqueueTraffic(env: Env, node: Row, raw: unknown) {
   if (!payload.length) return;
   const ts = now();
   await env.TRAFFIC_EVENTS.send({ event_id: crypto.randomUUID(), type: "traffic", server_id: Number(node.id), server_type: String(node.type), rate: currentRate(node), payload, created_at: ts });
-  await Promise.all([
-    optionalKvPut(env, `node:last_push:${node.id}`, String(ts), { expirationTtl: 3600 }),
-    optionalKvPut(env, `node:online:${node.id}`, String(payload.length), { expirationTtl: 3600 }),
-    env.XBOARD_DB.prepare("UPDATE v2_server SET last_push_at = ?, online_user = ? WHERE id = ?").bind(ts, payload.length, node.id).run()
-  ]);
+  await reportStatus(env, "node", Number(node.id), {
+    machine_id: Number(node.machine_id || 0) || null,
+    last_push_at: ts,
+    online: payload.length
+  });
 }
 
 async function updateUserDeviceIndex(env: Env, nodeId: number, previous: Row, next: Row) {
@@ -332,19 +322,18 @@ async function processStatus(env: Env, node: Row, status: unknown) {
   if (value.net?.in_speed !== undefined && value.net?.out_speed !== undefined) {
     load.net = { in_speed: Number(value.net.in_speed), out_speed: Number(value.net.out_speed) };
   }
-  await optionalKvPut(env, `node:load:${node.id}`, JSON.stringify(load), { expirationTtl: Math.max(300, Number(await setting(env, "server_push_interval", "300")) * 3) });
+  await reportStatus(env, "node", Number(node.id), { machine_id: Number(node.machine_id || 0) || null, load_status: load });
 }
 
 async function processMetrics(env: Env, node: Row, metrics: unknown) {
   if (!metrics || typeof metrics !== "object" || Array.isArray(metrics)) return;
   const timestamp = now();
-  const value = JSON.stringify({ ...(metrics as Row), updated_at: timestamp });
-  try {
-    await env.XBOARD_DB.prepare("UPDATE v2_server SET metrics = ?, last_push_at = ?, updated_at = ? WHERE id = ?").bind(value, timestamp, timestamp, node.id).run();
-  } catch {
-    // Older databases are migrated by xboard-edge bootstrap; KV still serves metrics during that window.
-  }
-  await optionalKvPut(env, `node:metrics:${node.id}`, value, { expirationTtl: Math.max(300, Number(await setting(env, "server_push_interval", "300")) * 3) });
+  const value = { ...(metrics as Row), updated_at: timestamp };
+  await reportStatus(env, "node", Number(node.id), {
+    machine_id: Number(node.machine_id || 0) || null,
+    metrics: value,
+    last_push_at: timestamp
+  });
 }
 
 function validateStatus(input: Row, optional = false): Response | null {
@@ -450,12 +439,7 @@ async function saveMachineStatus(env: Env, machine: Row, input: Row) {
     disk: { total: Number(input.disk?.total || 0), used: Number(input.disk?.used || 0) }, updated_at: recordedAt
   };
   if (input.net?.in_speed !== undefined && input.net?.out_speed !== undefined) load.net = { in_speed: Number(input.net.in_speed), out_speed: Number(input.net.out_speed) };
-  await env.XBOARD_DB.batch([
-    env.XBOARD_DB.prepare("UPDATE v2_server_machine SET load_status = ?, last_seen_at = ?, updated_at = ? WHERE id = ?").bind(JSON.stringify(load), recordedAt, recordedAt, machine.id),
-    env.XBOARD_DB.prepare("INSERT INTO v2_server_machine_load_history(machine_id, cpu, mem_total, mem_used, disk_total, disk_used, net_in_speed, net_out_speed, recorded_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(machine.id, load.cpu, load.mem.total, load.mem.used, load.disk.total, load.disk.used, load.net?.in_speed ?? null, load.net?.out_speed ?? null, recordedAt, recordedAt, recordedAt),
-    env.XBOARD_DB.prepare("DELETE FROM v2_server_machine_load_history WHERE machine_id = ? AND recorded_at < ?").bind(machine.id, recordedAt - 86400)
-  ]);
-  await optionalKvPut(env, `machine:load:${machine.id}`, JSON.stringify(load), { expirationTtl: 3600 });
+  await reportStatus(env, "machine", Number(machine.id), { last_seen_at: recordedAt, load_status: load }, true);
 }
 
 async function internalToken(env: Env) {
@@ -562,6 +546,89 @@ function wsMessage(event: string, data: Row = {}) {
   return JSON.stringify({ event, data, timestamp: now() });
 }
 
+export class StatusHub {
+  private state: DurableObjectState;
+
+  constructor(state: DurableObjectState) {
+    this.state = state;
+  }
+
+  private async snapshot() {
+    const [machines, nodes] = await Promise.all([
+      this.state.storage.list<Row>({ prefix: "machine:" }),
+      this.state.storage.list<Row>({ prefix: "node:" })
+    ]);
+    return {
+      machines: Object.fromEntries([...machines].map(([key, value]) => [key.slice("machine:".length), value])),
+      nodes: Object.fromEntries([...nodes].map(([key, value]) => [key.slice("node:".length), value]))
+    };
+  }
+
+  private historyPoint(load: Row, recordedAt: number) {
+    return {
+      cpu: Number(load.cpu || 0),
+      mem_total: Number(load.mem?.total || 0),
+      mem_used: Number(load.mem?.used || 0),
+      disk_total: Number(load.disk?.total || 0),
+      disk_used: Number(load.disk?.used || 0),
+      net_in_speed: load.net?.in_speed === undefined ? null : Number(load.net.in_speed),
+      net_out_speed: load.net?.out_speed === undefined ? null : Number(load.net.out_speed),
+      recorded_at: recordedAt
+    };
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    if (url.pathname === "/report" && request.method === "POST") {
+      const input = await request.json() as { kind?: string; id?: number; state?: Row; history?: boolean };
+      const kind = input.kind === "machine" ? "machine" : input.kind === "node" ? "node" : null;
+      const id = Number(input.id || 0);
+      if (!kind || !id || !input.state || typeof input.state !== "object") return json({ message: "Invalid status report" }, 422);
+      const key = `${kind}:${id}`;
+      const previous = await this.state.storage.get<Row>(key) || {};
+      const updatedAt = now();
+      const next = { ...previous, ...input.state, id, updated_at: updatedAt };
+      const writes: Record<string, unknown> = { [key]: next };
+      if (kind === "machine" && input.history && input.state.load_status && typeof input.state.load_status === "object") {
+        const historyKey = `history:${id}`;
+        const cutoff = updatedAt - 86400;
+        const history = (await this.state.storage.get<Row[]>(historyKey) || []).filter(item => Number(item.recorded_at || 0) >= cutoff);
+        const point = this.historyPoint(input.state.load_status as Row, updatedAt);
+        if (history.length && updatedAt - Number(history[history.length - 1].recorded_at || 0) < 300) history[history.length - 1] = point;
+        else history.push(point);
+        writes[historyKey] = history.slice(-288);
+      }
+      await this.state.storage.put(writes);
+      return json({ data: true });
+    }
+    if (url.pathname === "/snapshot" && request.method === "GET") return json({ data: await this.snapshot() });
+    if (url.pathname === "/history" && request.method === "GET") {
+      const machineId = Number(url.searchParams.get("machine_id") || 0);
+      const limit = Math.min(1440, Math.max(10, Number(url.searchParams.get("limit") || 60)));
+      const rangeHours = Number(url.searchParams.get("range_hours") || 0);
+      const cutoff = rangeHours > 0 ? now() - Math.min(24, Math.max(1, rangeHours)) * 3600 : 0;
+      const history = (await this.state.storage.get<Row[]>(`history:${machineId}`) || [])
+        .filter(item => !cutoff || Number(item.recorded_at || 0) >= cutoff)
+        .slice(-limit);
+      return json({ data: history });
+    }
+    if (url.pathname === "/clear" && request.method === "POST") {
+      const input = await request.json() as { kind?: string; id?: number };
+      const id = Number(input.id || 0);
+      if (input.kind === "machine" && id) {
+        await Promise.all([this.state.storage.delete(`machine:${id}`), this.state.storage.delete(`history:${id}`)]);
+      } else if (input.kind === "node" && id) await this.state.storage.delete(`node:${id}`);
+      return json({ data: true });
+    }
+    if (url.pathname === "/reset" && request.method === "POST") {
+      const entries = await this.state.storage.list({});
+      for (const key of entries.keys()) await this.state.storage.delete(key);
+      return json({ data: true, cleared: entries.size });
+    }
+    return json({ service: "StatusHub" });
+  }
+}
+
 export class NodeHub {
   private localSockets = new Set<WebSocket>();
   private state: DurableObjectState;
@@ -656,7 +723,7 @@ export class NodeHub {
       this.accept(server, [`machine:${machine.id}`]);
       (server as any).serializeAttachment?.(identity);
       server.send(wsMessage("auth.success", { machine_id: Number(machine.id), node_ids: identity.node_ids }));
-      await this.env.XBOARD_DB.prepare("UPDATE v2_server_machine SET last_seen_at = ?, updated_at = ? WHERE id = ?").bind(now(), now(), machine.id).run();
+      await reportStatus(this.env, "machine", Number(machine.id), { last_seen_at: now(), connected: true });
       for (const node of nodes) {
         await clearNodeDevices(this.env, Number(node.id));
         await this.env.XBOARD_KV.put(`node:ws:target:${node.id}`, `machine:${machine.id}`, { expirationTtl: 86400 });
@@ -726,6 +793,10 @@ export class NodeHub {
       await optionalKvDelete(this.env, `node:ws:target:${nodeId}`);
       await optionalKvDelete(this.env, `node:ws:alive:${nodeId}`);
       await clearNodeDevices(this.env, nodeId);
+      await reportStatus(this.env, "node", nodeId, { connected: false, disconnected_at: now() });
+    }
+    if (identity.mode === "machine" && Number(identity.machine_id) > 0) {
+      await reportStatus(this.env, "machine", Number(identity.machine_id), { connected: false, disconnected_at: now() });
     }
   }
 
@@ -783,7 +854,10 @@ routes.set("POST /api/v2/server/report", async (_request, env, input) => {
   await touchNode(env, node);
   if (input.traffic && typeof input.traffic === "object") await enqueueTraffic(env, node, input.traffic);
   if (input.alive && typeof input.alive === "object") await processAlive(env, Number(node.id), input.alive);
-  if (input.online && typeof input.online === "object") await optionalKvPut(env, `node:connections:${node.id}`, JSON.stringify(input.online), { expirationTtl: Math.max(300, Number(await setting(env, "server_push_interval", "300")) * 3) });
+  if (input.online && typeof input.online === "object") await reportStatus(env, "node", Number(node.id), {
+    machine_id: Number(node.machine_id || 0) || null,
+    connections: input.online
+  });
   if (input.status && typeof input.status === "object") await processStatus(env, node, input.status);
   if (input.metrics && typeof input.metrics === "object") await processMetrics(env, node, input.metrics);
   return json({ data: true });
@@ -791,7 +865,9 @@ routes.set("POST /api/v2/server/report", async (_request, env, input) => {
 
 routes.set("POST /api/v2/server/machine/nodes", async (_request, env, input) => {
   const auth = await authenticateMachineEndpoint(env, input);
-  return auth instanceof Response ? auth : json(await machineNodes(env, auth.machine!));
+  if (auth instanceof Response) return auth;
+  await reportStatus(env, "machine", Number(auth.machine!.id), { last_seen_at: now() });
+  return json(await machineNodes(env, auth.machine!));
 });
 
 routes.set("POST /api/v2/server/machine/status", async (_request, env, input) => {
@@ -809,7 +885,14 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/health") return json({ data: { service: "xboard-server", time: now() } });
-    await ensureSchema(env);
+    if (url.pathname.startsWith("/internal/status/")) {
+      const configuredToken = await internalToken(env);
+      if (!configuredToken || request.headers.get("x-xboard-internal-token") !== configuredToken) return json({ message: "Unauthorized" }, 401);
+      const target = new URL(request.url);
+      target.hostname = "status-hub.internal";
+      target.pathname = `/${url.pathname.slice("/internal/status/".length)}`;
+      return statusHub(env).fetch(new Request(target.toString(), request));
+    }
     if (url.pathname === "/ws") {
       if (Number(await setting(env, "server_ws_enable", "1")) !== 1) return websocketError("websocket disabled");
       const input: Row = {};

@@ -1,4 +1,12 @@
 import type { D1Database } from "./types";
+const SETTINGS_CACHE_TTL_MS = 60_000;
+let settingsCache: { value: Record<string, unknown>; expiresAt: number } | null = null;
+let settingsPromise: Promise<Record<string, unknown>> | null = null;
+
+export function invalidateSettingsCache() {
+  settingsCache = null;
+  settingsPromise = null;
+}
 export function parseSettingValue(value: unknown) {
   if (value === null || value === undefined) return value;
   if (typeof value !== "string") return value;
@@ -30,6 +38,15 @@ export async function rows(db: D1Database, table: string, limit = 500) {
   return result.results || [];
 }
 export async function settings(db: D1Database) {
-  const rows = await db.prepare("SELECT name, value FROM v2_settings").all<{ name: string; value: string }>();
-  return Object.fromEntries((rows.results || []).map(r => [r.name, parseSettingValue(r.value)]));
+  if (settingsCache && settingsCache.expiresAt > Date.now()) return settingsCache.value;
+  if (!settingsPromise) {
+    settingsPromise = db.prepare("SELECT name, value FROM v2_settings").all<{ name: string; value: string }>()
+      .then(rows => {
+        const value = Object.fromEntries((rows.results || []).map(r => [r.name, parseSettingValue(r.value)]));
+        settingsCache = { value, expiresAt: Date.now() + SETTINGS_CACHE_TTL_MS };
+        return value;
+      })
+      .finally(() => { settingsPromise = null; });
+  }
+  return settingsPromise;
 }

@@ -1,5 +1,6 @@
 import type { D1Database, D1PreparedStatement, KVNamespace, MessageBatch } from "./types";
 import { now, ok } from "./compat";
+import { settings as loadSettings } from "./db";
 
 export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; RESEND_API_KEY?: string; RESEND_API_URL?: string; TELEGRAM_BOT_TOKEN?: string; }
 
@@ -10,8 +11,8 @@ function dayStart(ts = now()) {
 }
 
 async function setting(env: Env, name: string) {
-  const row = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = ?").bind(name).first<{ value: string }>();
-  return row?.value || "";
+  const values = await loadSettings(env.XBOARD_DB);
+  return values[name] || "";
 }
 
 function render(source: string, vars: Record<string, unknown>) {

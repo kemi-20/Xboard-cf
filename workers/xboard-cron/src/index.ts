@@ -1,5 +1,6 @@
 import type { D1Database, Fetcher, KVNamespace, Queue } from "./types";
 import { now, ok } from "./compat";
+import { settings as loadSettings } from "./db";
 
 export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; MAIL_EVENTS: Queue; XBOARD_SERVER: Fetcher; }
 
@@ -63,13 +64,12 @@ async function optionalKvPut(env: Env, key: string, value: string) {
 }
 
 async function setting(env: Env, name: string, fallback = "") {
-  const row = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = ?").bind(name).first<{ value: string }>();
-  return row?.value ?? fallback;
+  const values = await loadSettings(env.XBOARD_DB);
+  return values[name] ?? fallback;
 }
 
 async function sendReminders(env: Env, ts: number, day: number) {
-  const settings = await env.XBOARD_DB.prepare("SELECT name, value FROM v2_settings WHERE name IN ('remind_mail_enable', 'app_name', 'app_url')").all<{ name: string; value: string }>();
-  const config = Object.fromEntries((settings.results || []).map(row => [row.name, row.value]));
+  const config = await loadSettings(env.XBOARD_DB);
   if (!Number(config.remind_mail_enable || 0)) return;
   let cursor = 0;
   for (;;) {
@@ -188,7 +188,6 @@ async function cleanupOnlineStatus(env: Env, ts: number) {
   try {
     await env.XBOARD_DB.prepare("UPDATE v2_user SET online_count = 0 WHERE last_online_at IS NULL OR last_online_at < ?").bind(ts - 600).run();
   } catch {}
-  await env.XBOARD_DB.prepare("DELETE FROM v2_server_machine_load_history WHERE COALESCE(recorded_at, created_at) < ?").bind(ts - 86400).run();
   await env.XBOARD_DB.prepare("UPDATE v2_gift_card_code SET status = 2, updated_at = ? WHERE status = 0 AND expires_at IS NOT NULL AND expires_at < ?").bind(ts, ts).run();
 }
 

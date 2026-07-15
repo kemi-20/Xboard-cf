@@ -188,7 +188,7 @@ test("machine tokens match Laravel Str::random(32) format", () => {
 
 test("generated subscription URLs honor configured domain and path", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
-  assert.match(source, /name IN \('subscribe_url', 'subscribe_path'\)/);
+  assert.match(source, /const values = await settings\(env\.XBOARD_DB\)/);
   assert.match(source, /values\.subscribe_url/);
   assert.match(source, /values\.subscribe_path/);
   assert.match(source, /await subscribeUrl\(request, env,/);
@@ -249,15 +249,15 @@ test("node list exposes upstream-compatible health and load fields", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /function nodeAvailableStatus\(lastCheckAt: number \| null, lastPushAt: number \| null/);
   assert.match(source, /timestamp - 300 >= lastCheckAt/);
-  assert.match(source, /readState\("last_check"\)/);
-  assert.match(source, /readState\("last_push"\)/);
+  assert.match(source, /statusSnapshot\(env\)/);
+  assert.match(source, /live\.nodes/);
+  assert.match(source, /live\.machines/);
   assert.match(source, /available_status: availableStatus/);
   assert.match(source, /load_status: loadStatus/);
   assert.match(source, /online_conn: Number\(metrics\?\.active_connections \|\| 0\)/);
   assert.match(source, /machines\.find\(item => Number\(item\.id\) === Number\(server\.machine_id\)\)/);
   assert.match(source, /machineOnline \? machineSeenAt : 0/);
-  assert.match(source, /machine:load:\$\{machine\.id\}/);
-  assert.match(source, /parseKvObject\(kvMachineLoad\)/);
+  assert.match(source, /const loadStatus = nodeState\.load_status \|\| machineState\.load_status \|\| null/);
 });
 
 test("machine load history matches the upstream chart contract", () => {
@@ -265,10 +265,9 @@ test("machine load history matches the upstream chart contract", () => {
   assert.match(source, /async function adminMachineHistory\(env: Env, url: URL\)/);
   assert.match(source, /limit < 10 \|\| limit > 1440/);
   assert.match(source, /rangeHours < 1 \|\| rangeHours > 24/);
-  assert.match(source, /FROM v2_server_machine_load_history WHERE machine_id = \?/);
-  assert.match(source, /ORDER BY recorded_at DESC LIMIT \?/);
-  assert.match(source, /\(result\.results \|\| \[\]\)\.reverse\(\)\.map/);
-  assert.match(source, /net_in_speed: row\.net_in_speed === null/);
+  assert.match(source, /statusHubRequest\(env, `history\?\$\{params\}`\)/);
+  assert.match(source, /new URLSearchParams\(\{ machine_id: String\(machineId\), limit: String\(limit\) \}\)/);
+  assert.match(source, /return ok\(payload\.data \|\| \[\]\)/);
   assert.match(source, /return adminMachineHistory\(env, new URL\(request\.url\)\)/);
 });
 
@@ -283,7 +282,7 @@ test("login sessions fall back to D1 when KV writes fail", () => {
 test("bootstrap remains available when the KV daily write limit is exhausted", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /system_bootstrap_edge_version/);
-  assert.match(source, /await optionalKvPut\(env, "bootstrap:edge:v18"/);
+  assert.match(source, /await optionalKvPut\(env, "bootstrap:edge:v19"/);
   assert.doesNotMatch(source, /await env\.XBOARD_KV\.put\("bootstrap:edge:v12"/);
 });
 
@@ -478,10 +477,11 @@ test("traffic history exposes the official server_rate field", () => {
   assert.match(source, /UPDATE v2_stat_user SET server_rate = COALESCE\(rate, 1\)/);
 });
 
-test("node metrics fall back to D1 when KV writes are unavailable", () => {
+test("node metrics use StatusHub as the realtime source", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
-  assert.match(source, /parseKvObject\(kvMetrics\) \|\| parseKvObject\(server\.metrics\)/);
-  assert.match(source, /ALTER TABLE v2_server ADD COLUMN metrics TEXT/);
+  assert.match(source, /const metrics = nodeState\.metrics \|\| \(loadStatus\?\.metrics/);
+  assert.match(source, /async function statusHubRequest/);
+  assert.doesNotMatch(source, /parseKvObject\(kvMetrics\) \|\| parseKvObject\(server\.metrics\)/);
 });
 
 test("node sync and error handling avoid unrelated work and SQL disclosure", () => {

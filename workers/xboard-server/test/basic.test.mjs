@@ -47,10 +47,27 @@ test("node status accepts official flat metrics and nested status payloads", () 
   assert.match(source, /await processMetrics/);
 });
 
-test("node metrics persist to D1 when KV is unavailable", () => {
+test("node and machine runtime status persist in the global StatusHub", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
-  assert.match(source, /UPDATE v2_server SET metrics = \?, last_push_at = \?, updated_at = \?/);
-  assert.match(source, /await optionalKvPut\(env, `node:metrics:\$\{node\.id\}`, value/);
+  const wrangler = fs.readFileSync("wrangler.toml", "utf8");
+  assert.match(source, /export class StatusHub/);
+  assert.match(source, /const STATUS_HUB_ID = "global"/);
+  assert.match(source, /env\.STATUS_HUB\.idFromName\(STATUS_HUB_ID\)/);
+  assert.match(source, /this\.state\.storage\.put\(writes\)/);
+  assert.match(source, /writes\[historyKey\] = history\.slice\(-288\)/);
+  assert.match(wrangler, /name = "STATUS_HUB"/);
+  assert.match(wrangler, /class_name = "StatusHub"/);
+  assert.match(wrangler, /tag = "v2"[\s\S]*new_sqlite_classes = \["StatusHub"\]/);
+  assert.doesNotMatch(source, /UPDATE v2_server SET metrics = \?, last_push_at = \?, updated_at = \?/);
+  assert.doesNotMatch(source, /INSERT INTO v2_server_machine_load_history/);
+});
+
+test("settings use a coalesced sixty-second instance cache", () => {
+  const source = fs.readFileSync("src/db.ts", "utf8");
+  assert.match(source, /const SETTINGS_CACHE_TTL_MS = 60_000/);
+  assert.match(source, /let settingsPromise: Promise<Record<string, string>> \| null = null/);
+  assert.match(source, /SELECT name, value FROM v2_settings/);
+  assert.doesNotMatch(source, /SELECT value FROM v2_settings WHERE name = \?/);
 });
 
 test("websocket device state follows the official per-IP contract", () => {

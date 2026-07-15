@@ -1,7 +1,7 @@
 import type { D1Database, D1PreparedStatement, ExecutionContext, Fetcher, KVNamespace, Queue } from "./types";
 import { body, fail, json, now, ok, randomString, token, uuid } from "./compat";
 import { createSession, currentUser, hashPassword, sessionTokenDigest, verifyPassword } from "./auth";
-import { list, rows, settings } from "./db";
+import { invalidateSettingsCache, list, rows, settings } from "./db";
 import { bump } from "./kv";
 import { handleAdminGiftCard, handleUserGiftCard } from "./gift-card";
 import { authorizeMigration, handleAdminMigration } from "./migration";
@@ -175,10 +175,8 @@ function isNodeProtocolPath(pathname: string, method = "GET") {
 }
 
 async function internalSyncToken(env: Env) {
-  const explicit = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = 'internal_sync_token'").first<{ value: string }>();
-  if (explicit?.value) return explicit.value;
-  const serverToken = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = 'server_token'").first<{ value: string }>();
-  return serverToken?.value || "";
+  const values = await settings(env.XBOARD_DB);
+  return String(values.internal_sync_token || values.server_token || "");
 }
 
 type NodeSyncIntent = { scope: "all" } | { scope: "user"; user_id: number; old_group_id?: number };
@@ -315,12 +313,12 @@ FINAL,Proxy
 };
 
 async function ensureBootstrap(env: Env) {
-  const marker = await optionalKvGet(env, "bootstrap:edge:v18");
+  const marker = await optionalKvGet(env, "bootstrap:edge:v19");
   if (marker) return;
   try {
     const persisted = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = 'system_bootstrap_edge_version'").first<{ value: string }>();
-    if (persisted?.value === "v18") {
-      await optionalKvPut(env, "bootstrap:edge:v18", String(now()));
+    if (persisted?.value === "v19") {
+      await optionalKvPut(env, "bootstrap:edge:v19", String(now()));
       return;
     }
   } catch {
@@ -476,6 +474,9 @@ async function ensureBootstrap(env: Env) {
     "CREATE INDEX IF NOT EXISTS idx_gift_usage_user_usage ON v2_gift_card_usage(user_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_gift_usage_template_stats ON v2_gift_card_usage(template_id, created_at)"
   ]) await runSqlIgnore(env, sql);
+  await runSqlIgnore(env, "DELETE FROM v2_server_machine_load_history");
+  await runSqlIgnore(env, "UPDATE v2_server_machine SET last_seen_at = NULL, load_status = NULL");
+  await runSqlIgnore(env, "UPDATE v2_server SET last_check_at = NULL, last_push_at = NULL, online_user = 0, metrics = NULL");
   for (const sql of [
     "CREATE INDEX IF NOT EXISTS idx_v2_user_next_reset_at ON v2_user(next_reset_at)",
     "CREATE INDEX IF NOT EXISTS idx_v2_user_online ON v2_user(last_online_at, online_count)",
@@ -596,8 +597,9 @@ async function ensureBootstrap(env: Env) {
     }
     await runSqlIgnore(env, "UPDATE v2_user SET transfer_enable = transfer_enable * 1073741824, updated_at = ? WHERE plan_id IS NOT NULL AND transfer_enable > 0 AND EXISTS (SELECT 1 FROM v2_plan WHERE v2_plan.id = v2_user.plan_id AND v2_plan.transfer_enable = v2_user.transfer_enable)", [ts]);
   }
-  await runSqlIgnore(env, "INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES ('system_bootstrap_edge_version', 'v18', ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at", [ts, ts]);
-  await optionalKvPut(env, "bootstrap:edge:v18", String(ts));
+  await runSqlIgnore(env, "INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES ('system_bootstrap_edge_version', 'v19', ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at", [ts, ts]);
+  invalidateSettingsCache();
+  await optionalKvPut(env, "bootstrap:edge:v19", String(ts));
 }
 
 async function firstNumber(env: Env, sql: string, fallback = 0) {
@@ -820,8 +822,7 @@ function paginated<T extends Record<string, any>>(data: T[], total: number, page
 }
 
 async function subscribeUrl(request: Request, env: Env, userToken: string) {
-  const configured = await env.XBOARD_DB.prepare("SELECT name, value FROM v2_settings WHERE name IN ('subscribe_url', 'subscribe_path')").all<{ name: string; value: string }>();
-  const values = Object.fromEntries((configured.results || []).map(row => [row.name, row.value || ""]));
+  const values = await settings(env.XBOARD_DB);
   const configuredBase = String(values.subscribe_url || new URL(request.url).origin).split(",").map(value => value.trim()).filter(Boolean)[0];
   const base = /^[a-z][a-z0-9+.-]*:\/\//i.test(configuredBase) ? configuredBase : `https://${configuredBase}`;
   const path = String(values.subscribe_path || "s").replace(/^\/+|\/+$/g, "") || "s";
@@ -1295,6 +1296,41 @@ function parseKvObject(value: string | null) {
   return value ? parseJsonObject(value) : null;
 }
 
+type StatusSnapshot = { machines: Record<string, Record<string, any>>; nodes: Record<string, Record<string, any>> };
+let statusSnapshotCache: { value: StatusSnapshot; expiresAt: number } | null = null;
+
+async function statusHubRequest(env: Env, path: string, init: RequestInit = {}) {
+  return env.XBOARD_SERVER.fetch(`https://xboard-server.internal/internal/status/${path}`, {
+    ...init,
+    headers: { ...(init.headers || {}), "x-xboard-internal-token": await internalSyncToken(env) }
+  });
+}
+
+async function statusSnapshot(env: Env): Promise<StatusSnapshot> {
+  if (statusSnapshotCache && statusSnapshotCache.expiresAt > Date.now()) return statusSnapshotCache.value;
+  try {
+    const response = await statusHubRequest(env, "snapshot");
+    if (!response.ok) throw new Error(`StatusHub returned ${response.status}`);
+    const payload = await response.json() as { data?: StatusSnapshot };
+    const value = payload.data || { machines: {}, nodes: {} };
+    statusSnapshotCache = { value, expiresAt: Date.now() + 2_000 };
+    return value;
+  } catch {
+    return { machines: {}, nodes: {} };
+  }
+}
+
+async function clearStatus(env: Env, kind: "machine" | "node", id: number) {
+  statusSnapshotCache = null;
+  try {
+    await statusHubRequest(env, "clear", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind, id })
+    });
+  } catch { /* Stale runtime state is ignored when its D1 configuration no longer exists. */ }
+}
+
 async function optionalKvGet(env: Env, key: string) {
   try { return await env.XBOARD_KV.get(key); } catch { return null; }
 }
@@ -1308,9 +1344,10 @@ async function optionalKvPutTtl(env: Env, key: string, value: string, expiration
 }
 
 async function adminServerRows(env: Env): Promise<Record<string, any>[]> {
-  const [serverResult, machineResult] = await Promise.all([
+  const [serverResult, machineResult, live] = await Promise.all([
     env.XBOARD_DB.prepare("SELECT * FROM v2_server ORDER BY sort ASC, id ASC LIMIT 1000").all<Record<string, any>>(),
-    env.XBOARD_DB.prepare("SELECT * FROM v2_server_machine ORDER BY id ASC LIMIT 1000").all<Record<string, any>>()
+    env.XBOARD_DB.prepare("SELECT * FROM v2_server_machine ORDER BY id ASC LIMIT 1000").all<Record<string, any>>(),
+    statusSnapshot(env)
   ]);
   const servers = serverResult.results || [];
   const machines = machineResult.results || [];
@@ -1319,25 +1356,15 @@ async function adminServerRows(env: Env): Promise<Record<string, any>[]> {
     const stateId = Number(server.parent_id || server.id);
     const ownId = Number(server.id);
     const machine = Number(server.machine_id) > 0 ? machines.find(item => Number(item.id) === Number(server.machine_id)) : null;
-    const readState = async (key: string) => {
-      const inherited = await optionalKvGet(env, `node:${key}:${stateId}`);
-      return inherited ?? (stateId !== ownId ? await optionalKvGet(env, `node:${key}:${ownId}`) : null);
-    };
-    const [kvLastCheck, kvLastPush, kvOnline, kvLoad, kvMetrics, kvMachineLoad] = await Promise.all([
-      readState("last_check"),
-      readState("last_push"),
-      readState("online"),
-      readState("load"),
-      readState("metrics"),
-      machine ? optionalKvGet(env, `machine:load:${machine.id}`) : Promise.resolve(null)
-    ]);
-    const machineSeenAt = machine && Number(machine.is_active ?? machine.enabled ?? 1) === 1 ? Number(machine.last_seen_at || 0) : 0;
+    const nodeState = live.nodes[String(stateId)] || (stateId !== ownId ? live.nodes[String(ownId)] : null) || {};
+    const machineState = machine ? live.machines[String(machine.id)] || {} : {};
+    const machineSeenAt = machine && Number(machine.is_active ?? machine.enabled ?? 1) === 1 && machineState.connected !== false ? Number(machineState.last_seen_at || 0) : 0;
     const machineOnline = machineSeenAt > 0 && now() - 300 < machineSeenAt;
-    const lastCheckAt = Math.max(Number(kvLastCheck || server.last_check_at || 0), machineOnline ? machineSeenAt : 0) || null;
-    const lastPushAt = Math.max(Number(kvLastPush || server.last_push_at || 0), machineOnline ? machineSeenAt : 0) || null;
+    const lastCheckAt = Math.max(Number(nodeState.last_check_at || 0), machineOnline ? machineSeenAt : 0) || null;
+    const lastPushAt = Math.max(Number(nodeState.last_push_at || 0), machineOnline ? machineSeenAt : 0) || null;
     const availableStatus = nodeAvailableStatus(lastCheckAt, lastPushAt);
-    const loadStatus = parseKvObject(kvLoad) || parseKvObject(kvMachineLoad) || (machine?.load_status ? parseJsonObject(machine.load_status) : null);
-    const metrics = parseKvObject(kvMetrics) || parseKvObject(server.metrics) || (loadStatus?.metrics && typeof loadStatus.metrics === "object" ? loadStatus.metrics : null);
+    const loadStatus = nodeState.load_status || machineState.load_status || null;
+    const metrics = nodeState.metrics || (loadStatus?.metrics && typeof loadStatus.metrics === "object" ? loadStatus.metrics : null);
     const groupIds = parseJsonArray(server.group_ids);
     const groups = [];
     for (const id of groupIds) {
@@ -1362,7 +1389,7 @@ async function adminServerRows(env: Env): Promise<Record<string, any>[]> {
       machine: machine ? { ...machine, token: undefined, load_status: loadStatus } : null,
       last_check_at: lastCheckAt,
       last_push_at: lastPushAt,
-      online: Number(kvOnline ?? server.online_user ?? 0),
+      online: Number(nodeState.online || 0),
       is_online: availableStatus === 0 ? 0 : 1,
       available_status: availableStatus,
       cache_key: `${server.type}-${server.id}-${server.updated_at}-${availableStatus === 0 ? 0 : 1}`,
@@ -1375,17 +1402,21 @@ async function adminServerRows(env: Env): Promise<Record<string, any>[]> {
 }
 
 async function adminMachineRows(env: Env) {
-  const result = await env.XBOARD_DB.prepare("SELECT * FROM v2_server_machine ORDER BY id ASC LIMIT 1000").all<Record<string, any>>();
+  const [result, live] = await Promise.all([
+    env.XBOARD_DB.prepare("SELECT * FROM v2_server_machine ORDER BY id ASC LIMIT 1000").all<Record<string, any>>(),
+    statusSnapshot(env)
+  ]);
   const machines = result.results || [];
   const out = [];
   for (const machine of machines) {
     const { token: _token, ...safeMachine } = machine;
+    const machineState = live.machines[String(machine.id)] || {};
     out.push({
       ...safeMachine,
       notes: machine.notes || "",
       is_active: Boolean(Number(machine.is_active ?? machine.enabled ?? 1)),
-      last_seen_at: machine.last_seen_at || null,
-      load_status: machine.load_status ? parseJsonObject(machine.load_status) : null,
+      last_seen_at: machineState.last_seen_at || null,
+      load_status: machineState.load_status || null,
       servers_count: await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_server WHERE machine_id = ${Number(machine.id)}`)
     });
   }
@@ -1409,28 +1440,16 @@ async function adminMachineHistory(env: Env, url: URL) {
 
   const machine = await env.XBOARD_DB.prepare("SELECT id FROM v2_server_machine WHERE id = ?").bind(machineId).first();
   if (!machine) return fail("服务器不存在", 422, 422);
-
-  let query = "SELECT cpu, mem_total, mem_used, disk_total, disk_used, net_in_speed, net_out_speed, recorded_at FROM v2_server_machine_load_history WHERE machine_id = ?";
-  const bindings: Array<number> = [machineId];
-  if (rangeHours !== null) {
-    query += " AND recorded_at >= ?";
-    bindings.push(now() - rangeHours * 3600);
+  const params = new URLSearchParams({ machine_id: String(machineId), limit: String(limit) });
+  if (rangeHours !== null) params.set("range_hours", String(rangeHours));
+  try {
+    const response = await statusHubRequest(env, `history?${params}`);
+    if (!response.ok) return fail("获取服务器负载历史失败", 500, 500);
+    const payload = await response.json() as { data?: Record<string, unknown>[] };
+    return ok(payload.data || []);
+  } catch {
+    return fail("获取服务器负载历史失败", 500, 500);
   }
-  query += " ORDER BY recorded_at DESC LIMIT ?";
-  bindings.push(limit);
-
-  const result = await env.XBOARD_DB.prepare(query).bind(...bindings).all<Record<string, unknown>>();
-  const history = (result.results || []).reverse().map(row => ({
-    cpu: Number(row.cpu || 0),
-    mem_total: Number(row.mem_total || 0),
-    mem_used: Number(row.mem_used || 0),
-    disk_total: Number(row.disk_total || 0),
-    disk_used: Number(row.disk_used || 0),
-    net_in_speed: row.net_in_speed === null || row.net_in_speed === undefined ? null : Number(row.net_in_speed),
-    net_out_speed: row.net_out_speed === null || row.net_out_speed === undefined ? null : Number(row.net_out_speed),
-    recorded_at: Number(row.recorded_at || 0)
-  }));
-  return ok(history);
 }
 
 function shellQuote(value: string) {
@@ -1438,8 +1457,8 @@ function shellQuote(value: string) {
 }
 
 async function machineInstallCommand(request: Request, env: Env, machineToken: string, machineId: number) {
-  const configured = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = 'app_url'").first<{ value: string }>();
-  const panelUrl = String(configured?.value || new URL(request.url).origin).replace(/\/$/, "");
+  const configured = await settings(env.XBOARD_DB);
+  const panelUrl = String(configured.app_url || new URL(request.url).origin).replace(/\/$/, "");
   const installerUrl = "https://raw.githubusercontent.com/cedar2025/xboard-node/dev/install.sh";
   return `curl -fsSL ${installerUrl} | sudo bash -s -- --mode machine --panel ${shellQuote(panelUrl)} --token ${shellQuote(machineToken)} --machine-id ${machineId}`;
 }
@@ -2054,7 +2073,10 @@ async function createOrUpdate(table: string, request: Request, env: Env, id?: st
     const marks = cols.map(() => "?").join(", ");
     await env.XBOARD_DB.prepare(`INSERT INTO ${table}(${cols.join(",")}) VALUES (${marks})`).bind(...allowed.map(([, v]) => bindValue(v)), ts, ts).run();
   }
-  if (table === "v2_settings") await bump(env.XBOARD_KV, "settings_version");
+  if (table === "v2_settings") {
+    invalidateSettingsCache();
+    await bump(env.XBOARD_KV, "settings_version");
+  }
   if (table === "v2_server" || table === "v2_plan") await bump(env.XBOARD_KV, "servers_version");
   if (table === "v2_user" && id) {
     await bump(env.XBOARD_KV, `user_version:${id}`);
@@ -2649,6 +2671,7 @@ async function adminCoreResource(request: Request, env: Env, route: string): Pro
       env.XBOARD_DB.prepare("UPDATE v2_server SET machine_id = NULL, updated_at = ? WHERE machine_id = ?").bind(now(), id),
       env.XBOARD_DB.prepare("DELETE FROM v2_server_machine WHERE id = ?").bind(id)
     ]);
+    await clearStatus(env, "machine", id);
     await bump(env.XBOARD_KV, "servers_version");
     return ok(true);
   }
@@ -2708,6 +2731,7 @@ async function adminApi(request: Request, env: Env, path: string) {
           .bind(emailAliases[name], typeof value === "object" ? JSON.stringify(value) : String(value), ts, ts).run();
       }
     }
+    invalidateSettingsCache();
     await bump(env.XBOARD_KV, "settings_version");
     return ok(true);
   }
@@ -2857,14 +2881,20 @@ async function adminApi(request: Request, env: Env, path: string) {
   if (path.includes("/server/manage/sort")) return sortServers(request, env);
   if (path.includes("/server/manage/drop")) {
     const input = await body<Record<string, any>>(request.clone());
-    if (input.id) await env.XBOARD_DB.prepare("DELETE FROM v2_server WHERE id = ?").bind(input.id).run();
+    if (input.id) {
+      await env.XBOARD_DB.prepare("DELETE FROM v2_server WHERE id = ?").bind(input.id).run();
+      await clearStatus(env, "node", Number(input.id));
+    }
     await bump(env.XBOARD_KV, "servers_version");
     return ok(true);
   }
   if (path.includes("/server/manage/batchDelete")) {
     const input = await body<Record<string, any>>(request.clone());
     const ids = parseJsonArray(input.ids);
-    for (const id of ids) await env.XBOARD_DB.prepare("DELETE FROM v2_server WHERE id = ?").bind(Number(id)).run();
+    for (const id of ids) {
+      await env.XBOARD_DB.prepare("DELETE FROM v2_server WHERE id = ?").bind(Number(id)).run();
+      await clearStatus(env, "node", Number(id));
+    }
     await bump(env.XBOARD_KV, "servers_version");
     return ok(true);
   }
@@ -3664,13 +3694,13 @@ function normalizeSecurePath(value: unknown) {
 }
 
 async function currentSecurePath(env: Env) {
-  const row = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = 'secure_path'").first<{ value: string }>();
-  return normalizeSecurePath(row?.value || "admin");
+  const values = await settings(env.XBOARD_DB);
+  return normalizeSecurePath(values.secure_path || "admin");
 }
 
 async function currentSubscribePath(env: Env) {
-  const row = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = 'subscribe_path'").first<{ value: string }>();
-  return String(row?.value || "s").trim().replace(/^\/+|\/+$/g, "") || "s";
+  const values = await settings(env.XBOARD_DB);
+  return String(values.subscribe_path || "s").trim().replace(/^\/+|\/+$/g, "") || "s";
 }
 
 function isSubscriptionPath(pathname: string, subscribePath: string) {

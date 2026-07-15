@@ -20,7 +20,14 @@ queue = "traffic-events"
 name = "NODE_HUB"
 class_name = "NodeHub"
 
+[[durable_objects.bindings]]
+name = "STATUS_HUB"
+class_name = "StatusHub"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["NodeHub"]
 
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["StatusHub"]

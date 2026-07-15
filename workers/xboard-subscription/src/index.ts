@@ -991,8 +991,8 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === "/health") return new Response(JSON.stringify({ data: { service: "xboard-subscription", time: now() } }), { headers: { "content-type": "application/json" } });
     if (url.pathname !== "/api/v1/client/subscribe") {
-      const configured = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = 'subscribe_path'").first<{ value: string }>();
-      if (!matchesConfiguredSubscribePath(url.pathname, configured?.value)) return fail("Not Found", 404);
+      const configured = await loadSettings(env.XBOARD_DB);
+      if (!matchesConfiguredSubscribePath(url.pathname, configured.subscribe_path)) return fail("Not Found", 404);
     }
     const token = url.pathname === "/api/v1/client/subscribe"
       ? url.searchParams.get("token") || ""

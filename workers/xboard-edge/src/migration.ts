@@ -1,9 +1,11 @@
-import type { D1Database, KVNamespace } from "./types";
+import type { D1Database, Fetcher, KVNamespace } from "./types";
+import { invalidateSettingsCache } from "./db";
 import { body, fail, json, now, ok, randomString } from "./compat";
 
 interface MigrationEnv {
   XBOARD_DB: D1Database;
   XBOARD_KV: KVNamespace;
+  XBOARD_SERVER: Fetcher;
 }
 
 type MigrationMode = "merge" | "overwrite";
@@ -143,6 +145,16 @@ function exportRow(table: string, source: MigrationRow): MigrationRow | null {
     if (row.updated_at === null || row.updated_at === undefined) row.updated_at = row.created_at ?? 0;
   }
   if (table === "v2_server_machine" && row.is_active === undefined) row.is_active = row.enabled ?? 1;
+  if (table === "v2_server_machine") {
+    row.last_seen_at = null;
+    row.load_status = null;
+  }
+  if (table === "v2_server") {
+    row.last_check_at = null;
+    row.last_push_at = null;
+    row.online_user = 0;
+    row.metrics = null;
+  }
   if (table === "v2_subscribe_templates" && row.content === undefined) row.content = row.template ?? "";
   if (table === "v2_commission_log") {
     if (row.get_amount === undefined) row.get_amount = row.amount ?? 0;
@@ -195,6 +207,16 @@ function normalizedSourceRow(table: string, source: MigrationRow): MigrationRow 
   const row = { ...source };
   if (table === "v2_stat" && row.transfer_used === undefined && row.transfer_used_total !== undefined) row.transfer_used = row.transfer_used_total;
   if (table === "v2_server_machine" && row.enabled === undefined && row.is_active !== undefined) row.enabled = row.is_active;
+  if (table === "v2_server_machine") {
+    row.last_seen_at = null;
+    row.load_status = null;
+  }
+  if (table === "v2_server") {
+    row.last_check_at = null;
+    row.last_push_at = null;
+    row.online_user = 0;
+    row.metrics = null;
+  }
   if (table === "v2_subscribe_templates") {
     if (row.type === undefined) row.type = row.name || "clash";
     if (row.template === undefined) row.template = row.content || "";
@@ -673,6 +695,12 @@ async function finishRollback(request: Request, env: MigrationEnv) {
       .bind(JSON.stringify(details), now(), runId).run();
     return migrationError(`D1 已还原，但 KV 状态还原失败：${details.error}`, 500, details);
   }
+  await env.XBOARD_DB.batch([
+    env.XBOARD_DB.prepare("DELETE FROM v2_server_machine_load_history"),
+    env.XBOARD_DB.prepare("UPDATE v2_server_machine SET last_seen_at = NULL, load_status = NULL"),
+    env.XBOARD_DB.prepare("UPDATE v2_server SET last_check_at = NULL, last_push_at = NULL, online_user = 0, metrics = NULL")
+  ]);
+  invalidateSettingsCache();
   const ts = now();
   const report = { restored_counts: expected, restored_at: ts };
   await env.XBOARD_DB.prepare("UPDATE v2_migration_runs SET status = 'rolled_back', rollback_progress = ?, report = ?, error = NULL, access_token_hash = NULL, finished_at = ?, updated_at = ? WHERE id = ?")
@@ -710,13 +738,16 @@ async function finishMigration(request: Request, env: MigrationEnv) {
     await markMigrationFailed(env, runId, "设置默认主题失败", details);
     return migrationError(`设置默认主题失败：${details.error}`, 500, details);
   }
-  if (run.mode === "overwrite") {
-    try { await env.XBOARD_DB.prepare("DELETE FROM v2_server_machine_load_history").run(); }
-    catch (error) {
-      const details = { phase: "load_history_cleanup", error: errorMessage(error) };
-      await markMigrationFailed(env, runId, "清理旧服务器负载历史失败", details);
-      return migrationError(`清理旧服务器负载历史失败：${details.error}`, 500, details);
-    }
+  try {
+    await env.XBOARD_DB.batch([
+      env.XBOARD_DB.prepare("DELETE FROM v2_server_machine_load_history"),
+      env.XBOARD_DB.prepare("UPDATE v2_server_machine SET last_seen_at = NULL, load_status = NULL"),
+      env.XBOARD_DB.prepare("UPDATE v2_server SET last_check_at = NULL, last_push_at = NULL, online_user = 0, metrics = NULL")
+    ]);
+  } catch (error) {
+    const details = { phase: "runtime_status_cleanup", error: errorMessage(error) };
+    await markMigrationFailed(env, runId, "清理旧运行状态失败", details);
+    return migrationError(`清理旧运行状态失败：${details.error}`, 500, details);
   }
   const report = {
     source_type: run.source_type,
@@ -739,6 +770,13 @@ async function finishMigration(request: Request, env: MigrationEnv) {
     await env.XBOARD_KV.put("settings_version", String(Date.now()));
     await env.XBOARD_KV.put("servers_version", String(Date.now()));
   } catch { /* Cache invalidation is best effort. */ }
+  invalidateSettingsCache();
+  try {
+    const values = await env.XBOARD_DB.prepare("SELECT name, value FROM v2_settings WHERE name IN ('internal_sync_token', 'server_token')").all<{ name: string; value: string }>();
+    const config = Object.fromEntries((values.results || []).map(row => [row.name, row.value]));
+    const token = config.internal_sync_token || config.server_token || "";
+    if (token) await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/status/reset", { method: "POST", headers: { "x-xboard-internal-token": token } });
+  } catch { /* Nodes will repopulate StatusHub after migration. */ }
   try {
     await env.XBOARD_DB.batch([
       env.XBOARD_DB.prepare("DELETE FROM v2_migration_snapshot_rows WHERE run_id = ?").bind(runId),

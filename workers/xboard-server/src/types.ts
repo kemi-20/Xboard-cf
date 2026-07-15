@@ -20,7 +20,9 @@ export interface MessageBatch<T = unknown> { messages: Message<T>[]; queue: stri
 export interface DurableObjectStorage {
   get<T = unknown>(key: string): Promise<T | undefined>;
   put(key: string, value: unknown): Promise<void>;
+  put(entries: Record<string, unknown>): Promise<void>;
   delete(key: string): Promise<boolean>;
+  list<T = unknown>(options?: { prefix?: string }): Promise<Map<string, T>>;
   setAlarm(timestamp: number | Date): Promise<void>;
 }
 export interface DurableObjectState {
