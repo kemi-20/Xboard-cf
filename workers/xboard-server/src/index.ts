@@ -270,7 +270,7 @@ async function processAlive(env: Env, nodeId: number, data: unknown) {
     }
   }
   await updateUserDeviceIndex(env, nodeId, previous, next);
-  await optionalKvPut(env, key, JSON.stringify(next), { expirationTtl: 600 });
+  await optionalKvPut(env, key, JSON.stringify(next), { expirationTtl: 300 });
   const affected = new Set([...Object.keys(previous), ...Object.keys(next)]);
   const statements = [];
   for (const userId of affected) {

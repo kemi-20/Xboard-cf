@@ -506,6 +506,8 @@ async function ensureBootstrap(env: Env) {
     "CREATE INDEX IF NOT EXISTS idx_v2_user_t ON v2_user(t)",
     "CREATE INDEX IF NOT EXISTS idx_v2_user_online_count ON v2_user(online_count)",
     "CREATE INDEX IF NOT EXISTS idx_v2_user_created_at ON v2_user(created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_v2_admin_audit_log_admin_id ON v2_admin_audit_log(admin_id)",
+    "CREATE INDEX IF NOT EXISTS idx_v2_admin_audit_log_action ON v2_admin_audit_log(action)",
     "CREATE INDEX IF NOT EXISTS idx_v2_server_sort ON v2_server(sort)",
     "CREATE INDEX IF NOT EXISTS idx_v2_stat_user_record_user ON v2_stat_user(record_at, user_id)"
   ]) await runSqlIgnore(env, sql);
@@ -1068,9 +1070,9 @@ async function adminStats(env: Env) {
   const currentMonthIncome = await firstNumber(env, `SELECT COALESCE(SUM(total_amount), 0) AS c FROM v2_order WHERE created_at >= ${month} AND created_at < ${current} AND status NOT IN (0,2)`);
   const lastMonthIncome = await firstNumber(env, `SELECT COALESCE(SUM(total_amount), 0) AS c FROM v2_order WHERE created_at >= ${lastMonth} AND created_at < ${month} AND status NOT IN (0,2)`);
   const twoMonthsAgoIncome = await firstNumber(env, `SELECT COALESCE(SUM(total_amount), 0) AS c FROM v2_order WHERE created_at >= ${twoMonthsAgo} AND created_at < ${lastMonth} AND status NOT IN (0,2)`);
-  const currentMonthCommissionPayout = await firstNumber(env, `SELECT COALESCE(SUM(COALESCE(get_amount, amount, 0)), 0) AS c FROM v2_commission_log WHERE created_at >= ${month} AND created_at < ${current}`);
-  const lastMonthCommissionPayout = await firstNumber(env, `SELECT COALESCE(SUM(COALESCE(get_amount, amount, 0)), 0) AS c FROM v2_commission_log WHERE created_at >= ${lastMonth} AND created_at < ${month}`);
-  const twoMonthsAgoCommission = await firstNumber(env, `SELECT COALESCE(SUM(COALESCE(get_amount, amount, 0)), 0) AS c FROM v2_commission_log WHERE created_at >= ${twoMonthsAgo} AND created_at < ${lastMonth}`);
+  const currentMonthCommissionPayout = await firstNumber(env, `SELECT COALESCE(SUM(get_amount), 0) AS c FROM v2_commission_log WHERE created_at >= ${month} AND created_at < ${current}`);
+  const lastMonthCommissionPayout = await firstNumber(env, `SELECT COALESCE(SUM(get_amount), 0) AS c FROM v2_commission_log WHERE created_at >= ${lastMonth} AND created_at < ${month}`);
+  const twoMonthsAgoCommission = await firstNumber(env, `SELECT COALESCE(SUM(get_amount), 0) AS c FROM v2_commission_log WHERE created_at >= ${twoMonthsAgo} AND created_at < ${lastMonth}`);
   const monthUpload = await firstNumber(env, `SELECT COALESCE(SUM(u), 0) AS c FROM v2_stat_server WHERE record_at >= ${month} AND record_at < ${current}`);
   const monthDownload = await firstNumber(env, `SELECT COALESCE(SUM(d), 0) AS c FROM v2_stat_server WHERE record_at >= ${month} AND record_at < ${current}`);
   const todayUpload = await firstNumber(env, `SELECT COALESCE(SUM(u), 0) AS c FROM v2_stat_server WHERE record_at >= ${today} AND record_at < ${current}`);
@@ -1493,8 +1495,8 @@ function phpUrlEncode(value: string) {
 function normalizeServerInput(input: Record<string, any>) {
   const protocolSettings = parseJsonObject(input.protocol_settings);
   const serverType = String(input.type || input.server_type || protocolSettings.type || "shadowsocks");
-  const port = Number(isNilLike(input.port) ? input.server_port || 443 : input.port);
-  const serverPort = Number(isNilLike(input.server_port) ? input.port || 443 : input.server_port);
+  const port = Number(input.port);
+  const serverPort = Number(input.server_port);
   return {
     type: serverType,
     name: String(input.name || `${serverType} Node`),
@@ -1526,6 +1528,10 @@ function normalizeServerInput(input: Record<string, any>) {
 
 async function saveServer(request: Request, env: Env) {
   const input = await body<Record<string, any>>(request);
+  for (const field of ["type", "name", "host", "port", "server_port", "rate"]) {
+    if (isNilLike(input[field])) return fail(`${field} 字段不能为空`, 422, 422);
+  }
+  if (![input.port, input.server_port, input.rate].every(value => Number.isFinite(Number(value)))) return fail("端口和倍率必须是数字", 422, 422);
   const data = normalizeServerInput(input);
   const columns = await tableColumns(env, "v2_server");
   const allowed = Object.entries(data).filter(([key]) => columns.has(key));
@@ -1623,7 +1629,6 @@ async function copyServer(request: Request, env: Env) {
   if (!server) return fail("服务器不存在", 400, 400202);
   delete server.id;
   server.code = null;
-  server.name = `${server.name || "Node"} Copy`;
   server.show = 0;
   server.u = 0;
   server.d = 0;
@@ -1905,12 +1910,12 @@ async function login(request: Request, env: Env, admin = false) {
   const email = String(input.email || input.username || "").trim().toLowerCase();
   const password = String(input.password || "");
   const all = await settings(env.XBOARD_DB); const limitEnabled = !!pickSetting(all, "password_limit_enable", 1);
-  const limit = Math.max(1, Number(pickSetting(all, "password_limit_count", 5))); const windowSeconds = Math.max(60, Number(pickSetting(all, "password_limit_expire", 60)) * 60);
+  const limit = Math.max(1, Number(pickSetting(all, "password_limit_count", 5))); const windowSeconds = Math.max(0, Number(pickSetting(all, "password_limit_expire", 60)) * 60);
   const rateKey = `rate:login:${email}`; const attempts = Number(await optionalKvGet(env, rateKey) || 0);
-  if (limitEnabled && attempts >= limit) return fail("登录尝试次数过多，请稍后再试", 429, 429);
+  if (limitEnabled && windowSeconds > 0 && attempts >= limit) return fail("登录尝试次数过多，请稍后再试", 429, 429);
   const user = await env.XBOARD_DB.prepare("SELECT * FROM v2_user WHERE email = ?").bind(email).first<any>();
   if (!user || (admin && Number(user.is_admin) !== 1) || !(await verifyPassword(password, String(user?.password || ""), user?.password_algo, user?.password_salt))) {
-    if (limitEnabled) await optionalKvPutTtl(env, rateKey, String(attempts + 1), windowSeconds);
+    if (limitEnabled && windowSeconds > 0) await optionalKvPutTtl(env, rateKey, String(attempts + 1), windowSeconds);
     return fail("账号或密码错误", 401, 401);
   }
   if (Number(user.banned || 0) === 1) return fail("账号已被封禁", 403, 403);
@@ -2106,7 +2111,6 @@ async function adminTicket(request: Request, env: Env, route: string, adminId: n
   if (!ticket) return fail("工单不存在", 400, 400202);
   if (route === "/ticket/reply") {
     if (!String(input.message || "").trim()) return fail("消息不能为空", 422, 422);
-    if (Number(ticket.status)) return fail("工单已关闭，无法回复", 400, 400);
     const ts = now();
     await env.XBOARD_DB.batch([
       env.XBOARD_DB.prepare("INSERT INTO v2_ticket_message(ticket_id, user_id, is_admin, message, created_at, updated_at) VALUES (?, ?, 1, ?, ?, ?)").bind(id, adminId, String(input.message), ts, ts),
@@ -2274,6 +2278,7 @@ const orderPeriods: Record<string, string> = {
   two_year_price: "two_yearly", three_year_price: "three_yearly", onetime_price: "onetime", reset_price: "reset_traffic"
 };
 const legacyOrderPeriods = Object.fromEntries(Object.entries(orderPeriods).map(([legacy, current]) => [current, legacy]));
+const orderPeriodMonths: Record<string, number> = { monthly: 1, quarterly: 3, half_yearly: 6, yearly: 12, two_yearly: 24, three_yearly: 36 };
 
 function legacyOrderPeriod(period: unknown) {
   const value = String(period || "");
@@ -2338,6 +2343,35 @@ function addOrderMonths(timestamp: number, months: number) {
   const date = new Date(timestamp * 1000);
   date.setUTCMonth(date.getUTCMonth() + months);
   return Math.floor(date.getTime() / 1000);
+}
+
+async function orderSurplus(env: Env, user: Record<string, any>, settingsValues: Record<string, any>) {
+  if (user.expired_at === null || user.expired_at === undefined) {
+    const lastOrder = await env.XBOARD_DB.prepare("SELECT id, total_amount, balance_amount FROM v2_order WHERE user_id = ? AND period = 'onetime' AND status = 3 ORDER BY id DESC LIMIT 1").bind(user.id).first<Record<string, any>>();
+    const trafficGb = Number(user.transfer_enable || 0) / 1073741824;
+    const paidAmount = Number(lastOrder?.total_amount || 0) + Number(lastOrder?.balance_amount || 0);
+    if (!lastOrder || trafficGb <= 0 || paidAmount <= 0) return { amount: 0, orderIds: [] as number[] };
+    const unusedGb = trafficGb - (Number(user.u || 0) + Number(user.d || 0)) / 1073741824;
+    const rows = await env.XBOARD_DB.prepare("SELECT id FROM v2_order WHERE user_id = ? AND period != 'reset_traffic' AND status = 3 ORDER BY id ASC").bind(user.id).all<{ id: number }>();
+    return { amount: Math.trunc(Math.max(0, paidAmount / trafficGb * unusedGb)), orderIds: (rows.results || []).map(row => Number(row.id)) };
+  }
+
+  const orders = await env.XBOARD_DB.prepare("SELECT id, period, total_amount, balance_amount, surplus_amount, surplus_credit, created_at FROM v2_order WHERE user_id = ? AND period NOT IN ('reset_traffic', 'onetime') AND status = 3 ORDER BY id ASC").bind(user.id).all<Record<string, any>>();
+  const rows = orders.results || [];
+  if (!rows.length) return { amount: 0, orderIds: [] as number[] };
+  const monthSum = rows.reduce((sum, row) => sum + Number(orderPeriodMonths[String(row.period)] || 0), 0);
+  const firstOrderAt = Math.min(...rows.map(row => Number(row.created_at || 0)).filter(Boolean));
+  if (!firstOrderAt || monthSum <= 0) return { amount: 0, orderIds: rows.map(row => Number(row.id)) };
+  const calculatedExpiry = addOrderMonths(firstOrderAt, monthSum);
+  const totalSeconds = calculatedExpiry - firstOrderAt;
+  const cycleRatio = totalSeconds > 0 ? Math.max(0, calculatedExpiry - now()) / totalSeconds : 0;
+  const currentPlan = user.plan_id ? await env.XBOARD_DB.prepare("SELECT transfer_enable FROM v2_plan WHERE id = ?").bind(user.plan_id).first<{ transfer_enable: number }>() : null;
+  const totalTrafficGb = Number(currentPlan?.transfer_enable || 0) * monthSum;
+  const remainTrafficGb = Math.max(0, totalTrafficGb - (Number(user.u || 0) + Number(user.d || 0)) / 1073741824);
+  const trafficRatio = totalTrafficGb > 0 ? remainTrafficGb / totalTrafficGb : 0;
+  const ratio = Number(pickSetting(settingsValues, "change_order_event_id", 0)) === 1 ? Math.min(cycleRatio, trafficRatio) : cycleRatio;
+  const amountSum = rows.reduce((sum, row) => sum + Number(row.total_amount || 0) + Number(row.balance_amount || 0) + Number(row.surplus_amount || 0) - Number(row.surplus_credit || 0), 0);
+  return { amount: Math.trunc(Math.max(0, amountSum * ratio)), orderIds: rows.map(row => Number(row.id)) };
 }
 
 const EDGE_SHANGHAI_OFFSET = 8 * 3600;
@@ -2714,11 +2748,11 @@ async function adminApi(request: Request, env: Env, path: string) {
       commission_pending_total: await firstNumber(env, "SELECT COUNT(*) AS c FROM v2_order WHERE commission_status = 0 AND invite_user_id IS NOT NULL AND status NOT IN (0,2) AND commission_balance > 0"),
       day_income: await firstNumber(env, `SELECT COALESCE(SUM(total_amount), 0) AS c FROM v2_order WHERE created_at >= ${today} AND created_at < ${now()} AND status NOT IN (0,2)`),
       last_month_income: await firstNumber(env, `SELECT COALESCE(SUM(total_amount), 0) AS c FROM v2_order WHERE created_at >= ${lastMonth} AND created_at < ${month} AND status NOT IN (0,2)`),
-      commission_month_payout: await firstNumber(env, `SELECT COALESCE(SUM(COALESCE(get_amount, amount, 0)), 0) AS c FROM v2_commission_log WHERE created_at >= ${month} AND created_at < ${now()}`),
-      commission_last_month_payout: await firstNumber(env, `SELECT COALESCE(SUM(COALESCE(get_amount, amount, 0)), 0) AS c FROM v2_commission_log WHERE created_at >= ${lastMonth} AND created_at < ${month}`),
+      commission_month_payout: await firstNumber(env, `SELECT COALESCE(SUM(get_amount), 0) AS c FROM v2_commission_log WHERE created_at >= ${month} AND created_at < ${now()}`),
+      commission_last_month_payout: await firstNumber(env, `SELECT COALESCE(SUM(get_amount), 0) AS c FROM v2_commission_log WHERE created_at >= ${lastMonth} AND created_at < ${month}`),
       online_nodes: nodes.filter(node => Number((node as any).available_status) > 0).length,
-      online_devices: nodes.reduce((sum, node) => sum + Number((node as any).online_conn || 0), 0),
-      online_users: nodes.reduce((sum, node) => sum + Number((node as any).online || 0), 0),
+      online_devices: await firstNumber(env, `SELECT COALESCE(SUM(online_count), 0) AS c FROM v2_user WHERE t >= ${now() - 600}`),
+      online_users: await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE t >= ${now() - 600}`),
       today_traffic: { upload: todayU, download: todayD, total: todayU + todayD },
       month_traffic: { upload: monthU, download: monthD, total: monthU + monthD },
       total_traffic: { upload: totalU, download: totalD, total: totalU + totalD }
@@ -2938,6 +2972,9 @@ async function adminApi(request: Request, env: Env, path: string) {
     const input = await body<Record<string, any>>(request.clone());
     const id = nullableNumber(input.id);
     if (!id) return fail("用户ID不能为空", 422, 422);
+    const target = await env.XBOARD_DB.prepare("SELECT is_admin FROM v2_user WHERE id = ?").bind(id).first<{ is_admin: number }>();
+    if (!target) return fail("用户不存在", 400, 400202);
+    if (Number(target.is_admin)) return fail("不能删除管理员账号", 400, 400);
     await env.XBOARD_DB.batch([
       env.XBOARD_DB.prepare("DELETE FROM v2_ticket_message WHERE ticket_id IN (SELECT id FROM v2_ticket WHERE user_id = ?)").bind(id),
       env.XBOARD_DB.prepare("DELETE FROM v2_ticket WHERE user_id = ?").bind(id),
@@ -2946,7 +2983,7 @@ async function adminApi(request: Request, env: Env, path: string) {
       env.XBOARD_DB.prepare("DELETE FROM v2_invite_code WHERE user_id = ?").bind(id),
       env.XBOARD_DB.prepare("DELETE FROM personal_access_tokens WHERE tokenable_id = ?").bind(id),
       env.XBOARD_DB.prepare("UPDATE v2_user SET invite_user_id = NULL WHERE invite_user_id = ?").bind(id),
-      env.XBOARD_DB.prepare("DELETE FROM v2_user WHERE id = ? AND is_admin = 0").bind(id)
+      env.XBOARD_DB.prepare("DELETE FROM v2_user WHERE id = ?").bind(id)
     ]);
     return ok(true);
   }
@@ -3221,7 +3258,7 @@ async function userApi(request: Request, env: Env, path: string) {
     const all = await settings(env.XBOARD_DB);
     const codes = await env.XBOARD_DB.prepare("SELECT id, code, status, pv, created_at, updated_at FROM v2_invite_code WHERE user_id = ? AND status = 0 ORDER BY id DESC").bind((user as any).id).all();
     const invited = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE invite_user_id = ${Number((user as any).id)}`);
-    const commission = await firstNumber(env, `SELECT COALESCE(SUM(COALESCE(get_amount, amount, 0)), 0) AS c FROM v2_commission_log WHERE invite_user_id = ${Number((user as any).id)}`);
+    const commission = await firstNumber(env, `SELECT COALESCE(SUM(get_amount), 0) AS c FROM v2_commission_log WHERE invite_user_id = ${Number((user as any).id)}`);
     let pendingCommission = await firstNumber(env, `SELECT COALESCE(SUM(commission_balance), 0) AS c FROM v2_order WHERE status = 3 AND commission_status = 0 AND invite_user_id = ${Number((user as any).id)}`);
     if (Number(pickSetting(all, "commission_distribution_enable", 0))) {
       pendingCommission = Math.trunc(pendingCommission * Number(pickSetting(all, "commission_distribution_l1", 0)) / 100);
@@ -3233,9 +3270,9 @@ async function userApi(request: Request, env: Env, path: string) {
     const url = new URL(request.url);
     const current = Math.max(1, Number(url.searchParams.get("current") || 1));
     const pageSize = Math.max(10, Math.min(100, Number(url.searchParams.get("page_size") || 10)));
-    const result = await env.XBOARD_DB.prepare("SELECT id, order_amount, trade_no, COALESCE(get_amount, amount, 0) AS get_amount, created_at FROM v2_commission_log WHERE invite_user_id = ? AND COALESCE(get_amount, amount, 0) > 0 ORDER BY created_at DESC LIMIT ? OFFSET ?")
+    const result = await env.XBOARD_DB.prepare("SELECT id, order_amount, trade_no, get_amount, created_at FROM v2_commission_log WHERE invite_user_id = ? AND get_amount > 0 ORDER BY created_at DESC LIMIT ? OFFSET ?")
       .bind((user as any).id, pageSize, (current - 1) * pageSize).all();
-    const total = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_commission_log WHERE invite_user_id = ${Number((user as any).id)} AND COALESCE(get_amount, amount, 0) > 0`);
+    const total = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_commission_log WHERE invite_user_id = ${Number((user as any).id)} AND get_amount > 0`);
     return json({ data: result.results || [], total });
   }
   if (request.method === "GET" && route === "/comm/config") {
@@ -3360,6 +3397,7 @@ async function userApi(request: Request, env: Env, path: string) {
     if (limitedPlans.length && (!planId || !limitedPlans.includes(planId))) return fail("优惠券不适用于该套餐", 400, 400);
     const limitedPeriods = parseJsonArray(coupon.limit_period).map(String);
     if (limitedPeriods.length && (!period || !limitedPeriods.includes(period) && !limitedPeriods.includes(orderPeriods[period]))) return fail("优惠券不适用于该周期", 400, 400);
+    if (coupon.limit_use !== null && coupon.limit_use !== undefined && Number(coupon.limit_use) <= 0) return fail("优惠券已用完", 400, 400);
     if (Number(coupon.limit_use || 0) > 0) {
       const used = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_order WHERE coupon_id = ${Number(coupon.id)} AND status IN (1,3)`);
       if (used >= Number(coupon.limit_use)) return fail("优惠券已达到使用次数限制", 400, 400);
@@ -3417,8 +3455,8 @@ async function userApi(request: Request, env: Env, path: string) {
       if (!plan) return fail("订阅计划不存在", 400, 400);
       const prices = parseJsonObject(plan.prices); const price = Number(prices[period] ?? prices[legacyPeriod]);
       if (!Number.isFinite(price) || price < 0) return fail("该付款周期未启用", 400, 400);
-      if (Number(plan.capacity_limit || 0) > 0) {
-        const count = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE plan_id = ${planId}`);
+      if (plan.capacity_limit !== null && plan.capacity_limit !== undefined) {
+        const count = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE plan_id = ${planId} AND (expired_at IS NULL OR expired_at >= ${now()})`);
         if (count >= Number(plan.capacity_limit) && Number((user as any).plan_id) !== planId) return fail("该订阅已售罄", 400, 400);
       }
       let totalAmount = Math.trunc(price * 100);
@@ -3453,13 +3491,28 @@ async function userApi(request: Request, env: Env, path: string) {
       const type = period === "reset_traffic" ? 4
         : Number((user as any).plan_id) > 0 && Number((user as any).plan_id) !== planId && ((user as any).expired_at === null || Number((user as any).expired_at) > ts) ? 3
         : Number((user as any).plan_id) === planId && ((user as any).expired_at === null || Number((user as any).expired_at) > ts) ? 2 : 1;
-      if (type === 3 && !Number(pickSetting(await settings(env.XBOARD_DB), "plan_change_enable", 1))) return fail("目前不允许更改订阅，请联系客服或提交工单操作", 400, 400);
+      const allSettings = await settings(env.XBOARD_DB);
+      if (type === 3 && !Number(pickSetting(allSettings, "plan_change_enable", 1))) return fail("目前不允许更改订阅，请联系客服或提交工单操作", 400, 400);
       const currentUser = await env.XBOARD_DB.prepare("SELECT * FROM v2_user WHERE id = ?").bind(userId).first<Record<string, any>>() || user as Record<string, any>;
+      let surplusAmount = 0;
+      let surplusCredit = 0;
+      let surplusOrderIds: number[] = [];
+      if (type === 3 && Number(pickSetting(allSettings, "surplus_enable", 1))) {
+        const surplus = await orderSurplus(env, currentUser, allSettings);
+        surplusAmount = surplus.amount;
+        surplusOrderIds = surplus.orderIds;
+        if (surplusAmount >= totalAmount) {
+          surplusCredit = surplusAmount - totalAmount;
+          totalAmount = 0;
+        } else {
+          totalAmount -= surplusAmount;
+        }
+      }
       const commission = await orderCommission(env, currentUser, totalAmount);
       const balanceAmount = Math.min(Math.max(0, Number(currentUser.balance || 0)), totalAmount);
       totalAmount -= balanceAmount;
-      const statements = [env.XBOARD_DB.prepare("INSERT INTO v2_order(user_id, plan_id, period, trade_no, status, total_amount, balance_amount, discount_amount, coupon_id, type, invite_user_id, commission_balance, created_at, updated_at) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-        .bind(userId, planId, period, tradeNo, totalAmount, balanceAmount, discountAmount, couponId, type, commission.inviteUserId, commission.commissionBalance, ts, ts)];
+      const statements = [env.XBOARD_DB.prepare("INSERT INTO v2_order(user_id, plan_id, period, trade_no, status, total_amount, balance_amount, discount_amount, coupon_id, type, surplus_amount, surplus_credit, surplus_order_ids, invite_user_id, commission_balance, created_at, updated_at) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        .bind(userId, planId, period, tradeNo, totalAmount, balanceAmount, discountAmount, couponId, type, surplusAmount, surplusCredit, JSON.stringify(surplusOrderIds), commission.inviteUserId, commission.commissionBalance, ts, ts)];
       if (balanceAmount) statements.push(env.XBOARD_DB.prepare("UPDATE v2_user SET balance = balance - ?, updated_at = ? WHERE id = ? AND balance >= ?").bind(balanceAmount, ts, userId, balanceAmount));
       if (couponUpdate) statements.push(couponUpdate);
       await env.XBOARD_DB.batch(statements);
@@ -3477,9 +3530,9 @@ async function userApi(request: Request, env: Env, path: string) {
   }
   if (path.includes("/plan/fetch")) {
     const plans = (await adminPlanRows(env)).filter(row => Number((row as any).show ?? 1) === 1 && Number((row as any).sell ?? 1) === 1);
-    const counts = await env.XBOARD_DB.prepare("SELECT plan_id, COUNT(*) AS count FROM v2_user WHERE plan_id IS NOT NULL GROUP BY plan_id").all<any>();
+    const counts = await env.XBOARD_DB.prepare("SELECT plan_id, COUNT(*) AS count FROM v2_user WHERE plan_id IS NOT NULL AND (expired_at IS NULL OR expired_at >= ?) GROUP BY plan_id").bind(now()).all<any>();
     const countMap = new Map((counts.results || []).map(row => [Number(row.plan_id), Number(row.count)]));
-    const available = plans.filter(row => !Number((row as any).capacity_limit || 0) || (countMap.get(Number((row as any).id)) || 0) < Number((row as any).capacity_limit) || Number((user as any).plan_id) === Number((row as any).id));
+    const available = plans.filter(row => (row as any).capacity_limit === null || (row as any).capacity_limit === undefined || (countMap.get(Number((row as any).id)) || 0) < Number((row as any).capacity_limit) || Number((user as any).plan_id) === Number((row as any).id));
     const id = nullableNumber(new URL(request.url).searchParams.get("id"));
     return ok(id ? available.find(row => Number((row as any).id) === id) || null : available);
   }
@@ -3553,7 +3606,9 @@ async function userApi(request: Request, env: Env, path: string) {
     const input = await body<Record<string, any>>(request);
     if (!String(input.subject || "").trim() || !String(input.message || "").trim()) return fail("工单主题和内容不能为空", 422, 422);
     const ts = now();
-    const result = await env.XBOARD_DB.prepare("INSERT INTO v2_ticket(user_id, subject, level, status, reply_status, last_reply_user_id, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?, ?)")
+    const existing = await env.XBOARD_DB.prepare("SELECT id FROM v2_ticket WHERE user_id = ? AND status = 0 LIMIT 1").bind((user as any).id).first();
+    if (existing) return fail("存在未关闭的工单", 400, 400);
+    const result = await env.XBOARD_DB.prepare("INSERT INTO v2_ticket(user_id, subject, level, status, reply_status, last_reply_user_id, created_at, updated_at) VALUES (?, ?, ?, 0, 0, ?, ?, ?)")
       .bind((user as any).id, String(input.subject), Number(input.level || 0), (user as any).id, ts, ts).run();
     await env.XBOARD_DB.prepare("INSERT INTO v2_ticket_message(ticket_id, user_id, message, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
       .bind(Number((result.meta as any)?.last_row_id || 0), (user as any).id, String(input.message), ts, ts).run();
@@ -3575,7 +3630,7 @@ async function userApi(request: Request, env: Env, path: string) {
     const ts = now();
     await env.XBOARD_DB.batch([
       env.XBOARD_DB.prepare("INSERT INTO v2_ticket_message(ticket_id, user_id, message, created_at, updated_at) VALUES (?, ?, ?, ?, ?)").bind(ticket.id, (user as any).id, String(input.message), ts, ts),
-      env.XBOARD_DB.prepare("UPDATE v2_ticket SET reply_status = 1, last_reply_user_id = ?, updated_at = ? WHERE id = ?").bind((user as any).id, ts, ticket.id)
+      env.XBOARD_DB.prepare("UPDATE v2_ticket SET reply_status = 0, last_reply_user_id = ?, updated_at = ? WHERE id = ?").bind((user as any).id, ts, ticket.id)
     ]);
     return ok(true);
   }
@@ -3587,7 +3642,7 @@ async function userApi(request: Request, env: Env, path: string) {
     const limit = Number(pickSetting(all, "commission_withdraw_limit", 100));
     if (Number((user as any).commission_balance || 0) / 100 < limit) return fail(`The current required minimum withdrawal commission is ${limit}`, 422, 422);
     if (!String(input.withdraw_account || "").trim()) return fail("Withdrawal account is required", 422, 422);
-    const ts = now(); const result = await env.XBOARD_DB.prepare("INSERT INTO v2_ticket(user_id,subject,level,status,reply_status,last_reply_user_id,created_at,updated_at) VALUES (?, ?, 2, 0, 1, ?, ?, ?)")
+    const ts = now(); const result = await env.XBOARD_DB.prepare("INSERT INTO v2_ticket(user_id,subject,level,status,reply_status,last_reply_user_id,created_at,updated_at) VALUES (?, ?, 2, 0, 0, ?, ?, ?)")
       .bind((user as any).id, "[Commission Withdrawal Request] This ticket is opened by the system", (user as any).id, ts, ts).run();
     await env.XBOARD_DB.prepare("INSERT INTO v2_ticket_message(ticket_id,user_id,message,created_at,updated_at) VALUES (?,?,?,?,?)")
       .bind(Number((result.meta as any)?.last_row_id || 0), (user as any).id, `Withdrawal method：${input.withdraw_method}\r\nWithdrawal account：${input.withdraw_account}`, ts, ts).run();

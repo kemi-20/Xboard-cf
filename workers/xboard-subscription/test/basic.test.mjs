@@ -93,6 +93,34 @@ test("QuantumultX and Loon use their official line formats", () => {
   assert.match(__test.loonLine(user, server), /^Node=Shadowsocks,127\.0\.0\.1,8388,aes-128-gcm,node-password,/);
 });
 
+test("audited client-specific transports match upstream renderers", () => {
+  const user = { uuid: "uuid" };
+  const trojanH2 = { type: "trojan", name: "Trojan H2", host: "node.example", port: 443, protocol_settings: { network: "h2", network_settings: { path: "/h2", host: ["cdn.example"] }, tls_settings: {} } };
+  const shadowrocket = __test.shadowrocketLine(user, trojanH2);
+  assert.match(shadowrocket, /obfs=h2/);
+  assert.match(shadowrocket, /path=%2Fh2/);
+  assert.match(shadowrocket, /obfsParam=cdn\.example/);
+
+  const realityTrojan = { type: "trojan", name: "Reality", host: "node.example", port: 443, protocol_settings: { tls: 2, reality_settings: { server_name: "sni.example", public_key: "key", short_id: "id" } } };
+  assert.match(__test.quantumultXLine(user, realityTrojan), /tls-host=sni\.example/);
+  assert.doesNotMatch(__test.quantumultXLine(user, realityTrojan), /obfs-host=sni\.example/);
+
+  const anytls = __test.singboxOutbound(user, { type: "anytls", name: "AnyTLS", host: "node.example", port: 443, protocol_settings: { tls: {} } });
+  assert.deepEqual(anytls.tls.alpn, ["h3"]);
+});
+
+test("legacy Clash excludes Meta-only fields", () => {
+  const server = { type: "vmess", name: "VMess", host: "node.example", port: 443, protocol_settings: { tls: 1, utls: { enabled: true, fingerprint: "chrome" }, tls_settings: { ech: { enabled: true, config: "ech" } }, multiplex: { enabled: true } } };
+  const classic = __test.clashProxy({ uuid: "uuid" }, server, "clash");
+  assert.equal(classic["client-fingerprint"], undefined);
+  assert.equal(classic.smux, undefined);
+  assert.equal(classic["ech-opts"], undefined);
+  const meta = __test.clashProxy({ uuid: "uuid" }, server, "clashmeta");
+  assert.equal(meta["client-fingerprint"], "chrome");
+  assert.equal(meta.smux.enabled, true);
+  assert.equal(meta["ech-opts"].enable, true);
+});
+
 test("client output filters protocols using upstream allowlists", () => {
   const user = { uuid: "00000000-0000-4000-8000-000000000000", u: 0, d: 0, transfer_enable: 1 };
   const servers = [

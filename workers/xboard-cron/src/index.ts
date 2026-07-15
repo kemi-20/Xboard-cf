@@ -109,48 +109,55 @@ async function checkCommission(env: Env, ts: number) {
     closeWithdraw: Number(await setting(env, "withdraw_close_enable", "0"))
   };
   const shares = settings.distribution ? [settings.l1, settings.l2, settings.l3] : [100];
-  const orders = await env.XBOARD_DB.prepare("SELECT id, user_id, invite_user_id, trade_no, total_amount, commission_balance FROM v2_order WHERE commission_status = 1 AND invite_user_id IS NOT NULL ORDER BY id ASC LIMIT 500").all<Record<string, any>>();
-  for (const order of orders.results || []) {
-    let inviterId = Number(order.invite_user_id);
-    let actual = 0;
-    const statements = [];
-    for (const share of shares) {
-      if (!inviterId || share <= 0) break;
-      const inviter = await env.XBOARD_DB.prepare("SELECT id, invite_user_id FROM v2_user WHERE id = ?").bind(inviterId).first<Record<string, any>>();
-      if (!inviter) break;
-      const amount = Math.trunc(Number(order.commission_balance || 0) * share / 100);
-      if (amount > 0) {
-        const column = settings.closeWithdraw ? "balance" : "commission_balance";
-        statements.push(env.XBOARD_DB.prepare(`UPDATE v2_user SET ${column} = COALESCE(${column}, 0) + ?, updated_at = ? WHERE id = ?`).bind(amount, ts, inviter.id));
-        statements.push(env.XBOARD_DB.prepare("INSERT INTO v2_commission_log(invite_user_id, user_id, order_id, trade_no, order_amount, get_amount, amount, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
-          .bind(Number(inviter.id), Number(order.user_id), Number(order.id), String(order.trade_no || ""), Number(order.total_amount || 0), amount, amount, ts, ts));
-        actual += amount;
+  while (true) {
+    const orders = await env.XBOARD_DB.prepare("SELECT id, user_id, invite_user_id, trade_no, total_amount, commission_balance FROM v2_order WHERE commission_status = 1 AND invite_user_id IS NOT NULL ORDER BY id ASC LIMIT 500").all<Record<string, any>>();
+    if (!(orders.results || []).length) break;
+    for (const order of orders.results || []) {
+      let inviterId = Number(order.invite_user_id);
+      let actual = 0;
+      const statements = [];
+      for (const share of shares) {
+        if (!inviterId || share <= 0) break;
+        const inviter = await env.XBOARD_DB.prepare("SELECT id, invite_user_id FROM v2_user WHERE id = ?").bind(inviterId).first<Record<string, any>>();
+        if (!inviter) break;
+        const amount = Math.trunc(Number(order.commission_balance || 0) * share / 100);
+        if (amount > 0) {
+          const column = settings.closeWithdraw ? "balance" : "commission_balance";
+          statements.push(env.XBOARD_DB.prepare(`UPDATE v2_user SET ${column} = COALESCE(${column}, 0) + ?, updated_at = ? WHERE id = ?`).bind(amount, ts, inviter.id));
+          statements.push(env.XBOARD_DB.prepare("INSERT INTO v2_commission_log(invite_user_id, user_id, order_id, trade_no, order_amount, get_amount, amount, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            .bind(Number(inviter.id), Number(order.user_id), Number(order.id), String(order.trade_no || ""), Number(order.total_amount || 0), amount, amount, ts, ts));
+          actual += amount;
+        }
+        inviterId = Number(inviter.invite_user_id || 0);
       }
-      inviterId = Number(inviter.invite_user_id || 0);
+      statements.push(env.XBOARD_DB.prepare("UPDATE v2_order SET commission_status = 2, actual_commission_balance = ?, updated_at = ? WHERE id = ? AND commission_status = 1").bind(actual, ts, order.id));
+      await env.XBOARD_DB.batch(statements);
     }
-    statements.push(env.XBOARD_DB.prepare("UPDATE v2_order SET commission_status = 2, actual_commission_balance = ?, updated_at = ? WHERE id = ? AND commission_status = 1").bind(actual, ts, order.id));
-    await env.XBOARD_DB.batch(statements);
   }
 }
 
 async function resetTraffic(env: Env, ts: number) {
   const systemMethod = Number(await setting(env, "reset_traffic_method", "1"));
-  const users = await env.XBOARD_DB.prepare(`SELECT u.id, u.u, u.d, u.expired_at, u.next_reset_at, u.reset_count, p.reset_traffic_method
-    FROM v2_user u LEFT JOIN v2_plan p ON p.id = u.plan_id
-    WHERE u.next_reset_at IS NOT NULL AND u.next_reset_at <= ? AND u.plan_id IS NOT NULL
-      AND u.banned = 0 AND (u.expired_at IS NULL OR u.expired_at > ?)`).bind(ts, ts).all<any>();
-  for (const user of users.results || []) {
-    const next = nextResetAt(user, systemMethod, ts + 1);
-    const oldU = Number(user.u || 0), oldD = Number(user.d || 0);
-    const method = user.reset_traffic_method === null || user.reset_traffic_method === undefined ? systemMethod : Number(user.reset_traffic_method);
-    const resetTypes: Record<number, string> = { 0: "first_day_month", 1: "monthly", 3: "first_day_year", 4: "yearly" };
-    await env.XBOARD_DB.batch([
-      env.XBOARD_DB.prepare("UPDATE v2_user SET u = 0, d = 0, reset_count = COALESCE(reset_count, 0) + 1, last_reset_at = ?, next_reset_at = ?, updated_at = ? WHERE id = ? AND next_reset_at IS NOT NULL AND next_reset_at <= ?")
-        .bind(ts, next, ts, user.id, ts),
-      env.XBOARD_DB.prepare(`INSERT INTO v2_traffic_reset_logs(user_id, reset_type, old_u, old_d, old_upload, old_download, old_total, new_upload, new_download, new_total, trigger_source, metadata, reset_time, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 'cron', ?, ?, ?)`).bind(user.id, resetTypes[method] || "manual", oldU, oldD, oldU, oldD, oldU + oldD, JSON.stringify({ trigger_source: "cron" }), ts, ts)
-    ]);
-    await optionalKvPut(env, `user_version:${user.id}`, String(Date.now()));
+  while (true) {
+    const users = await env.XBOARD_DB.prepare(`SELECT u.id, u.u, u.d, u.expired_at, u.next_reset_at, u.reset_count, p.reset_traffic_method
+      FROM v2_user u LEFT JOIN v2_plan p ON p.id = u.plan_id
+      WHERE u.next_reset_at IS NOT NULL AND u.next_reset_at <= ? AND u.plan_id IS NOT NULL
+        AND u.banned = 0 AND (u.expired_at IS NULL OR u.expired_at > ?)
+      ORDER BY u.id ASC LIMIT 100`).bind(ts, ts).all<any>();
+    if (!(users.results || []).length) break;
+    for (const user of users.results || []) {
+      const next = nextResetAt(user, systemMethod, ts + 1);
+      const oldU = Number(user.u || 0), oldD = Number(user.d || 0);
+      const method = user.reset_traffic_method === null || user.reset_traffic_method === undefined ? systemMethod : Number(user.reset_traffic_method);
+      const resetTypes: Record<number, string> = { 0: "first_day_month", 1: "monthly", 3: "first_day_year", 4: "yearly" };
+      await env.XBOARD_DB.batch([
+        env.XBOARD_DB.prepare("UPDATE v2_user SET u = 0, d = 0, reset_count = COALESCE(reset_count, 0) + 1, last_reset_at = ?, next_reset_at = ?, updated_at = ? WHERE id = ? AND next_reset_at IS NOT NULL AND next_reset_at <= ?")
+          .bind(ts, next, ts, user.id, ts),
+        env.XBOARD_DB.prepare(`INSERT INTO v2_traffic_reset_logs(user_id, reset_type, old_u, old_d, old_upload, old_download, old_total, new_upload, new_download, new_total, trigger_source, metadata, reset_time, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 'cron', ?, ?, ?)`).bind(user.id, resetTypes[method] || "manual", oldU, oldD, oldU, oldD, oldU + oldD, JSON.stringify({ trigger_source: "cron" }), ts, ts)
+      ]);
+      await optionalKvPut(env, `user_version:${user.id}`, String(Date.now()));
+    }
   }
 }
 
@@ -179,7 +186,7 @@ async function statistics(env: Env, ts: number, day: number) {
 
 async function cleanupOnlineStatus(env: Env, ts: number) {
   try {
-    await env.XBOARD_DB.prepare("UPDATE v2_user SET online_count = 0 WHERE last_online_at IS NOT NULL AND last_online_at < ?").bind(ts - 600).run();
+    await env.XBOARD_DB.prepare("UPDATE v2_user SET online_count = 0 WHERE last_online_at IS NULL OR last_online_at < ?").bind(ts - 600).run();
   } catch {}
   await env.XBOARD_DB.prepare("DELETE FROM v2_server_machine_load_history WHERE COALESCE(recorded_at, created_at) < ?").bind(ts - 86400).run();
   await env.XBOARD_DB.prepare("UPDATE v2_gift_card_code SET status = 2, updated_at = ? WHERE status = 0 AND expires_at IS NOT NULL AND expires_at < ?").bind(ts, ts).run();
@@ -267,32 +274,41 @@ async function checkOrders(env: Env, ts: number) {
 async function checkTrafficExceeded(env: Env) {
   if (!await optionalKvGet(env, "traffic:pending_check")) return;
   try { await env.XBOARD_KV.delete("traffic:pending_check"); } catch {}
-  let pendingIds: number[] = [];
-  let users: { results?: { id: number }[] };
-  try {
-    const pending = await env.XBOARD_DB.prepare("SELECT u.id, u.banned, u.transfer_enable, u.u, u.d FROM v2_traffic_pending_check p JOIN v2_user u ON u.id = p.user_id ORDER BY p.updated_at ASC LIMIT 1000").all<any>();
-    pendingIds = (pending.results || []).map(row => Number(row.id));
-    users = { results: (pending.results || []).filter(row => !Number(row.banned) && Number(row.transfer_enable) > 0 && Number(row.u || 0) + Number(row.d || 0) >= Number(row.transfer_enable)).map(row => ({ id: Number(row.id) })) };
-  } catch {
-    users = await env.XBOARD_DB.prepare("SELECT id FROM v2_user WHERE banned = 0 AND transfer_enable > 0 AND u + d >= transfer_enable").all<{ id: number }>();
-  }
   const token = await setting(env, "internal_sync_token", await setting(env, "server_token"));
-  const ids = (users.results || []).map(user => Number(user.id));
-  if (ids.length) {
-    try {
-      await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/sync", {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-xboard-internal-token": token },
-        body: JSON.stringify({ scope: "users", user_ids: ids })
-      });
-    } catch {}
-  }
-  if (pendingIds.length) {
-    try {
+  try {
+    while (true) {
+      const pending = await env.XBOARD_DB.prepare("SELECT u.id, u.banned, u.transfer_enable, u.u, u.d FROM v2_traffic_pending_check p JOIN v2_user u ON u.id = p.user_id ORDER BY p.updated_at ASC LIMIT 1000").all<any>();
+      const rows = pending.results || [];
+      if (!rows.length) break;
+      const pendingIds = rows.map(row => Number(row.id));
+      const ids = rows.filter(row => !Number(row.banned) && Number(row.transfer_enable) > 0 && Number(row.u || 0) + Number(row.d || 0) >= Number(row.transfer_enable)).map(row => Number(row.id));
+      if (ids.length) {
+        try {
+          await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/sync", {
+            method: "POST",
+            headers: { "content-type": "application/json", "x-xboard-internal-token": token },
+            body: JSON.stringify({ scope: "users", user_ids: ids })
+          });
+        } catch {}
+      }
       await env.XBOARD_DB.prepare(`DELETE FROM v2_traffic_pending_check WHERE user_id IN (${pendingIds.map(() => "?").join(",")})`).bind(...pendingIds).run();
-      const remaining = await env.XBOARD_DB.prepare("SELECT user_id FROM v2_traffic_pending_check LIMIT 1").first();
-      if (remaining) await optionalKvPut(env, "traffic:pending_check", String(now()));
-    } catch {}
+    }
+  } catch {
+    let cursor = 0;
+    while (true) {
+      const users = await env.XBOARD_DB.prepare("SELECT id FROM v2_user WHERE id > ? AND banned = 0 AND transfer_enable > 0 AND u + d >= transfer_enable ORDER BY id ASC LIMIT 1000").bind(cursor).all<{ id: number }>();
+      const ids = (users.results || []).map(user => Number(user.id));
+      if (!ids.length) break;
+      try {
+        await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/sync", {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-xboard-internal-token": token },
+          body: JSON.stringify({ scope: "users", user_ids: ids })
+        });
+      } catch {}
+      cursor = ids[ids.length - 1];
+      if (ids.length < 1000) break;
+    }
   }
 }
 

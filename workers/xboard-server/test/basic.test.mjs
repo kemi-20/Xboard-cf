@@ -9,6 +9,12 @@ test("xboard-server has an entrypoint", () => {
   assert.match(fs.readFileSync("src/index.ts", "utf8"), /export default/);
 });
 
+test("device state expiry matches the upstream five-minute Redis TTL", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /`node:devices:\$\{nodeId\}`/);
+  assert.match(source, /JSON\.stringify\(next\), \{ expirationTtl: 300 \}/);
+});
+
 test("official server routes use exact method and path matching", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.doesNotMatch(source, /pathname\.includes\(/);

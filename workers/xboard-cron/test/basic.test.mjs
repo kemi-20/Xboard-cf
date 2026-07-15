@@ -40,4 +40,8 @@ test("cron implements the official order, ticket, commission and traffic checks"
   assert.match(source, /WHERE status = 0 AND created_at <= \?/);
   assert.match(source, /WHERE status = 1 ORDER BY id ASC LIMIT 200/);
   assert.match(source, /UPDATE v2_order SET status = 3/);
+  assert.match(source, /ORDER BY u\.id ASC LIMIT 100/);
+  assert.match(source, /last_online_at IS NULL OR last_online_at < \?/);
+  assert.match(source, /while \(true\)[\s\S]*commission_status = 1/);
+  assert.match(source, /v2_traffic_pending_check[\s\S]*LIMIT 1000[\s\S]*DELETE FROM v2_traffic_pending_check/);
 });

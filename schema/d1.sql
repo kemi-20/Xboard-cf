@@ -212,7 +212,7 @@ CREATE TABLE IF NOT EXISTS v2_ticket (
 CREATE TABLE IF NOT EXISTS v2_ticket_message (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ticket_id INTEGER NOT NULL,
-  user_id INTEGER,
+  user_id INTEGER NOT NULL,
   is_admin INTEGER NOT NULL DEFAULT 0,
   message TEXT NOT NULL,
   created_at INTEGER NOT NULL,
@@ -335,7 +335,7 @@ CREATE TABLE IF NOT EXISTS v2_stat_server (
 
 CREATE TABLE IF NOT EXISTS v2_admin_audit_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  admin_id INTEGER,
+  admin_id INTEGER NOT NULL,
   action TEXT NOT NULL,
   target TEXT,
   metadata TEXT,
@@ -550,6 +550,8 @@ CREATE INDEX IF NOT EXISTS idx_v2_user_t ON v2_user(t);
 CREATE INDEX IF NOT EXISTS idx_v2_user_online_count ON v2_user(online_count);
 CREATE INDEX IF NOT EXISTS idx_v2_user_created_at ON v2_user(created_at);
 CREATE INDEX IF NOT EXISTS idx_v2_server_sort ON v2_server(sort);
+CREATE INDEX IF NOT EXISTS idx_v2_admin_audit_log_admin_id ON v2_admin_audit_log(admin_id);
+CREATE INDEX IF NOT EXISTS idx_v2_admin_audit_log_action ON v2_admin_audit_log(action);
 CREATE INDEX IF NOT EXISTS idx_v2_stat_user_record_user ON v2_stat_user(record_at, user_id);
 CREATE INDEX IF NOT EXISTS idx_v2_stat_user_u ON v2_stat_user(u);
 CREATE INDEX IF NOT EXISTS idx_v2_stat_user_d ON v2_stat_user(d);

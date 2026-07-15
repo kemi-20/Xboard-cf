@@ -97,6 +97,28 @@ test("server groups include the user and node counts expected by the official ad
   assert.match(source, /suffix === "\/server\/group\/fetch"\) return ok\(await adminServerGroupRows\(env\)\)/);
 });
 
+test("audited compatibility fixes match upstream order, ticket and statistics behavior", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /async function orderSurplus/);
+  assert.match(source, /surplus_amount, surplus_credit, surplus_order_ids/);
+  assert.match(source, /VALUES \(\?, \?, \?, 0, 0, \?, \?, \?\)/);
+  assert.match(source, /UPDATE v2_ticket SET reply_status = 0/);
+  assert.match(source, /SELECT COALESCE\(SUM\(online_count\), 0\) AS c FROM v2_user WHERE t >=/);
+  assert.match(source, /SELECT COUNT\(\*\) AS c FROM v2_user WHERE t >=/);
+  assert.match(source, /SELECT COALESCE\(SUM\(get_amount\), 0\)/);
+  assert.doesNotMatch(source, /COALESCE\(SUM\(COALESCE\(get_amount, amount, 0\)\)/);
+  assert.match(source, /coupon\.limit_use !== null[\s\S]*Number\(coupon\.limit_use\) <= 0/);
+  assert.match(source, /capacity_limit === null \|\| \(row as any\)\.capacity_limit === undefined/);
+});
+
+test("server validation keeps public and backend ports independent", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /for \(const field of \["type", "name", "host", "port", "server_port", "rate"\]\)/);
+  assert.match(source, /const port = Number\(input\.port\)/);
+  assert.match(source, /const serverPort = Number\(input\.server_port\)/);
+  assert.doesNotMatch(source, /server\.name = `\$\{server\.name \|\| "Node"\} Copy`/);
+});
+
 test("bootstrap preserves renamed default groups", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /INSERT INTO v2_server_group[\s\S]*?ON CONFLICT\(id\) DO NOTHING/);
@@ -565,9 +587,9 @@ test("user knowledge, server availability and invite commission match upstream c
   assert.match(source, /language IS NULL/);
   assert.match(source, /SELECT \$\{selected\} FROM v2_knowledge/);
   assert.match(source, /phpUrlEncode\(subscription\)/);
-  assert.match(source, /SUM\(COALESCE\(get_amount, amount, 0\)\).*invite_user_id/);
+  assert.match(source, /SUM\(get_amount\).*invite_user_id/);
   assert.match(source, /commission_distribution_l1/);
-  assert.match(source, /COALESCE\(get_amount, amount, 0\) > 0/);
+  assert.match(source, /AND get_amount > 0/);
   assert.match(source, /crypto\.subtle\.digest\("SHA-1"/);
   assert.match(source, /coupon\.ended_at !== null/);
 });
