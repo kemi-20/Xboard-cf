@@ -188,8 +188,8 @@ test("audited compatibility fixes match upstream order, ticket and statistics be
   assert.match(source, /surplus_amount, surplus_credit, surplus_order_ids/);
   assert.match(source, /VALUES \(\?, \?, \?, 0, 0, \?, \?, \?\)/);
   assert.match(source, /UPDATE v2_ticket SET reply_status = 0/);
-  assert.match(source, /SELECT COALESCE\(SUM\(online_count\), 0\) AS c FROM v2_user WHERE t >=/);
-  assert.match(source, /SELECT COUNT\(\*\) AS c FROM v2_user WHERE t >=/);
+  assert.match(source, /SELECT COALESCE\(SUM\(online_count\), 0\) AS c FROM v2_user WHERE online_count > 0 AND last_online_at >=/);
+  assert.match(source, /SELECT COUNT\(\*\) AS c FROM v2_user WHERE online_count > 0 AND last_online_at >=/);
   assert.match(source, /SELECT COALESCE\(SUM\(get_amount\), 0\)/);
   assert.doesNotMatch(source, /COALESCE\(SUM\(COALESCE\(get_amount, amount, 0\)\)/);
   assert.match(source, /coupon\.limit_use !== null[\s\S]*Number\(coupon\.limit_use\) <= 0/);

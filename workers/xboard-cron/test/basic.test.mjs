@@ -148,17 +148,17 @@ test("a stale cron owner cannot release its replacement's lock", async () => {
   assert.equal(db.rows.get("schedule:lock:check:order").status, "done");
 });
 
-test("scheduled cron uses one run lock and moves low-priority checks to hourly", () => {
+test("scheduled cron keeps one trigger while locking every upstream task independently", () => {
   const ordinaryMinute = Date.UTC(2026, 6, 15, 4, 17) / 1000;
   const hourlyMinute = Date.UTC(2026, 6, 15, 5, 0) / 1000;
-  assert.deepEqual(__test.scheduledTasks(ordinaryMinute), ["check:order", "check:traffic-exceeded", "reset:traffic"]);
+  assert.deepEqual(__test.scheduledTasks(ordinaryMinute), ["check:order", "check:ticket", "check:commission", "check:traffic-exceeded", "reset:traffic"]);
   assert.deepEqual(__test.scheduledTasks(hourlyMinute), [
-    "check:order", "check:traffic-exceeded", "reset:traffic", "check:ticket", "check:commission", "cleanup:online-status"
+    "check:order", "check:ticket", "check:commission", "check:traffic-exceeded", "reset:traffic", "cleanup:online-status"
   ]);
   const source = fs.readFileSync("src/index.ts", "utf8");
-  assert.match(source, /const claim = await acquireTaskLock\(env, lockName, ts\)/);
-  assert.match(source, /await releaseTaskLock\(env, lockName, claim/);
-  assert.doesNotMatch(source, /for \(const current of tasks\) \{\s*const claim = await acquireTaskLock/);
+  assert.match(source, /for \(const current of tasks\) \{\s*const claim = await acquireTaskLock\(env, current, now\(\)\)/);
+  assert.match(source, /await releaseTaskLock\(env, current, claim/);
+  assert.doesNotMatch(source, /schedule:lock:scheduled/);
 });
 
 test("settings read D1 when KV fails after the memory cache is warm", async () => {

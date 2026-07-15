@@ -644,12 +644,39 @@ test("audited subscription protocol regressions match upstream", () => {
   assert.equal(__test.responseHeaders("clash", { app_name: "XBoard" }, user)["profile-web-page-url"], "");
 });
 
-test("Sing-box TCP HTTP transport omits an empty host like upstream", () => {
+test("Sing-box TCP HTTP transport preserves the upstream empty host array", () => {
   const outbound = __test.singboxOutbound({ uuid: "user" }, {
     type: "vmess", host: "node.example", port: 443,
     protocol_settings: { network: "tcp", network_settings: { header: { type: "http", request: { path: ["/"] } } } }
   });
   assert.equal(outbound.transport.type, "http");
   assert.equal("host" in outbound.transport, true);
-  assert.equal(outbound.transport.host, undefined);
+  assert.deepEqual(outbound.transport.host, []);
+});
+
+test("audited SOCKS, uTLS, TLS defaults and reset-day behavior match upstream", () => {
+  const user = { uuid: "uuid" };
+  const base = { name: "Node", host: "node.example", port: 443 };
+  assert.equal(__test.clashProxy(user, { ...base, type: "socks", protocol_settings: {} }, "clashmeta").type, "socks5");
+
+  const originalRandom = Math.random;
+  Math.random = () => 0.5;
+  try {
+    const randomTls = { ...base, type: "vless", protocol_settings: { tls: 1, utls: { enabled: true, fingerprint: "random" }, tls_settings: {}, network: "tcp" } };
+    assert.equal(__test.clashProxy(user, randomTls, "clashmeta")["client-fingerprint"], "ios");
+    assert.equal(__test.singboxOutbound(user, randomTls).tls.utls.fingerprint, "ios");
+  } finally {
+    Math.random = originalRandom;
+  }
+
+  const noTlsVmess = __test.clashProxy(user, { ...base, type: "vmess", protocol_settings: { tls: 0 } }, "stash");
+  assert.equal(noTlsVmess.tls, false);
+  assert.equal(noTlsVmess["skip-cert-verify"], false);
+  const noTlsVless = __test.clashProxy(user, { ...base, type: "vless", protocol_settings: { tls: 0 } }, "clashmeta");
+  assert.equal(noTlsVless.tls, false);
+
+  const from = Date.UTC(2026, 6, 15, 4, 0) / 1000;
+  const expiry = Date.UTC(2026, 7, 20, 4, 0) / 1000;
+  assert.equal(__test.nextResetAt({ expired_at: expiry, plan_reset_traffic_method: 1 }, 0, from), Date.UTC(2026, 6, 20, 4, 0) / 1000);
+  assert.equal(__test.nextResetAt({ expired_at: expiry, plan_reset_traffic_method: null }, 0, from), Date.UTC(2026, 6, 31, 16, 0) / 1000);
 });

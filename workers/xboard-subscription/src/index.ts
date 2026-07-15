@@ -35,6 +35,14 @@ function b64url(value: string) {
   return b64(value).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
 
+function rawUrlEncode(value: unknown) {
+  return encodeURIComponent(String(value)).replace(/[!'()*]/g, character => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+}
+
+function formUrlEncode(value: unknown) {
+  return rawUrlEncode(value).replace(/%20/g, "+").replace(/~/g, "%7E");
+}
+
 function leftRotate(value: number, amount: number) {
   return (value << amount) | (value >>> (32 - amount));
 }
@@ -107,6 +115,51 @@ function boolSetting(config: Config, key: string, fallback = false) {
   const value = config[key];
   if (value === undefined || value === null || value === "") return fallback;
   return value === true || value === 1 || value === "1" || value === "true";
+}
+
+const SHANGHAI_OFFSET = 8 * 3600;
+
+function shanghaiParts(timestamp: number) {
+  const date = new Date((timestamp + SHANGHAI_OFFSET) * 1000);
+  return {
+    year: date.getUTCFullYear(), month: date.getUTCMonth(), day: date.getUTCDate(),
+    hour: date.getUTCHours(), minute: date.getUTCMinutes(), second: date.getUTCSeconds()
+  };
+}
+
+function shanghaiTimestamp(year: number, month: number, day: number, hour = 0, minute = 0, second = 0) {
+  return Math.floor(Date.UTC(year, month, day, hour, minute, second) / 1000) - SHANGHAI_OFFSET;
+}
+
+function daysInMonth(year: number, month: number) {
+  return new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+}
+
+function nextResetAt(user: any, systemMethod: number, from = now()) {
+  if (user.expired_at === null || user.expired_at === undefined || user.plan_reset_traffic_method === undefined) return null;
+  const method = user.plan_reset_traffic_method === null ? systemMethod : Number(user.plan_reset_traffic_method);
+  if (method === 2) return null;
+  const current = shanghaiParts(from);
+  const expiry = shanghaiParts(Number(user.expired_at));
+  if (method === 0) {
+    const month = current.month === 11 ? 0 : current.month + 1;
+    return shanghaiTimestamp(current.year + (current.month === 11 ? 1 : 0), month, 1);
+  }
+  if (method === 1) {
+    let candidate = shanghaiTimestamp(current.year, current.month, expiry.day, expiry.hour, expiry.minute, expiry.second);
+    if (candidate > from) return candidate;
+    const month = current.month === 11 ? 0 : current.month + 1;
+    const year = current.year + (current.month === 11 ? 1 : 0);
+    return shanghaiTimestamp(year, month, Math.min(expiry.day, daysInMonth(year, month)), expiry.hour, expiry.minute, expiry.second);
+  }
+  if (method === 3) return shanghaiTimestamp(current.year + 1, 0, 1);
+  if (method === 4) {
+    let candidate = shanghaiTimestamp(current.year, expiry.month, expiry.day, expiry.hour, expiry.minute, expiry.second);
+    if (candidate > from) return candidate;
+    const year = current.year + 1;
+    return shanghaiTimestamp(year, expiry.month, Math.min(expiry.day, daysInMonth(year, expiry.month)), expiry.hour, expiry.minute, expiry.second);
+  }
+  return null;
 }
 
 function clientOf(request: Request): Client {
@@ -244,8 +297,9 @@ function decorateServers(servers: any[], user: any, config: Config, rejected: nu
   if (boolSetting(config, "show_info_to_server_enable")) {
     const expire = user.expired_at ? new Date(Number(user.expired_at) * 1000).toISOString().slice(0, 10) : "长期有效";
     output.unshift({ ...output[0], name: `套餐到期：${expire}` });
-    if (user.next_reset_at) {
-      const days = Math.max(0, Math.ceil((Number(user.next_reset_at) - now()) / 86400));
+    const nextReset = nextResetAt(user, Number(config.reset_traffic_method ?? 1));
+    if (nextReset) {
+      const days = Math.max(0, Math.ceil((nextReset - now()) / 86400));
       output.unshift({ ...output[0], name: `距离下次重置剩余：${days} 天` });
     }
     output.unshift({ ...output[0], name: `剩余流量：${traffic(Number(user.transfer_enable || 0) - Number(user.u || 0) - Number(user.d || 0))}` });
@@ -270,7 +324,11 @@ function query(params: Config) {
 }
 
 function tlsFingerprint(ps: Config) {
-  return ps.utls?.enabled ? ps.utls?.fingerprint || "chrome" : undefined;
+  if (!ps.utls?.enabled) return undefined;
+  const fingerprint = ps.utls?.fingerprint || "chrome";
+  if (fingerprint !== "random") return fingerprint;
+  const fingerprints = ["chrome", "firefox", "safari", "ios", "edge", "qq"];
+  return fingerprints[Math.floor(Math.random() * fingerprints.length)];
 }
 
 function networkFields(ps: Config, fallbackHost: string) {
@@ -300,7 +358,8 @@ function trojanNetworkFields(ps: Config, fallbackHost: string) {
 function generalUri(user: any, server: any) {
   const ps = server.protocol_settings || {};
   const password = server.password || user.uuid;
-  const name = encodeURIComponent(server.name);
+  const name = server.type === "vless" ? formUrlEncode(server.name) : rawUrlEncode(server.name);
+  const fingerprint = tlsFingerprint(ps);
   const address = hostOf(server);
   if (server.type === "shadowsocks") {
     const auth = b64url(`${ps.cipher || "aes-128-gcm"}:${password}`);
@@ -312,7 +371,7 @@ function generalUri(user: any, server: any) {
     const networkSettings = ps.network_settings || {};
     const config: Config = { v: "2", ps: server.name, add: server.host, port: String(server.port), id: password, aid: "0", net: network ?? null, type: "none", host: "", path: "", tls: ps.tls ? "tls" : "" };
     if (ps.tls_settings?.server_name) config.sni = ps.tls_settings.server_name;
-    if (tlsFingerprint(ps)) config.fp = tlsFingerprint(ps);
+    if (fingerprint) config.fp = fingerprint;
     if (network === "tcp" && networkSettings.header?.type && networkSettings.header.type !== "none") Object.assign(config, { type: networkSettings.header.type, path: networkSettings.header?.request?.path?.[0] || "/", host: networkSettings.header?.request?.headers?.Host?.[0] || "" });
     else if (network === "ws") Object.assign(config, { type: "ws", path: networkSettings.path || "", host: networkSettings.headers?.Host || "" });
     else if (network === "grpc") Object.assign(config, { type: "grpc", path: networkSettings.serviceName || "" });
@@ -324,15 +383,15 @@ function generalUri(user: any, server: any) {
   if (server.type === "vless") {
     const tlsMode = Number(ps.tls || 0);
     const params: Config = { mode: "multi", security: tlsMode === 2 ? "reality" : tlsMode === 1 ? "tls" : "", encryption: ps.encryption?.enabled ? ps.encryption?.encryption || "none" : "none", flow: ps.flow, ...networkFields(ps, server.host) };
-    if (tlsMode === 1) Object.assign(params, { sni: ps.tls_settings?.server_name, allowInsecure: ps.tls_settings?.allow_insecure ? "1" : undefined, fp: tlsFingerprint(ps) });
-    if (tlsMode === 2) Object.assign(params, { pbk: ps.reality_settings?.public_key, sid: ps.reality_settings?.short_id, sni: ps.reality_settings?.server_name, servername: ps.reality_settings?.server_name, spx: "/", fp: tlsFingerprint(ps) });
+    if (tlsMode === 1) Object.assign(params, { sni: ps.tls_settings?.server_name, allowInsecure: ps.tls_settings?.allow_insecure ? "1" : undefined, fp: fingerprint });
+    if (tlsMode === 2) Object.assign(params, { pbk: ps.reality_settings?.public_key, sid: ps.reality_settings?.short_id, sni: ps.reality_settings?.server_name, servername: ps.reality_settings?.server_name, spx: "/", fp: fingerprint });
     return `vless://${password}@${address}:${server.port}?${query(params)}#${name}`;
   }
   if (server.type === "trojan") {
     const tlsMode = Number(ps.tls ?? 1);
     const params: Config = { ...trojanNetworkFields(ps, server.host) };
-    if (tlsMode === 2) Object.assign(params, { security: "reality", pbk: ps.reality_settings?.public_key, sid: ps.reality_settings?.short_id, sni: ps.reality_settings?.server_name, fp: tlsFingerprint(ps) });
-    else Object.assign(params, { allowInsecure: ps.tls_settings?.allow_insecure ? "1" : "0", peer: ps.tls_settings?.server_name, sni: ps.tls_settings?.server_name, fp: tlsFingerprint(ps) });
+    if (tlsMode === 2) Object.assign(params, { security: "reality", pbk: ps.reality_settings?.public_key, sid: ps.reality_settings?.short_id, sni: ps.reality_settings?.server_name, fp: fingerprint });
+    else Object.assign(params, { allowInsecure: ps.tls_settings?.allow_insecure ? "1" : "0", peer: ps.tls_settings?.server_name, sni: ps.tls_settings?.server_name, fp: fingerprint });
     return `trojan://${password}@${address}:${server.port}?${query(params)}#${name}`;
   }
   if (server.type === "hysteria") {
@@ -356,19 +415,20 @@ function general(user: any, servers: any[], encode = true) {
 
 function clashProxy(user: any, server: any, client: Client = "clashmeta") {
   const ps = server.protocol_settings || {};
-  const base: Config = { name: server.name, type: server.type === "shadowsocks" ? "ss" : server.type, server: server.host, port: Number(server.port), udp: true };
+  const fingerprint = tlsFingerprint(ps);
+  const base: Config = { name: server.name, type: server.type === "shadowsocks" ? "ss" : server.type === "socks" ? "socks5" : server.type, server: server.host, port: Number(server.port), udp: true };
   if (server.type === "shadowsocks") Object.assign(base, { cipher: ps.cipher || "aes-128-gcm", password: server.password || user.uuid, ...clashPluginOptions(ps, client) });
   else if (server.type === "vmess") {
-    Object.assign(base, { uuid: user.uuid, alterId: 0, cipher: "auto", network: ps.network || "tcp", tls: ps.tls ? true : undefined, servername: ps.tls ? ps.tls_settings?.server_name : undefined, "skip-cert-verify": ps.tls ? Boolean(ps.tls_settings?.allow_insecure) : undefined });
+    Object.assign(base, { uuid: user.uuid, alterId: 0, cipher: "auto", network: ps.network || "tcp", tls: client === "stash" ? Boolean(ps.tls) : ps.tls ? true : undefined, servername: ps.tls ? ps.tls_settings?.server_name : undefined, "skip-cert-verify": client === "stash" ? Boolean(ps.tls_settings?.allow_insecure) : ps.tls ? Boolean(ps.tls_settings?.allow_insecure) : undefined });
     applyClashTransport(base, ps, server);
-    applyClashExtras(base, ps, client);
+    applyClashExtras(base, ps, client, fingerprint);
   }
   else if (server.type === "vless") {
     const tlsMode = Number(ps.tls || 0);
     const tlsSettings = tlsMode === 2 ? ps.reality_settings : tlsMode === 1 ? ps.tls_settings : undefined;
-    Object.assign(base, { uuid: user.uuid, alterId: client === "stash" ? undefined : 0, cipher: client === "stash" ? undefined : "auto", flow: client === "stash" && tlsMode !== 2 ? undefined : ps.flow, encryption: client === "stash" ? undefined : ps.encryption?.enabled ? ps.encryption?.encryption || "none" : "none", tls: tlsMode > 0 ? true : undefined, "skip-cert-verify": tlsMode > 0 ? Boolean(tlsSettings?.allow_insecure) : undefined, servername: tlsSettings?.server_name });
+    Object.assign(base, { uuid: user.uuid, alterId: client === "stash" ? undefined : 0, cipher: client === "stash" ? undefined : "auto", flow: client === "stash" && tlsMode !== 2 ? undefined : ps.flow, encryption: client === "stash" ? undefined : ps.encryption?.enabled ? ps.encryption?.encryption || "none" : "none", tls: client === "clashmeta" ? tlsMode > 0 : tlsMode > 0 ? true : undefined, "skip-cert-verify": tlsMode > 0 ? Boolean(tlsSettings?.allow_insecure) : undefined, servername: tlsSettings?.server_name });
     if (tlsMode === 2) base["reality-opts"] = { "public-key": ps.reality_settings?.public_key, "short-id": ps.reality_settings?.short_id };
-    if (client !== "clash" && tlsFingerprint(ps)) base["client-fingerprint"] = tlsFingerprint(ps);
+    if (client !== "clash" && fingerprint) base["client-fingerprint"] = fingerprint;
     const ns = ps.network_settings || {};
     if (ps.network === "tcp" && ns.header?.type === "http") Object.assign(base, { network: "http", "http-opts": { headers: ns.header?.request?.headers, path: ns.header?.request?.path || ["/"] } });
     else if (ps.network === "ws") Object.assign(base, { network: "ws", "ws-opts": { path: ns.path, headers: ns.headers?.Host ? { Host: ns.headers.Host } : undefined } });
@@ -391,7 +451,7 @@ function clashProxy(user: any, server: any, client: Client = "clashmeta") {
     Object.assign(base, { password: server.password || user.uuid, sni: tlsSettings?.server_name, network: ps.network || "tcp", "skip-cert-verify": Boolean(tlsSettings?.allow_insecure) });
     if (tlsMode === 2) base["reality-opts"] = { "public-key": ps.reality_settings?.public_key, "short-id": ps.reality_settings?.short_id };
     applyClashTransport(base, ps, server);
-    applyClashExtras(base, ps, client);
+    applyClashExtras(base, ps, client, fingerprint);
   }
   else if (server.type === "hysteria") {
     delete base.udp;
@@ -456,9 +516,9 @@ function applyClashTransport(base: Config, ps: any, server: any) {
   else base.network = "tcp";
 }
 
-function applyClashExtras(base: Config, ps: any, client: Client) {
+function applyClashExtras(base: Config, ps: any, client: Client, fingerprint?: string) {
   if (client === "clash") return;
-  if (tlsFingerprint(ps)) base["client-fingerprint"] = tlsFingerprint(ps);
+  if (fingerprint) base["client-fingerprint"] = fingerprint;
   if (ps.multiplex?.enabled) base.smux = { enabled: true, protocol: ps.multiplex.protocol || "yamux", "max-connections": ps.multiplex.max_connections, padding: ps.multiplex.padding ? true : undefined, "brutal-opts": ps.multiplex.brutal?.enabled ? { enabled: true, up: ps.multiplex.brutal.up_mbps, down: ps.multiplex.brutal.down_mbps } : undefined };
   if (Number(ps.tls) === 1) {
     const echOptions = clashEchOptions(ps.tls_settings?.ech);
@@ -517,6 +577,7 @@ function yamlProfile(client: Client, template: string, config: Config, user: any
 
 function singboxOutbound(user: any, server: any) {
   const ps = server.protocol_settings || {};
+  const fingerprint = tlsFingerprint(ps);
   const outbound: Config = { type: server.type === "hysteria" && Number(ps.version || 2) === 2 ? "hysteria2" : server.type, tag: server.name, server: server.host, server_port: Number(server.port) };
   if (["vmess", "vless"].includes(server.type)) outbound.uuid = server.password || user.uuid;
   if (["shadowsocks", "trojan", "hysteria", "tuic", "anytls", "socks", "http"].includes(server.type)) outbound.password = server.password || user.uuid;
@@ -546,7 +607,7 @@ function singboxOutbound(user: any, server: any) {
     const tlsSettings = xrayProtocol ? (tlsMode === 2 ? ps.reality_settings : ps.tls_settings) : ps.tls;
     outbound.tls = { enabled: true, server_name: tlsSettings?.server_name, insecure: Boolean(tlsSettings?.allow_insecure), alpn: ps.alpn || (["tuic", "anytls"].includes(server.type) ? ["h3"] : undefined) };
     if (xrayProtocol && tlsMode === 2) outbound.tls.reality = { enabled: true, public_key: ps.reality_settings?.public_key, short_id: ps.reality_settings?.short_id };
-    if (tlsFingerprint(ps)) outbound.tls.utls = { enabled: true, fingerprint: tlsFingerprint(ps) };
+    if (fingerprint) outbound.tls.utls = { enabled: true, fingerprint };
     const ech = xrayProtocol ? (tlsMode === 1 ? ps.tls_settings?.ech : undefined) : ps.tls?.ech;
     if (ech?.enabled) outbound.tls.ech = { enabled: true, config: ech.config ? [ech.config] : undefined, query_server_name: ech.query_server_name };
   }
@@ -554,7 +615,7 @@ function singboxOutbound(user: any, server: any) {
   const ns = ps.network_settings || {};
   if (ps.network === "tcp" && ns.header?.type === "http") {
     const paths = Array.isArray(ns.header?.request?.path) && ns.header.request.path.length ? ns.header.request.path : ["/"];
-    outbound.transport = { type: "http", path: paths[Math.floor(Math.random() * paths.length)], host: ns.header?.request?.headers?.Host || undefined };
+    outbound.transport = { type: "http", path: paths[Math.floor(Math.random() * paths.length)], host: ns.header?.request?.headers?.Host || [] };
   }
   else if (ps.network === "ws") outbound.transport = { type: "ws", path: ns.path, headers: ns.headers?.Host ? { Host: ns.headers.Host } : undefined, max_early_data: 0 };
   else if (ps.network === "grpc") outbound.transport = { type: "grpc", service_name: ns.serviceName };
@@ -731,6 +792,7 @@ function proxyLine(user: any, server: any, style: "surge" | "surfboard") {
 
 function shadowrocketLine(user: any, server: any) {
   const ps = server.protocol_settings || {};
+  const fingerprint = tlsFingerprint(ps);
   const password = server.password || user.uuid;
   const address = hostOf(server);
   const name = encodeURIComponent(server.name);
@@ -743,8 +805,8 @@ function shadowrocketLine(user: any, server: any) {
     const params: Config = { tfo: 1, remark: server.name };
     if (server.type === "vmess") params.alterId = 0;
     if (ps.flow) Object.assign(params, { tls: 1, xtls: ({ none: 0, "xtls-rprx-direct": 1, "xtls-rprx-vision": 2 } as Config)[ps.flow] });
-    if (Number(ps.tls) === 1) Object.assign(params, { tls: 1, allowInsecure: Number(Boolean(ps.tls_settings?.allow_insecure)), peer: ps.tls_settings?.server_name, fp: tlsFingerprint(ps) });
-    else if (Number(ps.tls) === 2) Object.assign(params, { tls: 1, sni: ps.reality_settings?.server_name, pbk: ps.reality_settings?.public_key, sid: ps.reality_settings?.short_id, fp: tlsFingerprint(ps) });
+    if (Number(ps.tls) === 1) Object.assign(params, { tls: 1, allowInsecure: Number(Boolean(ps.tls_settings?.allow_insecure)), peer: ps.tls_settings?.server_name, fp: fingerprint });
+    else if (Number(ps.tls) === 2) Object.assign(params, { tls: 1, sni: ps.reality_settings?.server_name, pbk: ps.reality_settings?.public_key, sid: ps.reality_settings?.short_id, fp: fingerprint });
     const ns = ps.network_settings || {};
     if (ps.network === "tcp" && ns.header?.type && ns.header.type !== "none") {
       const paths = Array.isArray(ns.header?.request?.path) ? ns.header.request.path : [ns.header?.request?.path || "/"];
@@ -1029,7 +1091,8 @@ function responseHeaders(client: Client, config: Config, user: any) {
 }
 
 async function build(request: Request, env: Env, token: string) {
-  const user = await env.XBOARD_DB.prepare("SELECT * FROM v2_user WHERE token = ?").bind(token).first<any>();
+  const user = await env.XBOARD_DB.prepare(`SELECT u.*, p.reset_traffic_method AS plan_reset_traffic_method
+    FROM v2_user u LEFT JOIN v2_plan p ON p.id = u.plan_id WHERE u.token = ?`).bind(token).first<any>();
   if (!user || Number(user.banned) === 1) return { status: 403, body: "Forbidden", headers: {} };
   if (user.expired_at !== null && Number(user.expired_at) < now()) return { status: 403, body: "", headers: { "content-type": "text/plain" } };
   if (Number(user.transfer_enable || 0) <= 0) return { status: 403, body: "", headers: { "content-type": "text/plain" } };
@@ -1039,7 +1102,7 @@ async function build(request: Request, env: Env, token: string) {
   const url = new URL(request.url);
   const requestedTypeInput = url.searchParams.get("types") || "all";
   const requestedTypes = requestedTypeInput === "all" ? [...validServerTypes] : requestedTypeInput.split(/[|,｜]+/).map(value => value.trim()).filter(value => validServerTypes.has(value));
-  const filterKeywords = (url.searchParams.get("filter") || "").length <= 20 ? (url.searchParams.get("filter") || "").split(/[|,｜]+/).map(value => value.trim().toLowerCase()).filter(Boolean) : [];
+  const filterKeywords = (url.searchParams.get("filter") || "").length <= 20 ? (url.searchParams.get("filter") || "").split(/[|,｜]+/).map(value => value.trim()).filter(Boolean) : [];
   const all = (await env.XBOARD_DB.prepare("SELECT * FROM v2_server ORDER BY sort ASC, id ASC").all<any>()).results || [];
   const parentMap = new Map(all.map(server => [Number(server.id), server]));
   const available = all.filter(server => {
@@ -1054,7 +1117,7 @@ async function build(request: Request, env: Env, token: string) {
   });
   const filtered = available.filter(server => {
     if (requestedTypes.length && !requestedTypes.includes(server.type)) return false;
-    if (filterKeywords.length && !filterKeywords.some(keyword => String(server.name).toLowerCase().includes(keyword) || server.tags.map((tag: unknown) => String(tag).toLowerCase()).includes(keyword))) return false;
+    if (filterKeywords.length && !filterKeywords.some(keyword => String(server.name).toLowerCase().includes(keyword.toLowerCase()) || server.tags.map((tag: unknown) => String(tag)).includes(keyword))) return false;
     return true;
   });
   const servers = decorateServers(filtered, user, config, available.length - filtered.length);
@@ -1081,7 +1144,7 @@ async function optionalKvVersion(kv: KVNamespace, key: string) {
   catch { return "0"; }
 }
 
-export const __test = { clientOf, clientDetails, versionAtLeast, filterByClientCompatibility, regexValue, protocolPrefix, traffic, decorateServers, general, generalUri, yamlProfile, clashProxy, singboxOutbound, singboxProfile, singboxCoreVersion, adaptSingboxConfig, shadowsocksProfile, textTemplateProfile, proxyLine, shadowrocketLine, quantumultXLine, loonLine, serverPassword, randomizedPort, replaceByPattern, subscriptionUrl, output, responseHeaders, matchesConfiguredSubscribePath, optionalKvVersion };
+export const __test = { clientOf, clientDetails, versionAtLeast, filterByClientCompatibility, regexValue, protocolPrefix, traffic, nextResetAt, decorateServers, general, generalUri, yamlProfile, clashProxy, singboxOutbound, singboxProfile, singboxCoreVersion, adaptSingboxConfig, shadowsocksProfile, textTemplateProfile, proxyLine, shadowrocketLine, quantumultXLine, loonLine, serverPassword, randomizedPort, replaceByPattern, subscriptionUrl, output, responseHeaders, matchesConfiguredSubscribePath, optionalKvVersion };
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
