@@ -7,6 +7,14 @@ test("xboard-cron has an entrypoint", () => {
   assert.match(fs.readFileSync("src/index.ts", "utf8"), /export default/);
 });
 
+test("migrated boolean settings accept true/false and one/zero strings", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /function booleanSetting\(value: unknown, fallback = false\)/);
+  assert.match(source, /String\(value\)\.toLowerCase\(\) === "true"/);
+  assert.match(source, /booleanSetting\(config\.remind_mail_enable\)/);
+  assert.match(source, /booleanSetting\(await setting\(env, "commission_auto_check_enable"/);
+});
+
 test("scheduled reminders enqueue the official expiry and traffic notifications", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /remind_mail_enable/);

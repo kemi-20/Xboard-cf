@@ -68,9 +68,15 @@ async function setting(env: Env, name: string, fallback = "") {
   return values[name] ?? fallback;
 }
 
+function booleanSetting(value: unknown, fallback = false) {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value === "boolean") return value;
+  return value === 1 || value === "1" || String(value).toLowerCase() === "true";
+}
+
 async function sendReminders(env: Env, ts: number, day: number) {
   const config = await loadSettings(env.XBOARD_DB);
-  if (!Number(config.remind_mail_enable || 0)) return;
+  if (!booleanSetting(config.remind_mail_enable)) return;
   let cursor = 0;
   for (;;) {
     const users = await env.XBOARD_DB.prepare(`SELECT id, email, expired_at, transfer_enable, u, d, remind_expire, remind_traffic
@@ -97,16 +103,16 @@ async function sendReminders(env: Env, ts: number, day: number) {
 }
 
 async function checkCommission(env: Env, ts: number) {
-  if (Number(await setting(env, "commission_auto_check_enable", "1"))) {
+  if (booleanSetting(await setting(env, "commission_auto_check_enable", "1"), true)) {
     await env.XBOARD_DB.prepare("UPDATE v2_order SET commission_status = 1 WHERE commission_status = 0 AND invite_user_id IS NOT NULL AND status = 3 AND updated_at <= ?")
       .bind(ts - 3 * 86400).run();
   }
   const settings = {
-    distribution: Number(await setting(env, "commission_distribution_enable", "0")),
+    distribution: Number(booleanSetting(await setting(env, "commission_distribution_enable", "0"))),
     l1: Number(await setting(env, "commission_distribution_l1", "100")),
     l2: Number(await setting(env, "commission_distribution_l2", "0")),
     l3: Number(await setting(env, "commission_distribution_l3", "0")),
-    closeWithdraw: Number(await setting(env, "withdraw_close_enable", "0"))
+    closeWithdraw: Number(booleanSetting(await setting(env, "withdraw_close_enable", "0")))
   };
   const shares = settings.distribution ? [settings.l1, settings.l2, settings.l3] : [100];
   while (true) {
