@@ -2,7 +2,7 @@ import type { D1Database, KVNamespace, Queue, DurableObjectState, ExecutionConte
 import { now } from "./compat.ts";
 import { invalidateSettingsCache, settings as loadSettings } from "./db.ts";
 import {
-  availableUser, buildNodeConfig, isValidNodeType, normalizeNodeType,
+  availableUser, billableTraffic, buildNodeConfig, isValidNodeType, normalizeNodeType,
   parseJson, parseTraffic, responseEtag, type Row
 } from "./protocol.ts";
 
@@ -232,17 +232,18 @@ async function enqueueTraffic(env: Env, node: Row, raw: unknown) {
   if (!payload.length) return;
   const ts = now();
   const rate = currentRate(node);
+  const billable = billableTraffic(payload);
   const events = [];
-  for (let offset = 0; offset < payload.length; offset += 1000) {
+  for (let offset = 0; offset < billable.length; offset += 1000) {
     events.push({
       body: {
         event_id: crypto.randomUUID(), type: "traffic", server_id: Number(node.id),
-        server_type: String(node.type), rate, payload: payload.slice(offset, offset + 1000), created_at: ts
+        server_type: String(node.type), rate, payload: billable.slice(offset, offset + 1000), created_at: ts
       }
     });
   }
   if (events.length === 1) await env.TRAFFIC_EVENTS.send(events[0].body);
-  else await env.TRAFFIC_EVENTS.sendBatch(events);
+  else if (events.length > 1) await env.TRAFFIC_EVENTS.sendBatch(events);
   await reportStatus(env, "node", Number(node.id), {
     machine_id: Number(node.machine_id || 0) || null,
     last_push_at: ts,

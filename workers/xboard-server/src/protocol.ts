@@ -208,6 +208,10 @@ export function parseTraffic(input: unknown): Array<{ user_id: number; u: number
   return output;
 }
 
+export function billableTraffic(rows: Array<{ user_id: number; u: number; d: number }>) {
+  return rows.filter(row => row.u > 0 || row.d > 0);
+}
+
 export async function responseEtag(data: unknown): Promise<string> {
   // PHP json_encode escapes slashes and each UTF-16 code unit, including surrogate pairs.
   const encoded = JSON.stringify(data)

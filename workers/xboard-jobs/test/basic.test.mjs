@@ -59,16 +59,32 @@ test("traffic events use event-level idempotency and conditional exceeded checks
   const source = fs.readFileSync("src/index.ts", "utf8");
   const wrangler = fs.readFileSync("wrangler.toml", "utf8");
   assert.doesNotMatch(source, /event\.event_id}:user:/);
-  assert.match(source, /const users = new Map/);
-  assert.match(source, /const results = await runOnce\(env, event\.event_id, "traffic"/);
+  assert.match(source, /async function claimTrafficEvents/);
+  assert.match(source, /aggregateTrafficEvents\(claimed\.map/);
+  assert.match(source, /UPDATE v2_job_logs SET status = 'done'/);
   assert.match(source, /INSERT INTO v2_traffic_pending_check/);
   assert.match(source, /u \+ d >= transfer_enable/);
   assert.match(source, /ON CONFLICT\(user_id\) DO UPDATE/);
   assert.match(source, /pendingResultIndexes\.some/);
+  assert.match(source, /trafficMessages = batch\.messages\.filter/);
   assert.match(wrangler, /dead_letter_queue = "traffic-events-dlq"/);
   assert.match(wrangler, /dead_letter_queue = "mail-events-dlq"/);
   assert.match(wrangler, /max_retries = 5/);
-  assert.match(wrangler, /queue = "traffic-events"[\s\S]*?max_batch_size = 1/);
+  assert.match(wrangler, /queue = "traffic-events"[\s\S]*?max_batch_size = 10/);
+  assert.match(wrangler, /queue = "traffic-events"[\s\S]*?max_batch_timeout = 5/);
+});
+
+test("traffic batches aggregate users and servers while preserving rate semantics", () => {
+  const aggregate = __test.aggregateTrafficEvents([
+    { server_id: 1, server_type: "vless", rate: 2, payload: [{ user_id: 7, u: 10, d: 5 }, { user_id: 8, u: 0, d: 0 }] },
+    { server_id: 1, server_type: "vless", rate: 3, payload: [{ user_id: 7, u: 4, d: 6 }] },
+    { server_id: 2, server_type: "trojan", rate: 1, payload: [{ user_id: 7, u: 1, d: 2 }] }
+  ]);
+  assert.deepEqual(aggregate.users.get(7), { u: 33, d: 30 });
+  assert.equal(aggregate.users.has(8), false);
+  assert.deepEqual(aggregate.servers.get("1:vless"), { serverId: 1, serverType: "vless", u: 14, d: 11 });
+  assert.deepEqual(aggregate.userStats.get("7:1:vless"), { userId: 7, serverId: 1, serverType: "vless", u: 32, d: 28, rate: 3 });
+  assert.equal(aggregate.transferUsed, 63);
 });
 
 function jobLogDb() {

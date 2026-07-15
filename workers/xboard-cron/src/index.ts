@@ -363,24 +363,34 @@ async function releaseTaskLock(env: Env, task: string, claim: string, ts: number
     .bind(ts, `schedule:lock:${task}`, claim).run();
 }
 
+function scheduledTasks(ts: number) {
+  const time = shanghaiParts(ts);
+  return [
+    "check:order",
+    "check:traffic-exceeded",
+    "reset:traffic",
+    ...(time.minute === 0 ? ["check:ticket", "check:commission"] : []),
+    ...(time.minute % 5 === 0 ? ["cleanup:online-status"] : []),
+    ...(time.hour === 0 && time.minute === 0 ? ["reset:log"] : []),
+    ...(time.hour === 0 && time.minute >= 10 && time.minute < 15 ? ["xboard:statistics"] : []),
+    ...(time.hour === 11 && time.minute === 30 ? ["send:remindMail"] : [])
+  ];
+}
+
 async function run(env: Env, task = "scheduled") {
   const ts = now();
   await optionalKvPut(env, "schedule:last_check_at", String(ts), 3600);
   const day = dayStart(ts);
-  const time = shanghaiParts(ts);
   const tasks = task === "all"
     ? ["check:order", "check:ticket", "check:commission", "check:traffic-exceeded", "reset:traffic", "cleanup:online-status", "reset:log", "xboard:statistics", "send:remindMail"]
     : task === "scheduled"
-      ? ["check:order", "check:ticket", "check:commission", "check:traffic-exceeded", "reset:traffic",
-          ...(time.minute % 5 === 0 ? ["cleanup:online-status"] : []),
-          ...(time.hour === 0 && time.minute === 0 ? ["reset:log"] : []),
-          ...(time.hour === 0 && time.minute >= 10 && time.minute < 15 ? ["xboard:statistics"] : []),
-          ...(time.hour === 11 && time.minute === 30 ? ["send:remindMail"] : [])]
+      ? scheduledTasks(ts)
       : [task];
-  for (const current of tasks) {
-    const claim = await acquireTaskLock(env, current, ts);
-    if (!claim) continue;
-    try {
+  const lockName = task === "scheduled" ? "scheduled" : task;
+  const claim = await acquireTaskLock(env, lockName, ts);
+  if (!claim) return;
+  try {
+    for (const current of tasks) {
       if (current === "check:order") await checkOrders(env, ts);
       else if (current === "check:ticket") await checkTickets(env, ts);
       else if (current === "check:commission") await checkCommission(env, ts);
@@ -391,13 +401,13 @@ async function run(env: Env, task = "scheduled") {
       else if (current === "xboard:statistics") await statistics(env, ts, day);
       else if (current === "send:remindMail") await sendReminders(env, ts, day);
       await optionalKvPut(env, `schedule:last_run:${current}`, String(ts));
-    } finally {
-      await releaseTaskLock(env, current, claim, now());
     }
+  } finally {
+    await releaseTaskLock(env, lockName, claim, now());
   }
 }
 
-export const __test = { dayStart, nextResetAt, addOrderMonths, acquireTaskLock, releaseTaskLock, checkTrafficExceeded };
+export const __test = { dayStart, nextResetAt, addOrderMonths, acquireTaskLock, releaseTaskLock, scheduledTasks, checkTrafficExceeded };
 
 export default {
   async fetch(request: Request) {

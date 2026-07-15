@@ -144,8 +144,10 @@ test("a KV outage falls straight through to D1 without a second KV attempt", asy
 
 test("large traffic reports are split before entering the queue", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /const billable = billableTraffic\(payload\)/);
   assert.match(source, /offset \+= 1000/);
-  assert.match(source, /payload\.slice\(offset, offset \+ 1000\)/);
+  assert.match(source, /billable\.slice\(offset, offset \+ 1000\)/);
+  assert.match(source, /else if \(events\.length > 1\)/);
   assert.match(source, /TRAFFIC_EVENTS\.sendBatch\(events\)/);
 });
 

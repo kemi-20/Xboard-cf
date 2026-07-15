@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  availableUser, buildNodeConfig, md5, normalizeNodeType,
+  availableUser, billableTraffic, buildNodeConfig, md5, normalizeNodeType,
   parseTraffic, responseEtag, shadowsocksServerKey
 } from "../src/protocol.ts";
 
@@ -88,6 +88,15 @@ test("filters traffic payload entries to the official two-counter format", () =>
   ]);
   assert.deepEqual(parseTraffic([null, [11, 22], [33, 44]]), [
     { user_id: 1, u: 11, d: 22 }, { user_id: 2, u: 33, d: 44 }
+  ]);
+});
+
+test("zero traffic is excluded from billing without changing parsed online users", () => {
+  const parsed = parseTraffic({ "1": [0, 0], "2": [10, 0], "3": [0, 20] });
+  assert.equal(parsed.length, 3);
+  assert.deepEqual(billableTraffic(parsed), [
+    { user_id: 2, u: 10, d: 0 },
+    { user_id: 3, u: 0, d: 20 }
   ]);
 });
 
