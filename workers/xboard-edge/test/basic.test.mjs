@@ -1,10 +1,35 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { spawnSync } from "node:child_process";
 
 test("xboard-edge has an entrypoint", () => {
   assert.ok(fs.existsSync("src/index.ts"));
   assert.match(fs.readFileSync("src/index.ts", "utf8"), /export default/);
+});
+
+test("admin authentication accepts raw and Bearer Authorization tokens", () => {
+  const script = `
+    const { getBearer } = await import("./src/compat.ts");
+    const read = (headers) => getBearer(new Request("https://audit.invalid", { headers }));
+    console.log(JSON.stringify({
+      raw: read({ authorization: "raw-session-token" }),
+      bearer: read({ authorization: "Bearer raw-session-token" }),
+      emptyBearer: read({ authorization: "Bearer" }),
+      compatibility: read({ "x-token": "compat-session-token" })
+    }));
+  `;
+  const result = spawnSync(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", script], {
+    cwd: process.cwd(),
+    encoding: "utf8"
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout.trim()), {
+    raw: "raw-session-token",
+    bearer: "raw-session-token",
+    emptyBearer: null,
+    compatibility: "compat-session-token"
+  });
 });
 
 test("new installations default node polling to five minutes", () => {

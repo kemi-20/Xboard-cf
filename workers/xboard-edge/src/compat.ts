@@ -91,7 +91,10 @@ export function md5(input: string) {
 }
 
 export function getBearer(request: Request): string | null {
-  const h = request.headers.get("authorization") || "";
-  if (h.toLowerCase().startsWith("bearer ")) return h.slice(7).trim();
+  const h = (request.headers.get("authorization") || "").trim();
+  if (h) {
+    if (/^bearer(?:\s|$)/i.test(h)) return h.replace(/^bearer\s*/i, "").trim() || null;
+    return h;
+  }
   return request.headers.get("x-token") || request.headers.get("token");
 }
