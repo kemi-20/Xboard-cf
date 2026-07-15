@@ -28,7 +28,7 @@ test("builds the official VLESS node configuration shape", () => {
     route_ids: "[2]", custom_outbounds: "[]", custom_routes: "[]", cert_config: null
   }, [{ id: 2, match: '["domain:example.com"]', action: "block", action_value: null }]);
   assert.deepEqual(config, {
-    protocol: "vless", listen_ip: "0.0.0.0", server_port: 443, network: "tcp", networkSettings: {},
+    protocol: "vless", listen_ip: "0.0.0.0", server_port: 443, network: "tcp", networkSettings: null,
     tls: 2, flow: "xtls-rprx-vision", decryption: "private",
     tls_settings: { server_name: "www.example.com", private_key: "key" }, multiplex: { enabled: false },
     routes: [{ id: 2, match: ["domain:example.com"], action: "block", action_value: null }]

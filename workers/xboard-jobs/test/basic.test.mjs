@@ -35,7 +35,7 @@ test("traffic statistics persist the official server_rate field", () => {
 test("mail templates override fallbacks and provider credentials stay protocol-specific", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.doesNotMatch(source, /if \(payload\.html \|\| payload\.text\) return payload/);
-  assert.match(source, /render\(String\(template\.subject \|\| ""\), vars\) \|\| render\(String\(payload\.subject \|\| ""\), vars\)/);
+  assert.match(source, /render\(String\(template\.subject \|\| ""\), renderVars\) \|\| render\(String\(payload\.subject \|\| ""\), renderVars\)/);
   assert.match(source, /setting\(env, "email_password"\)/);
   assert.doesNotMatch(source, /resend_api_key/);
   assert.match(source, /replace\(\/\[<>\]\/g, ""\)/);
@@ -139,4 +139,12 @@ test("settings read D1 when KV fails after the memory cache is warm", async () =
   } finally {
     Date.now = originalNow;
   }
+});
+
+test("database mail templates use safe variables and preserve text line breaks", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /function safeMailVars/);
+  assert.match(source, /escapeHtml\(value\)/);
+  assert.match(source, /contentMode === "text"/);
+  assert.match(source, /mailLogin:/);
 });

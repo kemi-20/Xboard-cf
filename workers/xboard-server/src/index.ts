@@ -168,7 +168,10 @@ async function routeRows(env: Env, node: Row): Promise<Row[]> {
 }
 
 async function nodeConfig(env: Env, node: Row) {
-  const config = buildNodeConfig(node, await routeRows(env, node));
+  const parent = Number(node.parent_id) > 0
+    ? await env.XBOARD_DB.prepare("SELECT created_at FROM v2_server WHERE id = ?").bind(Number(node.parent_id)).first<{ created_at: number }>()
+    : null;
+  const config = buildNodeConfig({ ...node, parent_created_at: parent?.created_at }, await routeRows(env, node));
   config.base_config = {
     push_interval: Number(await setting(env, "server_push_interval", "300")),
     pull_interval: Number(await setting(env, "server_pull_interval", "300"))
@@ -493,6 +496,11 @@ async function nodePushTarget(env: Env, node: Row) {
     || (Number(node.machine_id) > 0 ? `machine:${node.machine_id}` : `node:${node.id}`);
 }
 
+async function nodeWebsocketIsAlive(env: Env, nodeId: number) {
+  try { return Boolean(await env.XBOARD_KV.get(`node:ws:alive:${nodeId}`)); }
+  catch { return true; }
+}
+
 function websocketError(message: string) {
   const pair = new WebSocketPair();
   const [client, server] = Object.values(pair) as [WebSocket, WebSocket];
@@ -504,6 +512,7 @@ function websocketError(message: string) {
 
 async function syncNode(env: Env, node: Row) {
   if (!Number(node.enabled ?? 1)) return;
+  if (!await nodeWebsocketIsAlive(env, Number(node.id))) return;
   const target = await nodePushTarget(env, node);
   const suffix = target.startsWith("machine:") ? { node_id: Number(node.id) } : {};
   await pushDo(env, target, "sync.config", { config: await nodeConfig(env, node), ...suffix });
@@ -511,7 +520,7 @@ async function syncNode(env: Env, node: Row) {
 }
 
 function userIsAvailable(user: Row | null): user is Row {
-  if (!user || !Number(user.group_id) || Number(user.banned || 0) === 1) return false;
+  if (!user || !Number(user.plan_id) || !Number(user.group_id) || Number(user.banned || 0) === 1) return false;
   if (Number(user.u || 0) + Number(user.d || 0) >= Number(user.transfer_enable || 0)) return false;
   return user.expired_at === null || user.expired_at === undefined || Number(user.expired_at) >= now();
 }
@@ -531,6 +540,7 @@ async function syncUserChange(env: Env, userId: number, oldGroupId?: number) {
   const canAdd = userIsAvailable(user);
   let sent = 0;
   for (const node of await nodesForGroups(env, groups)) {
+    if (!await nodeWebsocketIsAlive(env, Number(node.id))) continue;
     const nodeGroups = new Set(parseJson<unknown[]>(node.group_ids, []).map(Number));
     const action = canAdd && nodeGroups.has(currentGroupId) ? "add" : "remove";
     const users = action === "add" && user ? [availableUser(user)] : [{ id: userId }];
@@ -550,6 +560,7 @@ async function syncUsersChange(env: Env, userIds: number[]) {
   const groups = new Set([...groupByUser.values()].filter(Boolean));
   let sent = 0;
   for (const node of await nodesForGroups(env, groups)) {
+    if (!await nodeWebsocketIsAlive(env, Number(node.id))) continue;
     const nodeGroups = new Set(parseJson<unknown[]>(node.group_ids, []).map(Number));
     const affected = ids.filter(id => nodeGroups.has(groupByUser.get(id) || 0)).map(id => ({ id }));
     if (!affected.length) continue;
@@ -568,6 +579,8 @@ async function syncAll(env: Env) {
   }
   const machines = await env.XBOARD_DB.prepare("SELECT * FROM v2_server_machine").all<Row>();
   for (const machine of machines.results || []) {
+    const online = await env.XBOARD_DB.prepare("SELECT id FROM v2_server WHERE machine_id = ? AND enabled = 1").bind(machine.id).all<{ id: number }>();
+    if (!(await Promise.all((online.results || []).map(node => nodeWebsocketIsAlive(env, Number(node.id))))).some(Boolean)) continue;
     await pushDo(env, `machine:${machine.id}`, "sync.nodes", { nodes: (await machineNodes(env, machine)).nodes });
   }
 }

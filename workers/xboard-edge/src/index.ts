@@ -1216,7 +1216,7 @@ async function trafficRank(env: Env, url: URL) {
   if (type === "node") {
     try {
       const rows = await env.XBOARD_DB.prepare(
-        "SELECT s.name AS name, COALESCE(SUM(ss.u + ss.d), 0) AS value FROM v2_stat_server ss LEFT JOIN v2_server s ON s.id = ss.server_id WHERE ss.record_at >= ? AND ss.record_at <= ? GROUP BY ss.server_id ORDER BY value DESC LIMIT 10"
+        "SELECT s.name AS name, COALESCE(SUM(ss.u + ss.d), 0) AS value FROM v2_stat_server ss LEFT JOIN v2_server s ON s.id = ss.server_id WHERE ss.record_at >= ? AND ss.record_at < ? AND COALESCE(ss.record_type, 'd') = 'd' GROUP BY ss.server_id ORDER BY value DESC LIMIT 10"
       ).bind(start, end).all<{ name: string; value: number }>();
       const ranked = (rows.results || []).map(row => ({ name: row.name || "Node", value: Number(row.value || 0), change: 0 }));
       if (ranked.length) return ranked;
@@ -1228,7 +1228,7 @@ async function trafficRank(env: Env, url: URL) {
   }
   try {
     const rows = await env.XBOARD_DB.prepare(
-      "SELECT u.email AS name, COALESCE(SUM(su.u + su.d), 0) AS value FROM v2_stat_user su LEFT JOIN v2_user u ON u.id = su.user_id WHERE su.record_at >= ? AND su.record_at <= ? GROUP BY su.user_id ORDER BY value DESC LIMIT 10"
+      "SELECT u.email AS name, COALESCE(SUM(su.u + su.d), 0) AS value FROM v2_stat_user su LEFT JOIN v2_user u ON u.id = su.user_id WHERE su.record_at >= ? AND su.record_at < ? AND COALESCE(su.record_type, 'd') = 'd' GROUP BY su.user_id ORDER BY value DESC LIMIT 10"
     ).bind(start, end).all<{ name: string; value: number }>();
     const ranked = (rows.results || []).map(row => ({ name: row.name || "User", value: Number(row.value || 0), change: 0 }));
     if (ranked.length) return ranked;
@@ -1780,24 +1780,43 @@ async function generateAdminUsers(request: Request, env: Env) {
   const prefix = String(input.email_prefix || "").trim();
   const count = Math.min(1000, Math.max(1, Number(input.generate_count || 1)));
   if (!suffix) return fail("邮箱后缀不能为空", 422, 422);
-  const planId = nullableNumber(input.plan_id);
-  const plan = planId ? await env.XBOARD_DB.prepare("SELECT id, group_id FROM v2_plan WHERE id = ?").bind(planId).first<Record<string, any>>() : null;
-  if (planId && !plan) return fail("订阅计划不存在", 400, 400202);
+  const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
+  const requestedPlanId = nullableNumber(input.plan_id);
+  const trialPlanId = requestedPlanId ? null : nullableNumber(pickSetting(all, "try_out_plan_id", 0));
+  const planId = requestedPlanId || trialPlanId;
+  const plan = planId ? await env.XBOARD_DB.prepare("SELECT id, group_id, transfer_enable, speed_limit, device_limit FROM v2_plan WHERE id = ?").bind(planId).first<Record<string, any>>() : null;
+  if (requestedPlanId && !plan) return fail("订阅计划不存在", 400, 400202);
+  const emails = Array.from({ length: count }, (_, index) => {
+    const local = prefix ? (count > 1 ? `${prefix}_${index + 1}` : prefix) : randomString(6).toLowerCase();
+    return `${local}@${suffix}`;
+  });
+  if (new Set(emails).size !== emails.length) return fail("生成的邮箱存在重复", 400, 400201);
+  for (let offset = 0; offset < emails.length; offset += 80) {
+    const chunk = emails.slice(offset, offset + 80);
+    const duplicate = await env.XBOARD_DB.prepare(`SELECT email FROM v2_user WHERE email IN (${chunk.map(() => "?").join(",")}) LIMIT 1`).bind(...chunk).first<{ email: string }>();
+    if (duplicate) return fail(`邮箱 ${duplicate.email} 已存在于系统中`, 400, 400201);
+  }
   const generated: Record<string, any>[] = [];
+  const statements: D1PreparedStatement[] = [];
   const ts = now();
-  for (let index = 1; index <= count; index++) {
-    const local = prefix ? (count > 1 ? `${prefix}_${index}` : prefix) : randomString(6).toLowerCase();
-    const email = `${local}@${suffix}`;
-    if (await env.XBOARD_DB.prepare("SELECT id FROM v2_user WHERE email = ?").bind(email).first()) return fail(`邮箱 ${email} 已存在于系统中`, 400, 400201);
+  const expiredAt = nullableNumber(input.expired_at) ?? (trialPlanId && plan ? ts + Number(pickSetting(all, "try_out_hour", 1)) * 3600 : null);
+  for (const email of emails) {
     const password = String(input.password || email);
     const userUuid = uuid();
     const userToken = token(16);
-    const result = await env.XBOARD_DB.prepare(`INSERT INTO v2_user(email, password, uuid, token, plan_id, group_id, expired_at, transfer_enable, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
-      email, await hashPassword(password), userUuid, userToken, planId, plan?.group_id ?? null,
-      nullableNumber(input.expired_at), Number(planId ? (await env.XBOARD_DB.prepare("SELECT transfer_enable FROM v2_plan WHERE id = ?").bind(planId).first<any>())?.transfer_enable || 0 : 0) * 1073741824, ts, ts
-    ).run();
-    generated.push({ id: Number((result.meta as any)?.last_row_id || 0), email, password, expired_at: input.expired_at || null, uuid: userUuid, created_at: ts, subscribe_url: await subscribeUrl(request, env, userToken) });
+    statements.push(env.XBOARD_DB.prepare(`INSERT INTO v2_user(email, password, password_algo, password_salt, uuid, token, plan_id, group_id, expired_at, transfer_enable, speed_limit, device_limit, remind_expire, remind_traffic, created_at, updated_at)
+      VALUES (?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+      email, await hashPassword(password), userUuid, userToken, plan ? planId : null, plan?.group_id ?? null,
+      expiredAt, Number(plan?.transfer_enable || 0) * 1073741824, plan?.speed_limit ?? null, plan?.device_limit ?? null,
+      boolNumber(pickSetting(all, "default_remind_expire", 1), 1), boolNumber(pickSetting(all, "default_remind_traffic", 1), 1), ts, ts
+    ));
+    generated.push({ email, password, expired_at: expiredAt, uuid: userUuid, created_at: ts, subscribe_url: await subscribeUrl(request, env, userToken) });
+  }
+  try {
+    const results = await env.XBOARD_DB.batch(statements);
+    results.forEach((result, index) => { generated[index].id = Number((result.meta as any)?.last_row_id || 0); });
+  } catch {
+    return fail("生成失败", 500, 500);
   }
   if (input.download_csv) return csvResponse("users.csv", [["账号", "密码", "过期时间", "UUID", "创建时间", "订阅地址"], ...generated.map(user => [user.email, user.password, user.expired_at || "长期有效", user.uuid, user.created_at, user.subscribe_url])]);
   return json({ code: 0, message: count > 1 ? "批量生成成功" : "生成成功", data: count > 1 ? generated : true });
@@ -1855,24 +1874,32 @@ async function audit(env: Env, adminId: number, request: Request, path: string) 
 }
 
 const mailTemplateMeta: Record<string, { label: string; required_vars: string[]; optional_vars: string[] }> = {
-  verify: { label: "邮箱验证码", required_vars: ["name", "code", "url"], optional_vars: [] },
-  mailLogin: { label: "邮件快捷登录", required_vars: ["name", "link", "url"], optional_vars: [] },
-  notify: { label: "站点通知", required_vars: ["name", "content", "url"], optional_vars: [] },
-  remind_expire: { label: "服务到期提醒", required_vars: ["name", "url"], optional_vars: [] },
-  remind_traffic: { label: "流量使用提醒", required_vars: ["name", "url"], optional_vars: [] }
+  verify: { label: "邮箱验证码", required_vars: ["code"], optional_vars: ["name", "url"] },
+  mailLogin: { label: "邮件快捷登录", required_vars: ["link"], optional_vars: ["name", "url"] },
+  notify: { label: "站点通知", required_vars: ["content"], optional_vars: ["name", "url"] },
+  remindExpire: { label: "服务到期提醒", required_vars: [], optional_vars: ["name", "url"] },
+  remindTraffic: { label: "流量使用提醒", required_vars: [], optional_vars: ["name", "url"] }
 };
 
 const mailTemplateDefaults: Record<string, { subject: string; content: string }> = {
   verify: { subject: "{{name}} - 邮箱验证码", content: "您的验证码是：{{code}}。返回 {{url}}" },
   mailLogin: { subject: "登录到 {{name}}", content: "请使用以下链接登录：{{link}}\n\n{{url}}" },
   notify: { subject: "{{name}} - 站点通知", content: "{{content}}\n\n{{url}}" },
-  remind_expire: { subject: "{{name}} - 服务即将到期", content: "您的服务即将到期，请及时续费。{{url}}" },
-  remind_traffic: { subject: "{{name}} - 流量使用提醒", content: "您的流量使用量已接近上限。{{url}}" }
+  remindExpire: { subject: "{{name}} - 服务即将到期", content: "您的服务即将到期，请及时续费。{{url}}" },
+  remindTraffic: { subject: "{{name}} - 流量使用提醒", content: "您的流量使用量已接近上限。{{url}}" }
 };
+
+function canonicalMailTemplateName(name: string) {
+  return name === "remind_expire" ? "remindExpire" : name === "remind_traffic" ? "remindTraffic" : name;
+}
+
+function legacyMailTemplateName(name: string) {
+  return name === "remindExpire" ? "remind_expire" : name === "remindTraffic" ? "remind_traffic" : name;
+}
 
 async function adminMailTemplateList(env: Env) {
   const result = await env.XBOARD_DB.prepare("SELECT name, subject, updated_at FROM v2_mail_templates").all<Record<string, any>>();
-  const templates = new Map((result.results || []).map(row => [String(row.name), row]));
+  const templates = new Map((result.results || []).map(row => [canonicalMailTemplateName(String(row.name)), row]));
   return Object.entries(mailTemplateMeta).map(([name, meta]) => ({
     name,
     label: meta.label,
@@ -1883,9 +1910,11 @@ async function adminMailTemplateList(env: Env) {
 }
 
 async function adminMailTemplateGet(env: Env, name: string) {
+  name = canonicalMailTemplateName(name);
   const meta = mailTemplateMeta[name];
   if (!meta) return null;
-  const row = await env.XBOARD_DB.prepare("SELECT name, subject, content FROM v2_mail_templates WHERE name = ?").bind(name).first<Record<string, any>>();
+  const row = await env.XBOARD_DB.prepare("SELECT name, subject, content FROM v2_mail_templates WHERE name IN (?, ?) ORDER BY CASE WHEN name = ? THEN 0 ELSE 1 END LIMIT 1")
+    .bind(name, legacyMailTemplateName(name), name).first<Record<string, any>>();
   return {
     name,
     label: meta.label,
@@ -1927,12 +1956,13 @@ async function queueMail(env: Env, payload: { to: string; subject: string; conte
 async function queueTemplateMail(env: Env, name: string, email: string, vars: Record<string, unknown>, subjectOverride?: string) {
   const template = await adminMailTemplateGet(env, name);
   if (!template) throw new Error("模板不存在");
-  return queueMail(env, {
-    to: email,
-    subject: renderMailText(subjectOverride || template.subject, vars),
-    content: renderMailText(template.content, vars),
-    template_name: name
+  const eventId = `mail:${crypto.randomUUID()}`;
+  await env.MAIL_EVENTS.send({
+    event_id: eventId,
+    type: "mail",
+    payload: { to: email, subject: subjectOverride || template.subject, template_name: canonicalMailTemplateName(name), vars, content_mode: "text" }
   });
+  return eventId;
 }
 
 type EmailProvider = "maileroo" | "brevo";
@@ -2070,7 +2100,7 @@ async function login(request: Request, env: Env, admin = false) {
     if (limitEnabled && windowSeconds > 0) await optionalKvPutTtl(env, rateKey, String(attempts + 1), windowSeconds);
     return fail("账号或密码错误", 401, 401);
   }
-  if (Number(user.banned || 0) === 1) return fail("账号已被封禁", 403, 403);
+  if (Number(user.banned || 0) === 1) return fail("账号已被封禁", 400, 400);
   try { await env.XBOARD_KV.delete(rateKey); } catch {}
   const accessToken = await createSession(env.XBOARD_DB, env.XBOARD_KV, user, admin);
   await env.XBOARD_DB.prepare("UPDATE v2_user SET last_login_at = ?, last_login_ip = ?, updated_at = ? WHERE id = ?").bind(now(), requestIp(request), now(), user.id).run();
@@ -2292,8 +2322,8 @@ async function adminTicket(request: Request, env: Env, route: string, adminId: n
     return ok(true);
   }
   if (route === "/ticket/close") {
-    await env.XBOARD_DB.prepare("UPDATE v2_ticket SET status = 1, updated_at = ? WHERE id = ?").bind(now(), id).run();
-    return ok(true);
+    const result = await env.XBOARD_DB.prepare("UPDATE v2_ticket SET status = 1, updated_at = ? WHERE id = ?").bind(now(), id).run();
+    return Number((result.meta as any)?.changes || 0) === 1 ? ok(true) : fail("工单不存在", 400, 400202);
   }
   return null;
 }
@@ -2340,7 +2370,8 @@ async function adminCoupon(request: Request, env: Env, route: string): Promise<R
     if (required.some(key => input[key] === undefined || input[key] === "")) return fail("优惠券参数不完整", 422, 422);
     const couponType = Math.trunc(Number.parseFloat(String(input.type ?? "")));
     if (![1, 2].includes(couponType)) return fail("类型格式有误", 422, 422);
-    const count = Math.min(500, Math.max(1, Number(input.generate_count || 1))); const ts = now();
+    if (id && !await env.XBOARD_DB.prepare("SELECT id FROM v2_coupon WHERE id = ?").bind(id).first()) return fail("优惠券不存在", 500, 500);
+    const count = id ? 1 : Math.min(500, Math.max(1, Number(input.generate_count || 1))); const ts = now();
     const generatedCoupons: Array<Record<string, any>> = [];
     const statements = Array.from({ length: count }, (_, index) => {
       const code = count === 1 && input.code ? String(input.code) : randomString(8);
@@ -2350,7 +2381,7 @@ async function adminCoupon(request: Request, env: Env, route: string): Promise<R
       return env.XBOARD_DB.prepare("INSERT INTO v2_coupon(code,name,type,value,show,limit_use,limit_use_with_user,limit_plan_ids,limit_period,started_at,ended_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(...values);
     });
     try { await env.XBOARD_DB.batch(statements); } catch { return fail("优惠券代码已存在或参数无效", 400, 400); }
-    if (input.generate_count) {
+    if (!id && input.generate_count) {
       const dateTime = (value: unknown) => new Date(Number(value || 0) * 1000).toISOString().replace("T", " ").slice(0, 19);
       const csvValue = (value: unknown) => `"${String(value ?? "").replaceAll('"', '""')}"`;
       const lines = ["名称,类型,金额或比例,开始时间,结束时间,可用次数,可用于订阅,券码,生成时间"];
@@ -2455,30 +2486,37 @@ async function orderRows(env: Env, input: Record<string, any>) {
   if (input.is_commission === true || input.is_commission === "true" || Number(input.is_commission) === 1) {
     clauses.push("o.invite_user_id IS NOT NULL", "CAST(o.status AS INTEGER) NOT IN (0, 2)", "COALESCE(o.commission_balance, 0) > 0");
   }
-  const allowed = new Set(["id", "user_id", "plan_id", "trade_no", "type", "period", "status", "commission_status", "total_amount", "created_at"]);
+  const allowed: Record<string, string> = {
+    id: "o.id", email: "u.email", user_id: "o.user_id", plan_id: "o.plan_id", trade_no: "o.trade_no", type: "o.type",
+    period: "o.period", status: "o.status", commission_status: "o.commission_status", invite_user_id: "o.invite_user_id",
+    callback_no: "o.callback_no", commission_balance: "o.commission_balance", total_amount: "o.total_amount", created_at: "o.created_at"
+  };
   for (const filter of parseJsonArray(input.filter)) {
-    const field = String(filter?.id || "");
-    if (!allowed.has(field)) continue;
+    const key = String(filter?.id || filter?.key || "");
+    const field = allowed[key];
+    if (!field) continue;
     const raw = filter?.value;
     if (Array.isArray(raw)) {
       const values = raw.filter(value => value !== "" && value !== null && value !== undefined);
-      if (values.length) { clauses.push(`o.${field} IN (${values.map(() => "?").join(",")})`); binds.push(...values); }
+      if (values.length) { clauses.push(`${field} IN (${values.map(() => "?").join(",")})`); binds.push(...values); }
       continue;
     }
     const text = String(raw ?? "");
-    const match = text.match(/^(eq|gt|gte|lt|lte|like|notlike):(.*)$/i);
+    const match = text.match(/^(eq|neq|gt|gte|lt|lte|like|notlike):(.*)$/i);
     const operator = match?.[1]?.toLowerCase(); const value = match ? match[2] : text;
-    const sqlOperator = { eq: "=", gt: ">", gte: ">=", lt: "<", lte: "<=", like: "LIKE", notlike: "NOT LIKE" }[operator || ""] || "LIKE";
-    clauses.push(`o.${field} ${sqlOperator} ?`);
+    const condition = String(filter?.condition || "");
+    const conditionOperator: Record<string, string> = { "=": "=", "!=": "!=", ">": ">", ">=": ">=", "<": "<", "<=": "<=", "模糊": "LIKE" };
+    const sqlOperator = conditionOperator[condition] || ({ eq: "=", neq: "!=", gt: ">", gte: ">=", lt: "<", lte: "<=", like: "LIKE", notlike: "NOT LIKE" }[operator || ""] || "LIKE");
+    clauses.push(`${field} ${sqlOperator} ?`);
     binds.push(["LIKE", "NOT LIKE"].includes(sqlOperator) ? `%${value}%` : value);
   }
   const sorts = parseJsonArray(input.sort);
-  const sort = sorts.find(item => allowed.has(String(item?.id || "")));
-  const orderBy = sort ? `o.${String(sort.id)} ${sort.desc ? "DESC" : "ASC"}` : "o.created_at DESC";
+  const sort = sorts.find(item => allowed[String(item?.id || "")]);
+  const orderBy = sort ? `${allowed[String(sort.id)]} ${sort.desc ? "DESC" : "ASC"}` : "o.created_at DESC";
   const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
-  const result = await env.XBOARD_DB.prepare(`SELECT o.*, p.name AS plan_name FROM v2_order o LEFT JOIN v2_plan p ON p.id = o.plan_id${where} ORDER BY ${orderBy} LIMIT ? OFFSET ?`)
+  const result = await env.XBOARD_DB.prepare(`SELECT o.*, p.name AS plan_name FROM v2_order o LEFT JOIN v2_plan p ON p.id = o.plan_id LEFT JOIN v2_user u ON u.id = o.user_id${where} ORDER BY ${orderBy} LIMIT ? OFFSET ?`)
     .bind(...binds, pageSize, (page - 1) * pageSize).all<Record<string, any>>();
-  const total = await env.XBOARD_DB.prepare(`SELECT COUNT(*) AS count FROM v2_order o${where}`).bind(...binds).first<{ count: number }>();
+  const total = await env.XBOARD_DB.prepare(`SELECT COUNT(*) AS count FROM v2_order o LEFT JOIN v2_user u ON u.id = o.user_id${where}`).bind(...binds).first<{ count: number }>();
   const data = (result.results || []).map(row => ({
     ...row,
     status: Number(row.status), type: Number(row.type || 1), commission_status: Number(row.commission_status || 0),
@@ -2643,8 +2681,9 @@ async function adminOrder(request: Request, env: Env, route: string): Promise<Re
     const user = await env.XBOARD_DB.prepare("SELECT * FROM v2_user WHERE id=?").bind(order.user_id).first<Record<string, any>>();
     if (!plan || !user) return fail("订单关联的用户或订阅不存在", 400, 400202);
     const period = String(order.period || ""); const ts = now();
-    const claimed = await env.XBOARD_DB.prepare("UPDATE v2_order SET status=1,paid_at=?,callback_no='manual_operation',updated_at=? WHERE id=? AND status=0 RETURNING id")
-      .bind(ts, ts, order.id).first<{ id: number }>();
+    const callbackNo = String(input.callback_no || "manual_operation");
+    const claimed = await env.XBOARD_DB.prepare("UPDATE v2_order SET status=1,paid_at=?,callback_no=?,updated_at=? WHERE id=? AND status=0 RETURNING id")
+      .bind(ts, callbackNo, ts, order.id).first<{ id: number }>();
     if (!claimed) return fail("只能对待支付的订单进行操作", 400, 400);
     const statements: D1PreparedStatement[] = [];
     const orderGuard = "EXISTS (SELECT 1 FROM v2_order WHERE id = ? AND status = 1)";
@@ -2730,11 +2769,12 @@ async function adminCoreResource(request: Request, env: Env, route: string): Pro
     const ts = now();
     if (id) {
       if (!(await env.XBOARD_DB.prepare("SELECT id FROM v2_plan WHERE id = ?").bind(id).first())) return fail("该订阅不存在", 400, 400202);
-      await env.XBOARD_DB.prepare(`UPDATE v2_plan SET ${Object.keys(values).map(key => `${key} = ?`).join(", ")}, updated_at = ? WHERE id = ?`).bind(...Object.values(values), ts, id).run();
+      const statements = [env.XBOARD_DB.prepare(`UPDATE v2_plan SET ${Object.keys(values).map(key => `${key} = ?`).join(", ")}, updated_at = ? WHERE id = ?`).bind(...Object.values(values), ts, id)];
       if (boolNumber(input.force_update)) {
-        await env.XBOARD_DB.prepare("UPDATE v2_user SET group_id = ?, transfer_enable = ?, speed_limit = ?, device_limit = ?, updated_at = ? WHERE plan_id = ?")
-          .bind(values.group_id, transferEnable * 1073741824, values.speed_limit, values.device_limit, ts, id).run();
+        statements.push(env.XBOARD_DB.prepare("UPDATE v2_user SET group_id = ?, transfer_enable = ?, speed_limit = ?, device_limit = ?, updated_at = ? WHERE plan_id = ?")
+          .bind(values.group_id, transferEnable * 1073741824, values.speed_limit, values.device_limit, ts, id));
       }
+      await env.XBOARD_DB.batch(statements);
     } else {
       await env.XBOARD_DB.prepare(`INSERT INTO v2_plan(${Object.keys(values).join(",")},show,sell,renew,sort,created_at,updated_at) VALUES (${Object.keys(values).map(() => "?").join(",")},1,1,1,0,?,?)`).bind(...Object.values(values), ts, ts).run();
     }
@@ -2946,15 +2986,16 @@ async function adminApi(request: Request, env: Env, path: string) {
     const today = dayStart();
     const month = monthStart();
     const lastMonth = monthStart(month - 1);
-    const todayU = await firstNumber(env, `SELECT COALESCE(SUM(u), 0) AS c FROM v2_stat_server WHERE record_at >= ${today}`);
-    const todayD = await firstNumber(env, `SELECT COALESCE(SUM(d), 0) AS c FROM v2_stat_server WHERE record_at >= ${today}`);
-    const monthU = await firstNumber(env, `SELECT COALESCE(SUM(u), 0) AS c FROM v2_stat_server WHERE record_at >= ${month}`);
-    const monthD = await firstNumber(env, `SELECT COALESCE(SUM(d), 0) AS c FROM v2_stat_server WHERE record_at >= ${month}`);
+    const current = now();
+    const todayU = await firstNumber(env, `SELECT COALESCE(SUM(u), 0) AS c FROM v2_stat_server WHERE record_at >= ${today} AND record_at < ${current}`);
+    const todayD = await firstNumber(env, `SELECT COALESCE(SUM(d), 0) AS c FROM v2_stat_server WHERE record_at >= ${today} AND record_at < ${current}`);
+    const monthU = await firstNumber(env, `SELECT COALESCE(SUM(u), 0) AS c FROM v2_stat_server WHERE record_at >= ${month} AND record_at < ${current}`);
+    const monthD = await firstNumber(env, `SELECT COALESCE(SUM(d), 0) AS c FROM v2_stat_server WHERE record_at >= ${month} AND record_at < ${current}`);
     const totalU = await firstNumber(env, "SELECT COALESCE(SUM(u), 0) AS c FROM v2_stat_server");
     const totalD = await firstNumber(env, "SELECT COALESCE(SUM(d), 0) AS c FROM v2_stat_server");
     return ok({
       month_income: await firstNumber(env, `SELECT COALESCE(SUM(total_amount), 0) AS c FROM v2_order WHERE created_at >= ${month} AND created_at < ${now()} AND status NOT IN (0,2)`),
-      month_register_total: await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE created_at >= ${month}`),
+      month_register_total: await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE created_at >= ${month} AND created_at < ${current}`),
       ticket_pending_total: await firstNumber(env, "SELECT COUNT(*) AS c FROM v2_ticket WHERE status = 0"),
       commission_pending_total: await firstNumber(env, "SELECT COUNT(*) AS c FROM v2_order WHERE commission_status = 0 AND invite_user_id IS NOT NULL AND status NOT IN (0,2) AND commission_balance > 0"),
       day_income: await firstNumber(env, `SELECT COALESCE(SUM(total_amount), 0) AS c FROM v2_order WHERE created_at >= ${today} AND created_at < ${now()} AND status NOT IN (0,2)`),
@@ -2973,8 +3014,8 @@ async function adminApi(request: Request, env: Env, path: string) {
   if (path.includes("/stat/getOrder")) return ok(await orderStats(env, new URL(request.url)));
   if (path.includes("/stat/getTrafficRank")) return ok(await trafficRank(env, new URL(request.url)));
   if (request.method === "GET" && (route === "/stat/getServerLastRank" || route === "/stat/getServerYesterdayRank")) {
-    const start = route.endsWith("YesterdayRank") ? dayStart() - 86400 : monthStart();
-    const end = route.endsWith("YesterdayRank") ? dayStart() - 1 : now();
+    const start = route.endsWith("YesterdayRank") ? dayStart() - 86400 : dayStart();
+    const end = route.endsWith("YesterdayRank") ? dayStart() : now();
     const url = new URL(request.url); url.searchParams.set("type", "node"); url.searchParams.set("start_time", String(start)); url.searchParams.set("end_time", String(end));
     return ok(await trafficRank(env, url));
   }
@@ -2998,12 +3039,34 @@ async function adminApi(request: Request, env: Env, path: string) {
     });
   }
   if (request.method === "GET" && route === "/stat/getRanking") {
-    const result = await env.XBOARD_DB.prepare("SELECT id, email, u, d, (u + d) AS total FROM v2_user ORDER BY total DESC LIMIT 20").all();
+    const url = new URL(request.url);
+    const type = String(url.searchParams.get("type") || "user_consumption_rank");
+    const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit") || 20)));
+    const start = Number(url.searchParams.get("start_time") || 0);
+    const end = Number(url.searchParams.get("end_time") || now());
+    if (type === "server_traffic_rank") {
+      const result = await env.XBOARD_DB.prepare(`SELECT server_id, server_type, COALESCE(SUM(u),0) AS u, COALESCE(SUM(d),0) AS d, COALESCE(SUM(u+d),0) AS total FROM v2_stat_server WHERE record_at >= ? AND record_at < ? AND COALESCE(record_type,'d') = 'd' GROUP BY server_id, server_type ORDER BY total DESC LIMIT ?`)
+        .bind(start, end, limit).all();
+      return ok(result.results || []);
+    }
+    if (type === "invite_rank") {
+      const result = await env.XBOARD_DB.prepare(`SELECT invited.invite_user_id, COUNT(*) AS count, inviter.email FROM v2_user invited LEFT JOIN v2_user inviter ON inviter.id = invited.invite_user_id WHERE invited.created_at >= ? AND invited.created_at < ? AND invited.invite_user_id IS NOT NULL GROUP BY invited.invite_user_id, inviter.email ORDER BY count DESC LIMIT ?`)
+        .bind(start, end, limit).all();
+      return ok(result.results || []);
+    }
+    if (type !== "user_consumption_rank") return fail("统计类型无效", 422, 422);
+    const result = await env.XBOARD_DB.prepare(`SELECT su.user_id, u.email, COALESCE(SUM(su.u),0) AS u, COALESCE(SUM(su.d),0) AS d, COALESCE(SUM(su.u+su.d),0) AS total FROM v2_stat_user su LEFT JOIN v2_user u ON u.id = su.user_id WHERE su.record_at >= ? AND su.record_at < ? AND COALESCE(su.record_type,'d') = 'd' GROUP BY su.user_id, u.email ORDER BY total DESC LIMIT ?`)
+      .bind(start, end, limit).all();
     return ok(result.results || []);
   }
   if (request.method === "GET" && route === "/stat/getStatRecord") {
-    const result = await env.XBOARD_DB.prepare("SELECT * FROM v2_stat ORDER BY record_at DESC LIMIT 90").all();
-    return ok(result.results || []);
+    const url = new URL(request.url);
+    const type = String(url.searchParams.get("type") || "register_count");
+    if (!["paid_total", "commission_total", "register_count"].includes(type)) return fail("统计类型无效", 422, 422);
+    const start = Number(url.searchParams.get("start_time") || 0);
+    const end = Number(url.searchParams.get("end_time") || now());
+    const result = await env.XBOARD_DB.prepare("SELECT * FROM v2_stat WHERE record_at >= ? AND record_at < ? ORDER BY record_at ASC LIMIT 1000").bind(start, end).all<Record<string, any>>();
+    return ok((result.results || []).map(row => ({ ...row, ...(type === "paid_total" ? { paid_total: Number(row.paid_total || 0) / 100 } : {}), ...(type === "commission_total" ? { commission_total: Number(row.commission_total || 0) / 100 } : {}) })));
   }
   if (path.includes("/payment/getPaymentMethods")) return ok([]);
   if (path.includes("/payment/getPaymentForm")) return ok({ enabled: false, message: "Payment features are disabled in this build." });
@@ -3015,8 +3078,10 @@ async function adminApi(request: Request, env: Env, path: string) {
   }
   if (request.method === "POST" && route === "/mail/template/save") {
     const input = await body<Record<string, any>>(request);
-    const name = String(input.name || "");
+    const name = canonicalMailTemplateName(String(input.name || ""));
     if (!mailTemplateMeta[name] || !input.subject || !input.content) return fail("模板参数不正确", 422, 422);
+    const missing = mailTemplateMeta[name].required_vars.filter(variable => !String(input.content).includes(`{{${variable}}}`));
+    if (missing.length) return fail(missing.map(variable => `缺少必要占位符: {{${variable}}}`).join("; "), 422, 422);
     const ts = now();
     await env.XBOARD_DB.prepare("INSERT INTO v2_mail_templates(name, subject, content, enabled, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?) ON CONFLICT(name) DO UPDATE SET subject = excluded.subject, content = excluded.content, enabled = 1, updated_at = excluded.updated_at")
       .bind(name, String(input.subject), String(input.content), ts, ts).run();
@@ -3024,16 +3089,18 @@ async function adminApi(request: Request, env: Env, path: string) {
   }
   if (request.method === "POST" && route === "/mail/template/reset") {
     const input = await body<Record<string, any>>(request);
-    if (!mailTemplateMeta[String(input.name || "")]) return fail("模板不存在", 404, 404);
-    await env.XBOARD_DB.prepare("DELETE FROM v2_mail_templates WHERE name = ?").bind(String(input.name)).run();
+    const name = canonicalMailTemplateName(String(input.name || ""));
+    if (!mailTemplateMeta[name]) return fail("模板不存在", 404, 404);
+    await env.XBOARD_DB.prepare("DELETE FROM v2_mail_templates WHERE name IN (?, ?)").bind(name, legacyMailTemplateName(name)).run();
     return ok(true);
   }
   if (request.method === "POST" && route === "/mail/template/test") {
     const input = await body<Record<string, any>>(request);
-    const name = String(input.name || "");
+    const name = canonicalMailTemplateName(String(input.name || ""));
     if (!mailTemplateMeta[name]) return fail("模板不存在", 404, 404);
     const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
-    const vars = { name: pickSetting(all, "app_name", "XBoard"), code: "123456", content: "This is xboard test email", url: pickSetting(all, "app_url", "") };
+    const appUrl = String(pickSetting(all, "app_url", "https://example.com"));
+    const vars = { name: pickSetting(all, "app_name", "XBoard"), code: "123456", content: "This is xboard test email", link: `${appUrl.replace(/\/$/, "")}/login?token=test-token`, url: appUrl };
     await queueTemplateMail(env, name, String(input.email || (admin as any).email), vars, `XBoard ${mailTemplateMeta[name].label}测试`);
     return ok(true);
   }
@@ -3144,7 +3211,7 @@ async function adminApi(request: Request, env: Env, path: string) {
     const input = await body<Record<string, any>>(request.clone());
     const machineToken = randomString(32);
     const result = await env.XBOARD_DB.prepare("UPDATE v2_server_machine SET token = ?, updated_at = ? WHERE id = ?").bind(machineToken, now(), input.id).run();
-    return result.success ? ok({ token: machineToken }) : fail("服务器不存在", 404, 400202);
+    return Number((result.meta as any)?.changes || 0) === 1 ? ok({ token: machineToken }) : fail("服务器不存在", 422, 422);
   }
   if (path.includes("/server/manage/generateEchKey")) {
     const publicName = new URL(request.url).searchParams.get("public_name") || "ech.example.com";
@@ -3184,19 +3251,17 @@ async function adminApi(request: Request, env: Env, path: string) {
         await env.XBOARD_DB.prepare("DELETE FROM personal_access_tokens WHERE tokenable_id = ?").bind(Number(id)).run();
       }
     } else if (scope === "filtered") {
-      const fields: Record<string, string> = { id: "id", email: "email", plan_id: "plan_id", group_id: "group_id", banned: "banned", is_admin: "is_admin", is_staff: "is_staff", created_at: "created_at", expired_at: "expired_at" };
-      const clauses: string[] = []; const bindings: any[] = [];
-      for (const filter of parseJsonArray(input.filter)) {
-        const field = fields[String(filter?.id || "")]; const value = filter?.value;
-        if (!field || value === undefined || value === null || value === "") continue;
-        if (Array.isArray(value) && value.length) { clauses.push(`${field} IN (${value.map(() => "?").join(",")})`); bindings.push(...value); continue; }
-        const match = String(value).match(/^(eq|neq|gt|gte|lt|lte):(.*)$/s);
-        if (match) { const operators: Record<string, string> = { eq: "=", neq: "!=", gt: ">", gte: ">=", lt: "<", lte: "<=" }; clauses.push(`${field} ${operators[match[1]]} ?`); bindings.push(match[2]); }
-        else { clauses.push(`${field} LIKE ?`); bindings.push(`%${String(value)}%`); }
+      const query = adminUserQuery(input);
+      if (!query.where) return fail("筛选条件不能为空", 422, 422);
+      const matched = await env.XBOARD_DB.prepare(`SELECT u.id FROM v2_user u LEFT JOIN v2_plan p ON p.id = u.plan_id LEFT JOIN v2_server_group g ON g.id = u.group_id LEFT JOIN v2_user iu ON iu.id = u.invite_user_id${query.where}`).bind(...query.bindings).all<{ id: number }>();
+      const matchedIds = (matched.results || []).map(row => Number(row.id)).filter(Boolean);
+      for (let offset = 0; offset < matchedIds.length; offset += 80) {
+        const chunk = matchedIds.slice(offset, offset + 80);
+        await env.XBOARD_DB.batch([
+          env.XBOARD_DB.prepare(`UPDATE v2_user SET banned = 1, updated_at = ? WHERE id IN (${chunk.map(() => "?").join(",")})`).bind(now(), ...chunk),
+          env.XBOARD_DB.prepare(`DELETE FROM personal_access_tokens WHERE tokenable_id IN (${chunk.map(() => "?").join(",")})`).bind(...chunk)
+        ]);
       }
-      if (!clauses.length) return fail("筛选条件不能为空", 422, 422);
-      await env.XBOARD_DB.prepare(`UPDATE v2_user SET banned = 1, updated_at = ? WHERE ${clauses.join(" AND ")}`).bind(now(), ...bindings).run();
-      await env.XBOARD_DB.prepare(`DELETE FROM personal_access_tokens WHERE tokenable_id IN (SELECT id FROM v2_user WHERE ${clauses.join(" AND ")})`).bind(...bindings).run();
     } else if (scope === "all") {
       await env.XBOARD_DB.prepare("UPDATE v2_user SET banned = 1, updated_at = ?").bind(now()).run();
       await env.XBOARD_DB.prepare("DELETE FROM personal_access_tokens WHERE tokenable_id IN (SELECT id FROM v2_user WHERE banned = 1)").run();
@@ -3291,9 +3356,12 @@ async function adminApi(request: Request, env: Env, path: string) {
     const scope = String(input.scope || (input.user_ids || input.ids ? "selected" : "all"));
     const ids = parseJsonArray(input.user_ids || input.ids).map(Number).filter(Boolean);
     if (scope === "selected" && !ids.length) return fail("user_ids不能为空", 422, 422);
+    const filtered = scope === "filtered" ? adminUserQuery(input) : null;
     const users = scope === "selected"
       ? await env.XBOARD_DB.prepare(`SELECT u.*, p.name AS plan_name FROM v2_user u LEFT JOIN v2_plan p ON p.id = u.plan_id WHERE u.id IN (${ids.map(() => "?").join(",")})`).bind(...ids).all<Record<string, any>>()
-      : await env.XBOARD_DB.prepare("SELECT u.*, p.name AS plan_name FROM v2_user u LEFT JOIN v2_plan p ON p.id = u.plan_id ORDER BY u.id DESC").all<Record<string, any>>();
+      : filtered
+        ? await env.XBOARD_DB.prepare(`SELECT u.*, p.name AS plan_name FROM v2_user u LEFT JOIN v2_plan p ON p.id = u.plan_id LEFT JOIN v2_server_group g ON g.id = u.group_id LEFT JOIN v2_user iu ON iu.id = u.invite_user_id${filtered.where} ORDER BY ${filtered.order}`).bind(...filtered.bindings).all<Record<string, any>>()
+        : await env.XBOARD_DB.prepare("SELECT u.*, p.name AS plan_name FROM v2_user u LEFT JOIN v2_plan p ON p.id = u.plan_id ORDER BY u.id DESC").all<Record<string, any>>();
     const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
     for (const recipient of users.results || []) {
       const vars = {
@@ -3459,6 +3527,7 @@ async function userApi(request: Request, env: Env, path: string) {
       return fail("Email verification code is incorrect", 400, 400);
     }
     if (!String(input.password || "")) return fail("Password can not be empty", 422, 422);
+    if (String(input.password).length < 8) return fail("Password must be greater than 8 digits", 422, 422);
     const password = await hashPassword(String(input.password));
     const result = await env.XBOARD_DB.prepare("UPDATE v2_user SET password = ?, password_algo = NULL, password_salt = NULL, updated_at = ? WHERE email = ?").bind(password, now(), email).run();
     if (!Number((result.meta as any)?.changes || 0)) return fail("User does not exist", 400, 400);
@@ -3628,19 +3697,15 @@ async function userApi(request: Request, env: Env, path: string) {
     const coupon = await env.XBOARD_DB.prepare("SELECT * FROM v2_coupon WHERE code = ? AND show = 1").bind(code).first<Record<string, any>>();
     if (!coupon) return fail("优惠券无效", 400, 400);
     const ts = now();
-    if (Number(coupon.started_at || 0) > ts || (Number(coupon.ended_at || 0) > 0 && Number(coupon.ended_at) < ts)) return fail("优惠券无效", 400, 400);
+    if (Number(coupon.started_at || 0) > ts || Number(coupon.ended_at || 0) < ts) return fail("优惠券无效", 400, 400);
     const planId = nullableNumber(input.plan_id); const period = String(input.period || "");
     const limitedPlans = parseJsonArray(coupon.limit_plan_ids).map(Number);
     if (limitedPlans.length && (!planId || !limitedPlans.includes(planId))) return fail("优惠券不适用于该套餐", 400, 400);
     const limitedPeriods = parseJsonArray(coupon.limit_period).map(String);
     if (limitedPeriods.length && (!period || !limitedPeriods.includes(period) && !limitedPeriods.includes(orderPeriods[period]))) return fail("优惠券不适用于该周期", 400, 400);
     if (coupon.limit_use !== null && coupon.limit_use !== undefined && Number(coupon.limit_use) <= 0) return fail("优惠券已用完", 400, 400);
-    if (Number(coupon.limit_use || 0) > 0) {
-      const used = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_order WHERE coupon_id = ${Number(coupon.id)} AND status IN (1,3)`);
-      if (used >= Number(coupon.limit_use)) return fail("优惠券已达到使用次数限制", 400, 400);
-    }
     if (Number(coupon.limit_use_with_user || 0) > 0) {
-      const used = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_order WHERE coupon_id = ${Number(coupon.id)} AND user_id = ${Number((user as any).id)} AND status IN (1,3)`);
+      const used = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_order WHERE coupon_id = ${Number(coupon.id)} AND user_id = ${Number((user as any).id)} AND status NOT IN (0,2)`);
       if (used >= Number(coupon.limit_use_with_user)) return fail("优惠券已达到个人使用次数限制", 400, 400);
     }
     return ok(coupon);
@@ -3683,8 +3748,7 @@ async function userApi(request: Request, env: Env, path: string) {
       const order = await env.XBOARD_DB.prepare("SELECT * FROM v2_order WHERE user_id = ? AND trade_no = ?").bind(userId, tradeNo).first<Record<string, any>>();
       if (!order) return fail("订单不存在", 400, 400);
       if (Number(order.status) !== 0) return fail("只能取消待支付订单", 400, 400);
-      await cancelOrder(env, order, now());
-      return ok(true);
+      return await cancelOrder(env, order, now()) ? ok(true) : fail("取消失败", 400, 400);
     }
     if (request.method === "POST" && route === "/order/save") {
       const planId = nullableNumber(input.plan_id); const legacyPeriod = String(input.period || ""); const period = normalizeOrderPeriod(legacyPeriod);
@@ -3710,7 +3774,7 @@ async function userApi(request: Request, env: Env, path: string) {
         const ts = now();
         if (!coupon || !Number(coupon.show)) return fail("优惠券无效", 400, 400);
         if (coupon.limit_use !== null && Number(coupon.limit_use) <= 0) return fail("优惠券已用完", 400, 400);
-        if (Number(coupon.started_at || 0) > ts || (coupon.ended_at !== null && coupon.ended_at !== undefined && Number(coupon.ended_at) < ts)) return fail("优惠券不在有效期内", 400, 400);
+        if (Number(coupon.started_at || 0) > ts || Number(coupon.ended_at || 0) < ts) return fail("优惠券不在有效期内", 400, 400);
         const limitedPlans = parseJsonArray(coupon.limit_plan_ids).map(Number);
         if (limitedPlans.length && !limitedPlans.includes(planId)) return fail("优惠券不适用于该套餐", 400, 400);
         const limitedPeriods = parseJsonArray(coupon.limit_period).map(String);
@@ -3770,7 +3834,7 @@ async function userApi(request: Request, env: Env, path: string) {
       const order = await env.XBOARD_DB.prepare("SELECT * FROM v2_order WHERE user_id = ? AND trade_no = ? AND status = 0").bind(userId, String(input.trade_no || "")).first<Record<string, any>>();
       if (!order) return fail("订单不存在或已支付", 400, 400);
       if (Number(order.total_amount || 0) > 0) return fail("真实支付功能暂未启用", 400, 400);
-      const paidRequest = new Request(request.url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ trade_no: order.trade_no }) });
+      const paidRequest = new Request(request.url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ trade_no: order.trade_no, callback_no: order.trade_no }) });
       const paid = await adminOrder(paidRequest, env, "/order/paid");
       if (!paid?.ok) return paid || fail("支付失败", 400, 400);
       return json({ type: -1, data: true });
@@ -3853,6 +3917,7 @@ async function userApi(request: Request, env: Env, path: string) {
   if (request.method === "POST" && route === "/ticket/save") {
     const input = await body<Record<string, any>>(request);
     if (!String(input.subject || "").trim() || !String(input.message || "").trim()) return fail("工单主题和内容不能为空", 422, 422);
+    if (![0, 1, 2].includes(Number(input.level))) return fail("工单等级格式不正确", 422, 422);
     const ts = now();
     const existing = await env.XBOARD_DB.prepare("SELECT id FROM v2_ticket WHERE user_id = ? AND status = 0 LIMIT 1").bind((user as any).id).first();
     if (existing) return fail("存在未关闭的工单", 400, 400);
@@ -3864,8 +3929,8 @@ async function userApi(request: Request, env: Env, path: string) {
   }
   if (path.includes("/ticket/close")) {
     const input = await body<Record<string, any>>(request);
-    await env.XBOARD_DB.prepare("UPDATE v2_ticket SET status = 1, updated_at = ? WHERE id = ? AND user_id = ?").bind(now(), input.id, (user as any).id).run();
-    return ok(true);
+    const result = await env.XBOARD_DB.prepare("UPDATE v2_ticket SET status = 1, updated_at = ? WHERE id = ? AND user_id = ?").bind(now(), input.id, (user as any).id).run();
+    return Number((result.meta as any)?.changes || 0) === 1 ? ok(true) : fail("工单不存在", 400, 400);
   }
   if (request.method === "POST" && route === "/ticket/reply") {
     const input = await body<Record<string, any>>(request);
@@ -3890,6 +3955,8 @@ async function userApi(request: Request, env: Env, path: string) {
     const limit = Number(pickSetting(all, "commission_withdraw_limit", 100));
     if (Number((user as any).commission_balance || 0) / 100 < limit) return fail(`The current required minimum withdrawal commission is ${limit}`, 422, 422);
     if (!String(input.withdraw_account || "").trim()) return fail("Withdrawal account is required", 422, 422);
+    const existing = await env.XBOARD_DB.prepare("SELECT id FROM v2_ticket WHERE user_id = ? AND status = 0 LIMIT 1").bind((user as any).id).first();
+    if (existing) return fail("存在未关闭的工单", 400, 400);
     const ts = now(); const result = await env.XBOARD_DB.prepare("INSERT INTO v2_ticket(user_id,subject,level,status,reply_status,last_reply_user_id,created_at,updated_at) VALUES (?, ?, 2, 0, 0, ?, ?, ?)")
       .bind((user as any).id, "[Commission Withdrawal Request] This ticket is opened by the system", (user as any).id, ts, ts).run();
     await env.XBOARD_DB.prepare("INSERT INTO v2_ticket_message(ticket_id,user_id,message,created_at,updated_at) VALUES (?,?,?,?,?)")

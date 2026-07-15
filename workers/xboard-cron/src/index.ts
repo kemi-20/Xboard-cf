@@ -125,19 +125,18 @@ async function checkCommission(env: Env, ts: number) {
       let actual = 0;
       const statements = [];
       for (const share of shares) {
-        if (!inviterId || share <= 0) break;
+        if (!inviterId) continue;
         const inviter = await env.XBOARD_DB.prepare("SELECT id, invite_user_id FROM v2_user WHERE id = ?").bind(inviterId).first<Record<string, any>>();
-        if (!inviter) break;
+        if (!inviter) continue;
         const amount = Math.trunc(Number(order.commission_balance || 0) * share / 100);
-        if (amount > 0) {
-          const column = settings.closeWithdraw ? "balance" : "commission_balance";
-          statements.push(env.XBOARD_DB.prepare(`UPDATE v2_user SET ${column} = COALESCE(${column}, 0) + ?, updated_at = ? WHERE id = ? AND EXISTS (SELECT 1 FROM v2_order WHERE id = ? AND commission_status = 1)`)
-            .bind(amount, ts, inviter.id, order.id));
-          statements.push(env.XBOARD_DB.prepare(`INSERT INTO v2_commission_log(invite_user_id, user_id, order_id, trade_no, order_amount, get_amount, amount, created_at, updated_at)
-            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM v2_order WHERE id = ? AND commission_status = 1)`)
-            .bind(Number(inviter.id), Number(order.user_id), Number(order.id), String(order.trade_no || ""), Number(order.total_amount || 0), amount, amount, ts, ts, order.id));
-          actual += amount;
-        }
+        if (!amount) continue;
+        const column = settings.closeWithdraw ? "balance" : "commission_balance";
+        statements.push(env.XBOARD_DB.prepare(`UPDATE v2_user SET ${column} = COALESCE(${column}, 0) + ?, updated_at = ? WHERE id = ? AND EXISTS (SELECT 1 FROM v2_order WHERE id = ? AND commission_status = 1)`)
+          .bind(amount, ts, inviter.id, order.id));
+        statements.push(env.XBOARD_DB.prepare(`INSERT INTO v2_commission_log(invite_user_id, user_id, order_id, trade_no, order_amount, get_amount, amount, created_at, updated_at)
+          SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM v2_order WHERE id = ? AND commission_status = 1)`)
+          .bind(Number(inviter.id), Number(order.user_id), Number(order.id), String(order.trade_no || ""), Number(order.total_amount || 0), amount, amount, ts, ts, order.id));
+        actual += amount;
         inviterId = Number(inviter.invite_user_id || 0);
       }
       statements.push(env.XBOARD_DB.prepare("UPDATE v2_order SET commission_status = 2, actual_commission_balance = ?, updated_at = ? WHERE id = ? AND commission_status = 1").bind(actual, ts, order.id));

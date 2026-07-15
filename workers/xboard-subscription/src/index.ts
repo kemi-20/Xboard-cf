@@ -119,7 +119,7 @@ function clientOf(request: Request): Client {
   if (flag.includes("sing-box") || flag.includes("singbox") || flag.includes("hiddify") || flag.includes("sfm")) return "singbox";
   if (flag.includes("shadowsocks")) return "shadowsocks";
   if (flag.includes("shadowrocket")) return "shadowrocket";
-  if (flag.includes("quantumultx") || flag.includes("quantumult x") || flag.includes("quantumult-x")) return "quantumultx";
+  if (flag.includes("quantumultx") || flag.includes("quantumult x") || flag.includes("quantumult-x") || flag.includes("quantumult%20x")) return "quantumultx";
   if (flag.includes("loon")) return "loon";
   if (["meta", "mihomo", "verge", "flclash", "nekobox", "clashmetaforandroid"].some(name => flag.includes(name))) return "clashmeta";
   if (flag.includes("clash")) return "clash";
@@ -128,7 +128,7 @@ function clientOf(request: Request): Client {
 
 function clientDetails(request: Request, fallbackType?: Client) {
   const raw = (new URL(request.url).searchParams.get("flag") || request.headers.get("user-agent") || "").toLowerCase();
-  const flags = ["clashmetaforandroid", "quantumult-x", "quantumultx", "shadowrocket", "shadowsocks", "surfboard", "sing-box", "hiddify", "v2rayng", "v2rayn", "passwall", "ssrplus", "sagernet", "flclash", "nekobox", "nekoray", "mihomo", "verge", "stash", "surge", "loon", "meta", "sfm", "clash"];
+  const flags = ["clashmetaforandroid", "quantumult%20x", "quantumult-x", "quantumultx", "shadowrocket", "shadowsocks", "surfboard", "sing-box", "hiddify", "v2rayng", "v2rayn", "passwall", "ssrplus", "sagernet", "flclash", "nekobox", "nekoray", "mihomo", "verge", "stash", "surge", "loon", "meta", "sfm", "clash"];
   let name: string | null = null;
   let version: string | null = null;
   const direct = raw.match(/([a-z0-9_-]+)[/\s]+v?(\d+(?:\.\d+){0,2})/i);
@@ -207,6 +207,7 @@ function filterByClientCompatibility(client: Client, request: Request, servers: 
     if (client === "surge" && server.type === "hysteria" && Number(serverValue(server, "protocol_settings.version")) === 2 && !versionAtLeast(info.version, "2398")) return false;
     if (client === "shadowrocket") {
       if (server.type === "hysteria" && Number(serverValue(server, "protocol_settings.version")) === 2 && !versionAtLeast(info.version, "1993")) return false;
+      if (server.type === "anytls" && !versionAtLeast(info.version, "2592")) return false;
       if (server.type === "trojan" && !["tcp", "ws", "grpc", "h2", "httpupgrade"].includes(String(serverValue(server, "protocol_settings.network") || "tcp"))) return false;
     }
     if (client === "singbox" && name === "sing-box") {
@@ -408,6 +409,9 @@ function clashProxy(user: any, server: any, client: Client = "clashmeta") {
     const echOptions = client === "clash" ? undefined : clashEchOptions(ps.tls?.ech);
     if (echOptions) base["ech-opts"] = echOptions;
   }
+  else if (server.type === "mieru") {
+    Object.assign(base, { username: server.password || user.uuid, password: server.password || user.uuid, transport: String(ps.transport || "TCP").toUpperCase(), "port-range": server.ports });
+  }
   else Object.assign(base, { username: server.password || user.uuid, password: server.password || user.uuid, tls: Boolean(ps.tls), sni: ps.tls_settings?.server_name, "skip-cert-verify": Boolean(ps.tls_settings?.allow_insecure) });
   return Object.fromEntries(Object.entries(base).filter(([, value]) => value !== undefined));
 }
@@ -421,11 +425,11 @@ function clashPluginOptions(ps: any, client: Client) {
   }));
   if (plugin === "obfs" || plugin === "obfs-local") return {
     plugin: "obfs",
-    "plugin-opts": Object.fromEntries(Object.entries({ mode: parsed.obfs || parsed.mode || "http", host: parsed["obfs-host"] || parsed.host || (client === "clash" ? "" : "www.bing.com"), path: client === "clash" ? parsed.path : undefined }).filter(([, value]) => value !== undefined && value !== ""))
+    "plugin-opts": Object.fromEntries(Object.entries({ mode: parsed.obfs || parsed.mode || "http", host: parsed["obfs-host"] || parsed.host || (client === "stash" || client === "clash" ? "" : "www.bing.com"), path: client === "stash" || client === "clash" ? parsed.path : undefined }).filter(([, value]) => value !== undefined && (client === "stash" || value !== "")))
   };
   if (plugin === "v2ray-plugin") return {
     plugin,
-    "plugin-opts": Object.fromEntries(Object.entries({ mode: parsed.mode || "websocket", tls: client === "clash" ? parsed.tls === "true" : Boolean(parsed.tls || parsed.server), host: parsed.host || (client === "clash" ? "" : undefined), path: parsed.path || "/", mux: client === "clash" ? undefined : parsed.mux ? true : undefined, headers: client === "clash" || !parsed.host ? undefined : { Host: parsed.host } }).filter(([, value]) => value !== undefined))
+    "plugin-opts": Object.fromEntries(Object.entries({ mode: parsed.mode || "websocket", tls: client === "stash" || client === "clash" ? parsed.tls === "true" : Boolean(parsed.tls || parsed.server), host: parsed.host || (client === "stash" || client === "clash" ? "" : undefined), path: parsed.path || "/", mux: client === "stash" || client === "clash" ? undefined : parsed.mux ? true : undefined, headers: client === "stash" || client === "clash" || !parsed.host ? undefined : { Host: parsed.host } }).filter(([, value]) => value !== undefined))
   };
   if (client !== "clash" && plugin === "shadow-tls") return { plugin, "plugin-opts": { host: parsed.host, password: parsed.password, version: Number(parsed.version || 2) } };
   if (client !== "clash" && plugin === "restls") return { plugin, "plugin-opts": { host: parsed.host, password: parsed.password, "restls-script": parsed["restls-script"] || "123" } };
@@ -695,6 +699,7 @@ function proxyLine(user: any, server: any, style: "surge" | "surfboard") {
     parts.push(`password=${password}`, ps.tls?.server_name ? `sni=${ps.tls.server_name}` : "", "udp-relay=true", ps.bandwidth?.up ? `upload-bandwidth=${ps.bandwidth.up}` : "", ps.bandwidth?.down ? `download-bandwidth=${ps.bandwidth.down}` : "", ps.tls?.allow_insecure ? "skip-cert-verify=true" : "");
   } else if (server.type === "anytls") {
     parts.push(`password=${password}`, ps.tls?.server_name ? `sni=${ps.tls.server_name}` : "", ps.tls?.allow_insecure ? "skip-cert-verify=true" : "");
+    if (style === "surfboard") parts.push("tfo=true", "udp-relay=true");
   } else if (["socks", "http"].includes(server.type)) {
     parts.push(password, password, ps.tls_settings?.server_name ? `sni=${ps.tls_settings.server_name}` : "", ps.tls_settings?.allow_insecure ? "skip-cert-verify=true" : "", server.type === "socks" ? "udp-relay=true" : "");
   } else return "";
@@ -964,7 +969,7 @@ function output(client: Client, config: Config, templateMap: Config, user: any, 
 
 function responseHeaders(client: Client, config: Config, user: any) {
   const appName = String(config.app_name || "XBoard");
-  const userInfo = `upload=${Number(user.u || 0)}; download=${Number(user.d || 0)}; total=${Number(user.transfer_enable || 0)}; expire=${Number(user.expired_at || 0)}`;
+  const userInfo = `upload=${Number(user.u || 0)}; download=${Number(user.d || 0)}; total=${Number(user.transfer_enable || 0)}; expire=${user.expired_at === null || user.expired_at === undefined ? "" : Number(user.expired_at)}`;
   const headers: Config = {};
 
   if (["clash", "clashmeta", "stash"].includes(client)) {

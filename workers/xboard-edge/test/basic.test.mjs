@@ -637,11 +637,20 @@ test("gift card APIs implement the official admin and user route set", () => {
   assert.match(source, /await db\.batch\(statements\)/);
 });
 
-test("gift card traffic rewards are stored as bytes while API rewards remain in GB", () => {
+test("gift card traffic rewards use the byte values submitted by the official admin UI", () => {
   const source = fs.readFileSync("src/gift-card.ts", "utf8");
-  assert.match(source, /updateValues\.push\(Number\(rewards\.transfer_enable\) \* 1073741824\)/);
-  assert.match(source, /Number\(inviteRewards\.transfer_enable \|\| 0\) \* 1073741824/);
+  assert.match(source, /updateValues\.push\(Number\(rewards\.transfer_enable\)\)/);
+  assert.match(source, /Number\(inviteRewards\.transfer_enable \|\| 0\), ts/);
+  assert.doesNotMatch(source, /rewards\.transfer_enable\) \* 1073741824/);
   assert.match(source, /rewards_given: parseJson\(row\.rewards_given, \{\}\)/);
+});
+
+test("gift card generation follows the upstream code and CSV formats", () => {
+  const source = fs.readFileSync("src/gift-card.ts", "utf8");
+  assert.match(source, /crypto\.getRandomValues\(new Uint8Array\(6\)\)/);
+  assert.match(source, /toString\(16\).*toUpperCase\(\)/s);
+  for (const heading of ["兑换码", "创建时间", "模板奖励", "使用时间", "备注"]) assert.match(source, new RegExp(heading));
+  assert.match(source, /gift_cards_\$\{String\(input\.batch_id\)\}\.txt/);
 });
 
 test("fresh D1 schema follows upstream visibility and expiry defaults", () => {
@@ -742,7 +751,30 @@ test("user knowledge, server availability and invite commission match upstream c
   assert.match(source, /commission_distribution_l1/);
   assert.match(source, /AND get_amount > 0/);
   assert.match(source, /crypto\.subtle\.digest\("SHA-1"/);
-  assert.match(source, /coupon\.ended_at !== null/);
+  assert.match(source, /Number\(coupon\.ended_at \|\| 0\) < ts/);
+});
+
+test("audited admin and user mutations reject stale or partial operations", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /const filtered = scope === "filtered" \? adminUserQuery\(input\) : null/);
+  assert.match(source, /const results = await env\.XBOARD_DB\.batch\(statements\)/);
+  assert.match(source, /status NOT IN \(0,2\)/);
+  assert.doesNotMatch(source, /coupon_id = .*status IN \(1,3\)/);
+  assert.match(source, /return await cancelOrder\(env, order, now\(\)\) \? ok\(true\) : fail\("取消失败"/);
+  assert.match(source, /callback_no: order\.trade_no/);
+  assert.match(source, /\[0, 1, 2\]\.includes\(Number\(input\.level\)\)/);
+  assert.match(source, /String\(input\.password\)\.length < 8/);
+});
+
+test("statistics and mail templates preserve the upstream contracts", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /route\.endsWith\("YesterdayRank"\) \? dayStart\(\) - 86400 : dayStart\(\)/);
+  assert.match(source, /type === "server_traffic_rank"/);
+  assert.match(source, /type === "invite_rank"/);
+  assert.match(source, /Number\(row\.paid_total \|\| 0\) \/ 100/);
+  assert.match(source, /remindExpire:/);
+  assert.match(source, /remindTraffic:/);
+  assert.match(source, /missing = mailTemplateMeta\[name\]\.required_vars/);
 });
 
 test("API responses use the same open CORS policy as upstream Laravel", () => {

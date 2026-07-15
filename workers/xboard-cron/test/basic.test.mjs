@@ -65,6 +65,8 @@ test("cron implements the official order, ticket, commission and traffic checks"
   assert.match(source, /commission_distribution_l1/);
   assert.match(source, /v2_commission_log/);
   assert.match(source, /check:traffic-exceeded/);
+  assert.match(source, /if \(!amount\) continue;[\s\S]*inviterId = Number\(inviter\.invite_user_id \|\| 0\)/);
+  assert.doesNotMatch(source, /share <= 0\) break/);
   assert.match(source, /XBOARD_SERVER\.fetch/);
   assert.match(source, /const recordDay = day - 86400/);
   assert.match(source, /FROM v2_stat_server WHERE created_at >= \? AND created_at < \?/);

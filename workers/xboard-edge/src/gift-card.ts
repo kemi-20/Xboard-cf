@@ -126,9 +126,8 @@ function actualRewards(card: AnyRow) {
   const activeBonus = special.festival_bonus !== undefined && special.start_time !== undefined && special.end_time !== undefined
     && now() >= Number(special.start_time) && now() <= Number(special.end_time);
   if (activeBonus && Number(special.festival_bonus) > 1) {
-    const scalable = new Set(["balance", "transfer_enable", "expire_days", "plan_validity_days", "device_limit"]);
     rewards = Object.fromEntries(Object.entries(rewards).map(([key, value]) => [key,
-      scalable.has(key) && typeof value === "number" ? Math.trunc(value * Number(special.festival_bonus)) : value]));
+      typeof value === "number" ? Math.trunc(value * Number(special.festival_bonus)) : value]));
   }
   return rewards;
 }
@@ -189,7 +188,7 @@ async function redeem(db: D1Database, card: AnyRow, user: AnyRow, request: Reque
   if (Number(rewards.balance || 0) > 0) { assignments.push("balance = COALESCE(balance, 0) + ?"); updateValues.push(Number(rewards.balance)); }
   if (Number(rewards.transfer_enable || 0) > 0) {
     assignments.push("transfer_enable = COALESCE(transfer_enable, 0) + ?");
-    updateValues.push(Number(rewards.transfer_enable) * 1073741824);
+    updateValues.push(Number(rewards.transfer_enable));
   }
   if (Number(rewards.device_limit || 0) > 0) { assignments.push("device_limit = COALESCE(device_limit, 0) + ?"); updateValues.push(Number(rewards.device_limit)); }
   let resetMethod: number | null = null;
@@ -239,7 +238,7 @@ async function redeem(db: D1Database, card: AnyRow, user: AnyRow, request: Reque
     .bind(...updateValues, ts, user.id, card.id, nonce));
   if (inviteRewards && user.invite_user_id) statements.push(db.prepare(`UPDATE v2_user SET balance = COALESCE(balance, 0) + ?,
     transfer_enable = COALESCE(transfer_enable, 0) + ?, updated_at = ? WHERE id = ? AND ${guard}`)
-    .bind(Number(inviteRewards.balance || 0), Number(inviteRewards.transfer_enable || 0) * 1073741824, ts, user.invite_user_id, card.id, nonce));
+    .bind(Number(inviteRewards.balance || 0), Number(inviteRewards.transfer_enable || 0), ts, user.invite_user_id, card.id, nonce));
   if (rewards.reset_package && user.plan_id) {
     const resetTypes: Record<number, string> = { 0: "first_day_month", 1: "monthly", 3: "first_day_year", 4: "yearly" };
     statements.push(db.prepare(`INSERT INTO v2_traffic_reset_logs(user_id, reset_type, old_u, old_d, old_upload, old_download,
@@ -320,7 +319,28 @@ async function deleteTemplate(request: Request, db: D1Database) {
 }
 
 function generatedCode(prefix: string) {
-  return `${prefix}${randomString(12).toUpperCase()}`.slice(0, 32);
+  const bytes = crypto.getRandomValues(new Uint8Array(6));
+  const suffix = [...bytes].map(value => value.toString(16).padStart(2, "0")).join("").toUpperCase();
+  return `${prefix}${suffix}`.slice(0, 32);
+}
+
+function csvValue(value: unknown) {
+  return `"${String(value ?? "").replaceAll('"', '""')}"`;
+}
+
+function csvDate(timestamp: unknown) {
+  const value = Number(timestamp || 0);
+  if (!value) return "";
+  return new Intl.DateTimeFormat("sv-SE", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(new Date(value * 1000));
 }
 
 async function generateCodes(request: Request, db: D1Database) {
@@ -354,7 +374,26 @@ async function generateCodes(request: Request, db: D1Database) {
     await db.batch(statements);
   }
   if (asBoolean(input.download_csv)) {
-    const lines = ["兑换码,前缀,有效期,最大使用次数,批次号,模板名称", ...values.map(code => [code, prefix, expiresAt || "长期有效", maxUsage, batchId, String(template.name).replaceAll('"', '""')].map(value => `"${value}"`).join(","))];
+    const createdAt = now();
+    const templateRewards = template.rewards ? JSON.stringify(parseJson(template.rewards, {})) : "";
+    const lines = [
+      ["兑换码", "前缀", "有效期", "最大使用次数", "批次号", "创建时间", "模板名称", "模板类型", "模板奖励", "状态", "使用者", "使用时间", "备注"].map(csvValue).join(","),
+      ...values.map(code => [
+        code,
+        "",
+        expiresAt ? csvDate(expiresAt) : "长期有效",
+        maxUsage,
+        batchId,
+        csvDate(createdAt),
+        template.name || "",
+        template.type || "",
+        templateRewards,
+        STATUS_NAMES[0],
+        "",
+        "",
+        "",
+      ].map(csvValue).join(",")),
+    ];
     return new Response(lines.join("\n"), { headers: { "content-type": "text/csv; charset=utf-8", "content-disposition": "attachment; filename=\"gift_codes.csv\"" } });
   }
   return ok({ batch_id: batchId, count, message: "生成成功" });

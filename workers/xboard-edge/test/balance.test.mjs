@@ -6,7 +6,7 @@ import initSqlJs from "sql.js";
 const source = fs.readFileSync("src/index.ts", "utf8");
 
 test("balance-sensitive routes use state-guarded writes", () => {
-  assert.match(source, /UPDATE v2_order SET status=1,paid_at=\?,callback_no='manual_operation'.*status=0 RETURNING id/);
+  assert.match(source, /UPDATE v2_order SET status=1,paid_at=\?,callback_no=\?,updated_at=\?.*status=0 RETURNING id/);
   assert.match(source, /balance=COALESCE\(balance,0\)\+\?/);
   assert.match(source, /NOT EXISTS \(SELECT 1 FROM v2_order WHERE user_id=u\.id AND status IN \(0,1\)\)/);
   assert.match(source, /SELECT balance_amount FROM v2_order WHERE trade_no=\?/);

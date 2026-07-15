@@ -24,6 +24,19 @@ function render(source: string, vars: Record<string, unknown>) {
   });
 }
 
+function escapeHtml(value: unknown) {
+  return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
+}
+
+function safeMailVars(vars: Record<string, unknown>, contentMode: unknown) {
+  const safe = Object.fromEntries(Object.entries(vars).filter(([, value]) => ["string", "number", "boolean"].includes(typeof value)).map(([key, value]) => [key, escapeHtml(value)]));
+  if (vars.content !== undefined) {
+    const content = String(vars.content ?? "");
+    safe.content = contentMode === "text" ? content.replace(/\r?\n/g, "<br>\n") : content;
+  }
+  return safe;
+}
+
 async function ensureStatAggregateSchema(env: Env) {
   if (statAggregateSchemaReady) return;
   try {
@@ -41,6 +54,7 @@ async function ensureStatAggregateSchema(env: Env) {
 async function resolveMailContent(env: Env, payload: any) {
   const defaults: Record<string, { subject: string; content: string }> = {
     verify: { subject: "{{name}} - 邮箱验证码", content: "您的验证码是：{{code}}。返回 {{url}}" },
+    mailLogin: { subject: "登录到 {{name}}", content: "请使用以下链接登录：{{link}}\n\n{{url}}" },
     notify: { subject: "{{name}} - 站点通知", content: "{{content}}\n\n{{url}}" },
     remindExpire: { subject: "{{name}} - 服务即将到期", content: "您的服务即将到期，请及时续费。{{url}}" },
     remindTraffic: { subject: "{{name}} - 流量使用提醒", content: "您的流量使用量已接近上限。{{url}}" }
@@ -51,8 +65,9 @@ async function resolveMailContent(env: Env, payload: any) {
   if (!row && legacyAliases[name]) row = await env.XBOARD_DB.prepare("SELECT subject, content FROM v2_mail_templates WHERE name = ?").bind(legacyAliases[name]).first<{ subject: string; content: string }>();
   const template = row || defaults[name] || defaults.notify;
   const vars = payload.template_value?.vars || payload.vars || {};
-  const subject = render(String(template.subject || ""), vars) || render(String(payload.subject || ""), vars);
-  const renderedContent = render(String(template.content), vars);
+  const renderVars = row ? safeMailVars(vars, payload.template_value?.content_mode || payload.content_mode) : vars;
+  const subject = render(String(template.subject || ""), renderVars) || render(String(payload.subject || ""), renderVars);
+  const renderedContent = render(String(template.content), renderVars);
   const text = row || (!payload.html && !payload.text) ? renderedContent : render(String(payload.text || ""), vars);
   const html = row
     ? renderedContent

@@ -44,6 +44,12 @@ function get(value: unknown, path: string, fallback: any = null): any {
   return cursor ?? fallback;
 }
 
+function nullableNested(value: unknown) {
+  if (Array.isArray(value) && value.length === 0) return null;
+  if (value && typeof value === "object" && Object.keys(value as Row).length === 0) return null;
+  return value ?? null;
+}
+
 function int(value: unknown, fallback = 0): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? Math.trunc(parsed) : fallback;
@@ -117,14 +123,14 @@ export function buildNodeConfig(node: Row, routeRows: Row[] = []): Row {
     listen_ip: "0.0.0.0",
     server_port: int(node.server_port),
     network: get(settings, "network", null),
-    networkSettings: get(settings, "network_settings", null)
+    networkSettings: nullableNested(get(settings, "network_settings", null))
   };
   let response: Row;
   switch (type) {
     case "shadowsocks": {
       const cipher = get(settings, "cipher", null);
       const keyLength = cipher === "2022-blake3-aes-128-gcm" ? 16 : cipher === "2022-blake3-aes-256-gcm" ? 32 : 0;
-      response = { ...base, cipher, plugin: get(settings, "plugin", null), plugin_opts: get(settings, "plugin_opts", null), server_key: keyLength ? shadowsocksServerKey(node.created_at, keyLength) : null };
+      response = { ...base, cipher, plugin: get(settings, "plugin", null), plugin_opts: get(settings, "plugin_opts", null), server_key: keyLength ? shadowsocksServerKey(node.parent_created_at ?? node.created_at, keyLength) : null };
       break;
     }
     case "vmess":

@@ -110,6 +110,7 @@ test("client matching and encoded formats follow upstream flags", () => {
   assert.equal(__test.clientOf(new Request("https://sub.example/s/token", { headers: { "user-agent": "Mozilla/5.0" } })), "plain");
   assert.equal(__test.clientOf(new Request("https://sub.example/s/token?flag=shadowsocks")), "shadowsocks");
   assert.equal(__test.clientOf(new Request("https://sub.example/s/token?flag=quantumult-x")), "quantumultx");
+  assert.equal(__test.clientOf(new Request("https://sub.example/s/token?flag=quantumult%2520x")), "quantumultx");
   assert.equal(__test.clientOf(new Request("https://sub.example/s/token", { headers: { "user-agent": "mihomo/1.19" } })), "clashmeta");
   const user = { uuid: "00000000-0000-4000-8000-000000000000", u: 0, d: 0, transfer_enable: 1 };
   const server = { id: 1, type: "shadowsocks", name: "Node", host: "127.0.0.1", port: 8388, protocol_settings: { cipher: "aes-128-gcm" } };
@@ -407,8 +408,20 @@ test("Sing-box selectors honor include, exclude and fallback and protocol-specif
 test("QuantumultX user agents and disabled template fallbacks match upstream behavior", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /flag\.includes\("quantumultx"\)/);
-  assert.doesNotMatch(source, /quantumult%20x/);
+  assert.match(source, /quantumult%20x/);
   assert.match(source, /SELECT name, COALESCE\(content, ''\) AS content FROM v2_subscribe_templates WHERE enabled = 1/);
+});
+
+test("client-specific AnyTLS and Mieru output matches upstream", () => {
+  const oldShadowrocket = new Request("https://sub.example/s/token", { headers: { "user-agent": "shadowrocket/1000" } });
+  assert.equal(__test.filterByClientCompatibility("shadowrocket", oldShadowrocket, [{ type: "anytls", protocol_settings: {} }]).length, 0);
+  const surfboard = __test.proxyLine({ uuid: "u" }, { type: "anytls", name: "A", host: "h", port: 443, protocol_settings: { tls: {} } }, "surfboard");
+  assert.match(surfboard, /tfo=true/);
+  assert.match(surfboard, /udp-relay=true/);
+  const mieru = __test.clashProxy({ uuid: "u" }, { type: "mieru", name: "M", host: "h", port: 443, ports: "4000-5000", protocol_settings: { transport: "tcp" } }, "clashmeta");
+  assert.equal(mieru.transport, "TCP");
+  assert.equal(mieru["port-range"], "4000-5000");
+  assert.match(__test.responseHeaders("plain", {}, { u: 0, d: 0, transfer_enable: 0, expired_at: null })["subscription-userinfo"], /expire=$/);
 });
 
 test("Clash-family Hysteria, TUIC and network allowlists follow upstream clients", () => {

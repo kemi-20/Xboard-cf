@@ -186,3 +186,14 @@ test("invalid node rates follow the upstream numeric cast instead of charging at
   assert.match(source, /Number\.isFinite\(parsedFallback\) \? parsedFallback : 0/);
   assert.doesNotMatch(source, /Number\.isFinite\(parsedFallback\) \? parsedFallback : 1/);
 });
+
+test("node synchronization targets live users and preserves child node keys", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const protocol = fs.readFileSync("src/protocol.ts", "utf8");
+  assert.match(source, /async function nodeWebsocketIsAlive/);
+  assert.match(source, /catch \{ return true; \}/);
+  assert.match(source, /!Number\(user\.plan_id\)/);
+  assert.match(source, /SELECT created_at FROM v2_server WHERE id = \?/);
+  assert.match(protocol, /node\.parent_created_at \?\? node\.created_at/);
+  assert.match(protocol, /function nullableNested/);
+});
