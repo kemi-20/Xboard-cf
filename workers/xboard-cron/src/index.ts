@@ -128,7 +128,7 @@ async function checkCommission(env: Env, ts: number) {
         if (!inviterId) continue;
         const inviter = await env.XBOARD_DB.prepare("SELECT id, invite_user_id FROM v2_user WHERE id = ?").bind(inviterId).first<Record<string, any>>();
         if (!inviter) continue;
-        const amount = Math.trunc(Number(order.commission_balance || 0) * share / 100);
+        const amount = Number(order.commission_balance || 0) * share / 100;
         if (!amount) continue;
         const column = settings.closeWithdraw ? "balance" : "commission_balance";
         statements.push(env.XBOARD_DB.prepare(`UPDATE v2_user SET ${column} = COALESCE(${column}, 0) + ?, updated_at = ? WHERE id = ? AND EXISTS (SELECT 1 FROM v2_order WHERE id = ? AND commission_status = 1)`)
@@ -148,13 +148,17 @@ async function checkCommission(env: Env, ts: number) {
 async function resetTraffic(env: Env, ts: number) {
   const systemMethod = Number(await setting(env, "reset_traffic_method", "1"));
   while (true) {
-    const users = await env.XBOARD_DB.prepare(`SELECT u.id, u.u, u.d, u.expired_at, u.next_reset_at, u.reset_count, p.reset_traffic_method
+    const users = await env.XBOARD_DB.prepare(`SELECT u.id, u.u, u.d, u.expired_at, u.next_reset_at, u.reset_count, p.id AS plan_exists, p.reset_traffic_method
       FROM v2_user u LEFT JOIN v2_plan p ON p.id = u.plan_id
       WHERE u.next_reset_at IS NOT NULL AND u.next_reset_at <= ? AND u.plan_id IS NOT NULL
         AND u.banned = 0 AND (u.expired_at IS NULL OR u.expired_at > ?)
       ORDER BY u.id ASC LIMIT 100`).bind(ts, ts).all<any>();
     if (!(users.results || []).length) break;
     for (const user of users.results || []) {
+      if (user.plan_exists === null || user.plan_exists === undefined) {
+        await env.XBOARD_DB.prepare("UPDATE v2_user SET next_reset_at = NULL, updated_at = ? WHERE id = ?").bind(ts, user.id).run();
+        continue;
+      }
       const next = nextResetAt(user, systemMethod, ts + 1);
       const oldU = Number(user.u || 0), oldD = Number(user.d || 0);
       const method = user.reset_traffic_method === null || user.reset_traffic_method === undefined ? systemMethod : Number(user.reset_traffic_method);
@@ -175,14 +179,14 @@ async function statistics(env: Env, ts: number, day: number) {
   const last = await optionalKvGet(env, "schedule:last_run:xboard:statistics");
   if (last && dayStart(Number(last)) >= day) return;
   const users = await env.XBOARD_DB.prepare("SELECT COUNT(*) AS user_count FROM v2_user").first<any>();
-  const traffic = await env.XBOARD_DB.prepare("SELECT COALESCE(SUM(u + d), 0) AS transfer_used FROM v2_stat_server WHERE created_at >= ? AND created_at < ?").bind(recordDay, day).first<any>();
+  const traffic = await env.XBOARD_DB.prepare("SELECT COALESCE(SUM(u), 0) + COALESCE(SUM(d), 0) AS transfer_used FROM v2_stat_server WHERE created_at >= ? AND created_at < ?").bind(recordDay, day).first<any>();
   const orders = await env.XBOARD_DB.prepare("SELECT COUNT(*) AS order_count, COALESCE(SUM(total_amount), 0) AS order_total FROM v2_order WHERE created_at >= ? AND created_at < ?").bind(recordDay, day).first<any>();
   const paid = await env.XBOARD_DB.prepare("SELECT COUNT(*) AS paid_count, COALESCE(SUM(total_amount), 0) AS paid_total FROM v2_order WHERE paid_at >= ? AND paid_at < ? AND status NOT IN (0, 2)").bind(recordDay, day).first<any>();
   const commissions = await env.XBOARD_DB.prepare("SELECT COUNT(*) AS commission_count, COALESCE(SUM(get_amount), 0) AS commission_total FROM v2_commission_log WHERE created_at >= ? AND created_at < ?").bind(recordDay, day).first<any>();
   const registrations = await env.XBOARD_DB.prepare("SELECT COUNT(*) AS register_count, COALESCE(SUM(CASE WHEN invite_user_id IS NOT NULL THEN 1 ELSE 0 END), 0) AS invite_count FROM v2_user WHERE created_at >= ? AND created_at < ?").bind(recordDay, day).first<any>();
   const userCount = Number(users?.user_count || 0);
   const transferUsed = Number(traffic?.transfer_used || 0);
-  const existing = await env.XBOARD_DB.prepare("SELECT id FROM v2_stat WHERE record_at = ? ORDER BY id ASC LIMIT 1").bind(recordDay).first<any>();
+  const existing = await env.XBOARD_DB.prepare("SELECT id FROM v2_stat WHERE record_at = ? AND record_type = 'd' ORDER BY id ASC LIMIT 1").bind(recordDay).first<any>();
   if (existing) {
     await env.XBOARD_DB.prepare("UPDATE v2_stat SET user_count = ?, order_count = ?, order_total = ?, paid_count = ?, paid_total = ?, commission_count = ?, commission_total = ?, register_count = ?, invite_count = ?, transfer_used = ?, transfer_used_total = ?, record_type = 'd', updated_at = ? WHERE id = ?")
       .bind(userCount, Number(orders?.order_count || 0), Number(orders?.order_total || 0), Number(paid?.paid_count || 0), Number(paid?.paid_total || 0), Number(commissions?.commission_count || 0), Number(commissions?.commission_total || 0), Number(registrations?.register_count || 0), Number(registrations?.invite_count || 0), transferUsed, transferUsed, ts, existing.id).run();
@@ -288,14 +292,20 @@ async function checkOrders(env: Env, ts: number) {
       await env.XBOARD_DB.batch(statements);
     }
   }
-  const processing = await env.XBOARD_DB.prepare("SELECT * FROM v2_order WHERE status = 1 ORDER BY id ASC LIMIT 200").all<Record<string, any>>();
-  for (const order of processing.results || []) {
-    try { await openProcessingOrder(env, order, ts); }
-    catch (error) {
-      const message = String((error as any)?.message || error);
-      console.error("Failed to open processing order", { trade_no: order.trade_no, error });
-      await env.XBOARD_DB.prepare("INSERT INTO v2_job_logs(event_id, type, status, payload, error, created_at, updated_at) VALUES (?, 'order_handle', 'failed', ?, ?, ?, ?) ON CONFLICT(event_id) DO UPDATE SET status = 'failed', payload = excluded.payload, error = excluded.error, updated_at = excluded.updated_at")
-        .bind(`order:${order.id}`, JSON.stringify({ id: order.id, trade_no: order.trade_no }), message, ts, ts).run();
+  let lastProcessingId = 0;
+  while (true) {
+    const processing = await env.XBOARD_DB.prepare("SELECT * FROM v2_order WHERE status = 1 AND id > ? ORDER BY id ASC LIMIT 200").bind(lastProcessingId).all<Record<string, any>>();
+    const orders = processing.results || [];
+    if (!orders.length) break;
+    for (const order of orders) {
+      lastProcessingId = Number(order.id);
+      try { await openProcessingOrder(env, order, ts); }
+      catch (error) {
+        const message = String((error as any)?.message || error);
+        console.error("Failed to open processing order", { trade_no: order.trade_no, error });
+        await env.XBOARD_DB.prepare("INSERT INTO v2_job_logs(event_id, type, status, payload, error, created_at, updated_at) VALUES (?, 'order_handle', 'failed', ?, ?, ?, ?) ON CONFLICT(event_id) DO UPDATE SET status = 'failed', payload = excluded.payload, error = excluded.error, updated_at = excluded.updated_at")
+          .bind(`order:${order.id}`, JSON.stringify({ id: order.id, trade_no: order.trade_no }), message, ts, ts).run();
+      }
     }
   }
 }
@@ -324,10 +334,15 @@ async function checkTrafficExceeded(env: Env, ts: number) {
 }
 
 async function resetLogs(env: Env, ts: number) {
+  const monthThreshold = (months: number) => {
+    const date = new Date((ts + SHANGHAI_OFFSET) * 1000);
+    date.setUTCMonth(date.getUTCMonth() - months);
+    return Math.floor(date.getTime() / 1000) - SHANGHAI_OFFSET;
+  };
   await env.XBOARD_DB.batch([
-    env.XBOARD_DB.prepare("DELETE FROM v2_stat_user WHERE record_at < ?").bind(ts - 62 * 86400),
-    env.XBOARD_DB.prepare("DELETE FROM v2_stat_server WHERE record_at < ?").bind(ts - 62 * 86400),
-    env.XBOARD_DB.prepare("DELETE FROM v2_admin_audit_log WHERE created_at < ?").bind(ts - 93 * 86400),
+    env.XBOARD_DB.prepare("DELETE FROM v2_stat_user WHERE record_at < ?").bind(monthThreshold(2)),
+    env.XBOARD_DB.prepare("DELETE FROM v2_stat_server WHERE record_at < ?").bind(monthThreshold(2)),
+    env.XBOARD_DB.prepare("DELETE FROM v2_admin_audit_log WHERE created_at < ?").bind(monthThreshold(3)),
     env.XBOARD_DB.prepare("DELETE FROM failed_jobs WHERE failed_at < ?").bind(ts - 7 * 86400),
     env.XBOARD_DB.prepare("DELETE FROM v2_job_logs WHERE COALESCE(updated_at, created_at) < ?").bind(ts - 7 * 86400)
   ]);

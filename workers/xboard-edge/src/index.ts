@@ -499,9 +499,13 @@ async function ensureBootstrap(env: Env) {
     "CREATE INDEX IF NOT EXISTS idx_gift_code_status ON v2_gift_card_code(status)",
     "CREATE INDEX IF NOT EXISTS idx_gift_code_batch_id ON v2_gift_card_code(batch_id)",
     "CREATE INDEX IF NOT EXISTS idx_gift_code_expires_at ON v2_gift_card_code(expires_at)",
+    "CREATE INDEX IF NOT EXISTS idx_gift_code_user_id ON v2_gift_card_code(user_id)",
     "CREATE INDEX IF NOT EXISTS idx_gift_code_lookup ON v2_gift_card_code(code, status, expires_at)",
+    "CREATE INDEX IF NOT EXISTS idx_gift_template_created_at ON v2_gift_card_template(created_at)",
     "CREATE INDEX IF NOT EXISTS idx_gift_usage_code_id ON v2_gift_card_usage(code_id)",
     "CREATE INDEX IF NOT EXISTS idx_gift_usage_invite_user_id ON v2_gift_card_usage(invite_user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_gift_usage_user_id ON v2_gift_card_usage(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_gift_usage_created_at ON v2_gift_card_usage(created_at)",
     "CREATE INDEX IF NOT EXISTS idx_gift_usage_user_usage ON v2_gift_card_usage(user_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_gift_usage_template_stats ON v2_gift_card_usage(template_id, created_at)"
   ]) await runSqlIgnore(env, sql);
@@ -517,6 +521,7 @@ async function ensureBootstrap(env: Env) {
   ]) await runSqlIgnore(env, sql);
   for (const sql of [
     "CREATE INDEX IF NOT EXISTS idx_v2_order_created_at ON v2_order(created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_personal_access_tokens_tokenable ON personal_access_tokens(tokenable_type, tokenable_id)",
     "CREATE INDEX IF NOT EXISTS idx_v2_order_status ON v2_order(status)",
     "CREATE INDEX IF NOT EXISTS idx_v2_order_total_amount ON v2_order(total_amount)",
     "CREATE INDEX IF NOT EXISTS idx_v2_order_commission_status ON v2_order(commission_status)",
@@ -870,8 +875,8 @@ async function guestApi(request: Request, env: Env, path: string) {
     const update = await body<Record<string, any>>(request);
     const join = update.chat_join_request;
     if (join?.chat?.id && join?.from?.id) {
-      const user = await env.XBOARD_DB.prepare("SELECT banned,expired_at,transfer_enable,u,d FROM v2_user WHERE telegram_id = ?").bind(Number(join.from.id)).first<Record<string, any>>();
-      const available = !!user && !Number(user.banned) && (!user.expired_at || Number(user.expired_at) > now()) && (!Number(user.transfer_enable) || Number(user.u || 0) + Number(user.d || 0) < Number(user.transfer_enable));
+      const user = await env.XBOARD_DB.prepare("SELECT banned,expired_at,transfer_enable FROM v2_user WHERE telegram_id = ?").bind(Number(join.from.id)).first<Record<string, any>>();
+      const available = !!user && userIsAvailable(user);
       try { await telegramRequest(botToken, available ? "approveChatJoinRequest" : "declineChatJoinRequest", { chat_id: join.chat.id, user_id: join.from.id }); } catch (error: any) { return fail(error?.message || "Telegram request failed", 400, 400); }
     }
     return ok(true);
@@ -1213,27 +1218,49 @@ async function trafficRank(env: Env, url: URL) {
   const type = url.searchParams.get("type") || "user";
   const start = Number(url.searchParams.get("start_time") || 0);
   const end = Number(url.searchParams.get("end_time") || now());
+  const previousStart = start - Math.max(0, end - start);
+  const calculateChange = (value: number, previousValue: number) => previousValue > 0
+    ? Math.round(((value - previousValue) / previousValue) * 1000) / 10
+    : 0;
   if (type === "node") {
     try {
       const rows = await env.XBOARD_DB.prepare(
-        "SELECT s.name AS name, COALESCE(SUM(ss.u + ss.d), 0) AS value FROM v2_stat_server ss LEFT JOIN v2_server s ON s.id = ss.server_id WHERE ss.record_at >= ? AND ss.record_at < ? AND COALESCE(ss.record_type, 'd') = 'd' GROUP BY ss.server_id ORDER BY value DESC LIMIT 10"
-      ).bind(start, end).all<{ name: string; value: number }>();
-      const ranked = (rows.results || []).map(row => ({ name: row.name || "Node", value: Number(row.value || 0), change: 0 }));
+        `SELECT ss.server_id AS id, s.name AS name, COALESCE(SUM(ss.u + ss.d), 0) AS value,
+          COALESCE((SELECT SUM(previous.u + previous.d) FROM v2_stat_server previous
+            WHERE previous.server_id = ss.server_id AND previous.record_at >= ? AND previous.record_at < ?
+              AND COALESCE(previous.record_type, 'd') = 'd'), 0) AS previousValue
+         FROM v2_stat_server ss LEFT JOIN v2_server s ON s.id = ss.server_id
+         WHERE ss.record_at >= ? AND ss.record_at <= ? AND COALESCE(ss.record_type, 'd') = 'd'
+         GROUP BY ss.server_id ORDER BY value DESC LIMIT 10`
+      ).bind(previousStart, start, start, end).all<{ id: number; name: string; value: number; previousValue: number }>();
+      const ranked = (rows.results || []).map(row => {
+        const value = Number(row.value || 0); const previousValue = Number(row.previousValue || 0);
+        return { id: String(row.id), name: row.name || `Node ${row.id}`, value, previousValue, change: calculateChange(value, previousValue), timestamp: new Date(end * 1000).toISOString() };
+      });
       if (ranked.length) return ranked;
       const fallback = await env.XBOARD_DB.prepare("SELECT name, COALESCE(u, 0) + COALESCE(d, 0) AS value FROM v2_server ORDER BY value DESC, id ASC LIMIT 10").all<{ name: string; value: number }>();
-      return (fallback.results || []).map(row => ({ name: row.name || "Node", value: Number(row.value || 0), change: 0 }));
+      return (fallback.results || []).map(row => ({ name: row.name || "Node", value: Number(row.value || 0), previousValue: 0, change: 0, timestamp: new Date(end * 1000).toISOString() }));
     } catch {
       return [];
     }
   }
   try {
     const rows = await env.XBOARD_DB.prepare(
-      "SELECT u.email AS name, COALESCE(SUM(su.u + su.d), 0) AS value FROM v2_stat_user su LEFT JOIN v2_user u ON u.id = su.user_id WHERE su.record_at >= ? AND su.record_at < ? AND COALESCE(su.record_type, 'd') = 'd' GROUP BY su.user_id ORDER BY value DESC LIMIT 10"
-    ).bind(start, end).all<{ name: string; value: number }>();
-    const ranked = (rows.results || []).map(row => ({ name: row.name || "User", value: Number(row.value || 0), change: 0 }));
+      `SELECT su.user_id AS id, u.email AS name, COALESCE(SUM(su.u + su.d), 0) AS value,
+        COALESCE((SELECT SUM(previous.u + previous.d) FROM v2_stat_user previous
+          WHERE previous.user_id = su.user_id AND previous.record_at >= ? AND previous.record_at < ?
+            AND COALESCE(previous.record_type, 'd') = 'd'), 0) AS previousValue
+       FROM v2_stat_user su LEFT JOIN v2_user u ON u.id = su.user_id
+       WHERE su.record_at >= ? AND su.record_at <= ? AND COALESCE(su.record_type, 'd') = 'd'
+       GROUP BY su.user_id ORDER BY value DESC LIMIT 10`
+    ).bind(previousStart, start, start, end).all<{ id: number; name: string; value: number; previousValue: number }>();
+    const ranked = (rows.results || []).map(row => {
+      const value = Number(row.value || 0); const previousValue = Number(row.previousValue || 0);
+      return { id: String(row.id), name: row.name || `User ${row.id}`, value, previousValue, change: calculateChange(value, previousValue), timestamp: new Date(end * 1000).toISOString() };
+    });
     if (ranked.length) return ranked;
     const fallback = await env.XBOARD_DB.prepare("SELECT email AS name, COALESCE(u, 0) + COALESCE(d, 0) AS value FROM v2_user ORDER BY value DESC, id ASC LIMIT 10").all<{ name: string; value: number }>();
-    return (fallback.results || []).map(row => ({ name: row.name || "User", value: Number(row.value || 0), change: 0 }));
+    return (fallback.results || []).map(row => ({ name: row.name || "User", value: Number(row.value || 0), previousValue: 0, change: 0, timestamp: new Date(end * 1000).toISOString() }));
   } catch {
     return [];
   }
@@ -1591,9 +1618,8 @@ function boolNumber(value: unknown, fallback = 1) {
 
 function userIsAvailable(user: Record<string, any>) {
   return !Number(user.banned)
-    && user.plan_id !== null && user.plan_id !== undefined
     && (user.expired_at === null || user.expired_at === undefined || Number(user.expired_at) > now())
-    && Number(user.transfer_enable || 0) - Number(user.u || 0) - Number(user.d || 0) > 0;
+    && Number(user.transfer_enable || 0) > 0;
 }
 
 function phpUrlEncode(value: string) {
@@ -1805,7 +1831,7 @@ async function generateAdminUsers(request: Request, env: Env) {
     const userUuid = uuid();
     const userToken = token(16);
     statements.push(env.XBOARD_DB.prepare(`INSERT INTO v2_user(email, password, password_algo, password_salt, uuid, token, plan_id, group_id, expired_at, transfer_enable, speed_limit, device_limit, remind_expire, remind_traffic, created_at, updated_at)
-      VALUES (?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+      VALUES (?, ?, 'bcrypt', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
       email, await hashPassword(password), userUuid, userToken, plan ? planId : null, plan?.group_id ?? null,
       expiredAt, Number(plan?.transfer_enable || 0) * 1073741824, plan?.speed_limit ?? null, plan?.device_limit ?? null,
       boolNumber(pickSetting(all, "default_remind_expire", 1), 1), boolNumber(pickSetting(all, "default_remind_traffic", 1), 1), ts, ts
@@ -2192,7 +2218,7 @@ async function registerUser(request: Request, env: Env) {
   const plan = planId ? await env.XBOARD_DB.prepare("SELECT id,group_id,transfer_enable,speed_limit,device_limit FROM v2_plan WHERE id = ?").bind(planId).first<Record<string, any>>() : null;
   const ts = now();
   const expiredAt = plan ? ts + Math.max(0, Number(pickSetting(all, "try_out_hour", 1))) * 3600 : null;
-  await env.XBOARD_DB.prepare("INSERT INTO v2_user(email,password,password_algo,password_salt,uuid,token,invite_user_id,plan_id,group_id,transfer_enable,speed_limit,device_limit,expired_at,remind_expire,remind_traffic,last_login_at,created_at,updated_at) VALUES (?,?,NULL,NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+  await env.XBOARD_DB.prepare("INSERT INTO v2_user(email,password,password_algo,password_salt,uuid,token,invite_user_id,plan_id,group_id,transfer_enable,speed_limit,device_limit,expired_at,remind_expire,remind_traffic,last_login_at,created_at,updated_at) VALUES (?,?,'bcrypt',NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
     .bind(email, await hashPassword(passwordText), uuid(), token(16), inviteUserId, plan?.id ?? null, plan?.group_id ?? null, Number(plan?.transfer_enable || 0) * 1073741824, plan?.speed_limit ?? null, plan?.device_limit ?? null, expiredAt, boolNumber(pickSetting(all, "default_remind_expire", 1), 1), boolNumber(pickSetting(all, "default_remind_traffic", 1), 1), ts, ts, ts).run();
   if (Number(pickSetting(all, "email_verify", 0))) {
     try { await env.XBOARD_KV.delete(`verify:email:${email}`); } catch {}
@@ -3311,7 +3337,7 @@ async function adminApi(request: Request, env: Env, path: string) {
     if (values.password) {
       if (String(values.password).length < 8) return fail("密码长度最小8位", 422, 422);
       values.password = await hashPassword(String(values.password));
-      values.password_algo = null;
+      values.password_algo = "bcrypt";
       values.password_salt = null;
     }
     if (values.balance !== undefined) values.balance = Math.round(Number(values.balance) * 100);
@@ -3529,7 +3555,7 @@ async function userApi(request: Request, env: Env, path: string) {
     if (!String(input.password || "")) return fail("Password can not be empty", 422, 422);
     if (String(input.password).length < 8) return fail("Password must be greater than 8 digits", 422, 422);
     const password = await hashPassword(String(input.password));
-    const result = await env.XBOARD_DB.prepare("UPDATE v2_user SET password = ?, password_algo = NULL, password_salt = NULL, updated_at = ? WHERE email = ?").bind(password, now(), email).run();
+    const result = await env.XBOARD_DB.prepare("UPDATE v2_user SET password = ?, password_algo = 'bcrypt', password_salt = NULL, updated_at = ? WHERE email = ?").bind(password, now(), email).run();
     if (!Number((result.meta as any)?.changes || 0)) return fail("User does not exist", 400, 400);
     try { await env.XBOARD_KV.delete(`verify:email:${email}`); } catch {}
     try { await env.XBOARD_KV.delete(limitKey); } catch {}
@@ -3606,9 +3632,7 @@ async function userApi(request: Request, env: Env, path: string) {
     return ok((result.results || []).map(row => row.category));
   }
   if (request.method === "GET" && route === "/stat/getTrafficLog") {
-    const start = new Date();
-    start.setUTCDate(1); start.setUTCHours(0, 0, 0, 0);
-    const result = await env.XBOARD_DB.prepare("SELECT * FROM v2_stat_user WHERE user_id = ? AND record_at >= ? ORDER BY record_at DESC").bind((user as any).id, Math.floor(start.getTime() / 1000)).all();
+    const result = await env.XBOARD_DB.prepare("SELECT * FROM v2_stat_user WHERE user_id = ? AND record_at >= ? ORDER BY record_at DESC").bind((user as any).id, monthStart()).all();
     return ok(result.results || []);
   }
   if (request.method === "GET" && route === "/info") {
@@ -3655,7 +3679,7 @@ async function userApi(request: Request, env: Env, path: string) {
     if (newPassword.length < 8) return fail("密码长度最小8位", 422, 422);
     if (!(await verifyPassword(oldPassword, String((user as any).password || ""), (user as any).password_algo, (user as any).password_salt))) return fail("旧密码错误", 400, 400);
     const password = await hashPassword(newPassword);
-    await env.XBOARD_DB.prepare("UPDATE v2_user SET password = ?, password_algo = NULL, password_salt = NULL, updated_at = ? WHERE id = ?").bind(password, now(), (user as any).id).run();
+    await env.XBOARD_DB.prepare("UPDATE v2_user SET password = ?, password_algo = 'bcrypt', password_salt = NULL, updated_at = ? WHERE id = ?").bind(password, now(), (user as any).id).run();
     const bearer = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "").trim() || request.headers.get("x-token") || request.headers.get("token") || "";
     if (bearer) await env.XBOARD_DB.prepare("DELETE FROM personal_access_tokens WHERE tokenable_id = ? AND token NOT IN (?, ?)").bind((user as any).id, bearer, await sessionTokenDigest(bearer)).run();
     else await env.XBOARD_DB.prepare("DELETE FROM personal_access_tokens WHERE tokenable_id = ?").bind((user as any).id).run();
@@ -3864,7 +3888,14 @@ async function userApi(request: Request, env: Env, path: string) {
     response.headers.set("etag", etag);
     return response;
   }
-  if (path.includes("/notice/fetch")) return ok((await rows(env.XBOARD_DB, "v2_notice", 50) as any[]).filter(row => Number(row.show ?? 1) === 1));
+  if (path.includes("/notice/fetch")) {
+    const url = new URL(request.url);
+    const page = Math.max(1, Number(url.searchParams.get("page") || 1));
+    const pageSize = 5;
+    const result = await env.XBOARD_DB.prepare("SELECT * FROM v2_notice WHERE show = 1 ORDER BY sort ASC, id DESC LIMIT ? OFFSET ?").bind(pageSize, (page - 1) * pageSize).all();
+    const total = await firstNumber(env, "SELECT COUNT(*) AS c FROM v2_notice WHERE show = 1");
+    return json({ data: result.results || [], total });
+  }
   if (path.includes("/knowledge/fetch")) {
     const url = new URL(request.url);
     const id = nullableNumber(url.searchParams.get("id"));

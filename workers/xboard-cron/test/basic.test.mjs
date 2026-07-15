@@ -81,7 +81,7 @@ test("cron implements the official order, ticket, commission and traffic checks"
   assert.match(source, /WHERE status = 0 AND created_at <= \?/);
   assert.match(source, /SELECT id, user_id, balance_amount FROM v2_order/);
   assert.match(source, /balance = COALESCE\(balance, 0\) \+ COALESCE\(\(SELECT balance_amount/);
-  assert.match(source, /WHERE status = 1 ORDER BY id ASC LIMIT 200/);
+  assert.match(source, /WHERE status = 1 AND id > \? ORDER BY id ASC LIMIT 200/);
   assert.match(source, /UPDATE v2_order SET status = 3/);
   assert.match(source, /ORDER BY u\.id ASC LIMIT 100/);
   assert.match(source, /online_count > 0 AND \(last_online_at IS NULL OR last_online_at < \?\)/);

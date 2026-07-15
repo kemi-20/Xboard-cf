@@ -244,11 +244,20 @@ function normalizedSourceRow(table: string, source: MigrationRow): MigrationRow 
     if (row.order_id === undefined) row.order_id = null;
   }
   if (table === "v2_coupon") row.type = Math.trunc(Number.parseFloat(String(row.type ?? 0)));
-  if (table === "v2_user" && row.password_algo == null && /^\$2[aby]\$/.test(String(row.password || ""))) row.password_algo = "bcrypt";
   if (table === "v2_user") {
+    if (row.password_algo == null) row.password_algo = /^\$2[aby]\$/.test(String(row.password || "")) ? "bcrypt" : "pbkdf2";
+    if (row.online_count == null) row.online_count = 0;
+    if (typeof row.last_login_ip === "number" || /^\d+$/.test(String(row.last_login_ip || ""))) {
+      const value = Number(row.last_login_ip);
+      if (Number.isInteger(value) && value >= 0 && value <= 0xffffffff) row.last_login_ip = [24, 16, 8, 0].map(shift => (value >>> shift) & 255).join(".");
+    }
     if (row.remind_expire == null) row.remind_expire = 1;
     if (row.remind_traffic == null) row.remind_traffic = 1;
   }
+  if (table === "v2_notice" && row.sort == null) row.sort = 0;
+  if (table === "v2_knowledge" && row.sort == null) row.sort = 0;
+  if (table === "v2_ticket_message" && row.is_admin == null) row.is_admin = 0;
+  if (table === "v2_traffic_reset_logs") row.reset_time = unixTime(row.reset_time) ?? unixTime(row.created_at) ?? now();
   if (table === "v2_plan") {
     if (row.transfer_enable == null) row.transfer_enable = 0;
     if (row.sort == null) row.sort = 0;
@@ -260,7 +269,7 @@ function normalizedSourceRow(table: string, source: MigrationRow): MigrationRow 
 async function prepareRows(db: D1Database, table: string, sourceRows: MigrationRow[]) {
   const columns = await tableColumns(db, table);
   const columnMap = new Map(columns.map(column => [column.name, column]));
-  return sourceRows.flatMap(source => {
+  const rows = sourceRows.flatMap(source => {
     const normalized = normalizedSourceRow(table, source);
     if (!normalized) return [];
     const row: MigrationRow = {};
@@ -275,6 +284,15 @@ async function prepareRows(db: D1Database, table: string, sourceRows: MigrationR
     }
     return [row];
   });
+  if (table === "v2_ticket_message") {
+    const userIds = [...new Set(rows.map(row => Number(row.user_id || 0)).filter(id => id > 0))];
+    if (userIds.length) {
+      const users = await db.prepare(`SELECT id, is_admin FROM v2_user WHERE id IN (${userIds.map(() => "?").join(",")})`).bind(...userIds).all<{ id: number; is_admin: number }>();
+      const adminUsers = new Set((users.results || []).filter(user => Number(user.is_admin) === 1).map(user => Number(user.id)));
+      for (const row of rows) row.is_admin = adminUsers.has(Number(row.user_id || 0)) ? 1 : 0;
+    }
+  }
+  return rows;
 }
 
 async function logMigration(env: MigrationEnv, runId: string, message: string, table?: string, details?: unknown, level = "info") {

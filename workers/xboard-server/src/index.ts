@@ -233,11 +233,11 @@ async function enqueueTraffic(env: Env, node: Row, raw: unknown) {
   const ts = now();
   const rate = currentRate(node);
   const events = [];
-  for (let offset = 0; offset < payload.length; offset += 10) {
+  for (let offset = 0; offset < payload.length; offset += 1000) {
     events.push({
       body: {
         event_id: crypto.randomUUID(), type: "traffic", server_id: Number(node.id),
-        server_type: String(node.type), rate, payload: payload.slice(offset, offset + 10), created_at: ts
+        server_type: String(node.type), rate, payload: payload.slice(offset, offset + 1000), created_at: ts
       }
     });
   }
@@ -292,7 +292,7 @@ async function processAlive(env: Env, nodeId: number, data: unknown) {
       if (Array.isArray(value)) for (const ip of value) ips.add(normalizeDeviceIp(ip));
       else if (value && typeof value === "object") for (const [ip, seenAt] of Object.entries(value)) if (Number(seenAt) >= timestamp - 300) ips.add(normalizeDeviceIp(ip));
     }
-    statements.push(env.XBOARD_DB.prepare("UPDATE v2_user SET online_count = ?, last_online_at = ?, updated_at = ? WHERE id = ?").bind(ips.size, ips.size ? timestamp : null, timestamp, Number(userId)));
+    statements.push(env.XBOARD_DB.prepare("UPDATE v2_user SET online_count = ?, last_online_at = ? WHERE id = ?").bind(ips.size, ips.size ? timestamp : null, Number(userId)));
   }
   if (statements.length) await env.XBOARD_DB.batch(statements);
   return true;
@@ -329,7 +329,7 @@ async function clearNodeDevices(env: Env, nodeId: number) {
     const statements = [];
     for (const userId of Object.keys(previous)) {
       const devices = await aggregateDevices(env, [{ id: Number(userId), device_limit: 1 }]);
-      statements.push(env.XBOARD_DB.prepare("UPDATE v2_user SET online_count = ?, last_online_at = ?, updated_at = ? WHERE id = ?").bind(Array.isArray(devices[userId]) ? devices[userId].length : 0, Array.isArray(devices[userId]) && devices[userId].length ? timestamp : null, timestamp, Number(userId)));
+      statements.push(env.XBOARD_DB.prepare("UPDATE v2_user SET online_count = ?, last_online_at = ? WHERE id = ?").bind(Array.isArray(devices[userId]) ? devices[userId].length : 0, Array.isArray(devices[userId]) && devices[userId].length ? timestamp : null, Number(userId)));
     }
     if (statements.length) await env.XBOARD_DB.batch(statements);
   }
@@ -346,9 +346,6 @@ async function processStatus(env: Env, node: Row, status: unknown) {
     updated_at: now(),
     kernel_status: value.kernel_status ?? null
   } as Row;
-  if (value.net?.in_speed !== undefined && value.net?.out_speed !== undefined) {
-    load.net = { in_speed: Number(value.net.in_speed), out_speed: Number(value.net.out_speed) };
-  }
   await reportStatus(env, "node", Number(node.id), { machine_id: Number(node.machine_id || 0) || null, load_status: load });
 }
 
@@ -364,8 +361,7 @@ async function processMetrics(env: Env, node: Row, metrics: unknown) {
   }
   await reportStatus(env, "node", Number(node.id), {
     machine_id: Number(node.machine_id || 0) || null,
-    metrics: value,
-    last_push_at: timestamp
+    metrics: value
   });
 }
 
@@ -375,6 +371,7 @@ function validateStatus(input: Row, optional = false): Response | null {
   for (const path of required) {
     const value = path.split(".").reduce<any>((cursor, part) => cursor?.[part], input);
     if (value === undefined || value === null || !Number.isFinite(Number(value)) || Number(value) < 0) return validationFailure(path, `The ${path} field is required.`);
+    if (path !== "cpu" && !Number.isInteger(Number(value))) return validationFailure(path, `The ${path} must be an integer.`);
   }
   if (Number(input.cpu) > 100) return validationFailure("cpu", "The cpu must not be greater than 100.");
   return null;
@@ -498,7 +495,7 @@ async function nodePushTarget(env: Env, node: Row) {
 
 async function nodeWebsocketIsAlive(env: Env, nodeId: number) {
   try { return Boolean(await env.XBOARD_KV.get(`node:ws:alive:${nodeId}`)); }
-  catch { return true; }
+  catch { return false; }
 }
 
 function websocketError(message: string) {
@@ -826,7 +823,10 @@ export class NodeHub {
       if (status) await processStatus(this.env, node, status);
       await processMetrics(this.env, node, metrics);
     }
-    if (event === "report.devices") await processAlive(this.env, nodeId, data.devices ?? data);
+    if (event === "report.devices") {
+      await processAlive(this.env, nodeId, data.devices ?? data);
+      socket.send(wsMessage("sync.devices", { users: await aggregateDevices(this.env, await nodeUsers(this.env, node)), ...(identity.mode === "machine" ? { node_id: nodeId } : {}) }));
+    }
     if (event === "request.devices") socket.send(wsMessage("sync.devices", { users: await aggregateDevices(this.env, await nodeUsers(this.env, node)), ...(identity.mode === "machine" ? { node_id: nodeId } : {}) }));
   }
 
@@ -956,7 +956,7 @@ export default {
       let name: string;
       if (input.machine_id) {
         const machine = await getMachine(env, input.machine_id, input.token);
-        if (!machine || !Number(machine.is_active ?? machine.enabled ?? 1)) return websocketError("invalid machine credentials");
+        if (!machine || !Number(machine.is_active ?? 0)) return websocketError("invalid machine credentials");
         const nodes = await env.XBOARD_DB.prepare("SELECT id FROM v2_server WHERE machine_id = ? AND enabled = 1").bind(machine.id).all<Row>();
         for (const node of nodes.results || []) await disconnectDo(env, `node:${node.id}`);
         name = `machine:${machine.id}`;

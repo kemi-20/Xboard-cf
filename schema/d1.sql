@@ -514,16 +514,21 @@ CREATE TABLE IF NOT EXISTS v2_gift_card_usage (
 );
 
 CREATE INDEX IF NOT EXISTS idx_gift_template_type_status ON v2_gift_card_template(type, status);
+CREATE INDEX IF NOT EXISTS idx_gift_template_created_at ON v2_gift_card_template(created_at);
 CREATE INDEX IF NOT EXISTS idx_gift_code_template_id ON v2_gift_card_code(template_id);
 CREATE INDEX IF NOT EXISTS idx_gift_code_status ON v2_gift_card_code(status);
 CREATE INDEX IF NOT EXISTS idx_gift_code_batch_id ON v2_gift_card_code(batch_id);
 CREATE INDEX IF NOT EXISTS idx_gift_code_expires_at ON v2_gift_card_code(expires_at);
+CREATE INDEX IF NOT EXISTS idx_gift_code_user_id ON v2_gift_card_code(user_id);
 CREATE INDEX IF NOT EXISTS idx_gift_code_lookup ON v2_gift_card_code(code, status, expires_at);
 CREATE INDEX IF NOT EXISTS idx_gift_usage_code_id ON v2_gift_card_usage(code_id);
 CREATE INDEX IF NOT EXISTS idx_gift_usage_invite_user_id ON v2_gift_card_usage(invite_user_id);
+CREATE INDEX IF NOT EXISTS idx_gift_usage_user_id ON v2_gift_card_usage(user_id);
+CREATE INDEX IF NOT EXISTS idx_gift_usage_created_at ON v2_gift_card_usage(created_at);
 CREATE INDEX IF NOT EXISTS idx_gift_usage_user_usage ON v2_gift_card_usage(user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_gift_usage_template_stats ON v2_gift_card_usage(template_id, created_at);
 
+CREATE INDEX IF NOT EXISTS idx_personal_access_tokens_tokenable ON personal_access_tokens(tokenable_type, tokenable_id);
 CREATE INDEX IF NOT EXISTS idx_v2_user_token ON v2_user(token);
 CREATE INDEX IF NOT EXISTS idx_v2_user_next_reset_at ON v2_user(next_reset_at);
 CREATE INDEX IF NOT EXISTS idx_v2_user_online ON v2_user(last_online_at, online_count);

@@ -130,7 +130,7 @@ export function buildNodeConfig(node: Row, routeRows: Row[] = []): Row {
     case "shadowsocks": {
       const cipher = get(settings, "cipher", null);
       const keyLength = cipher === "2022-blake3-aes-128-gcm" ? 16 : cipher === "2022-blake3-aes-256-gcm" ? 32 : 0;
-      response = { ...base, cipher, plugin: get(settings, "plugin", null), plugin_opts: get(settings, "plugin_opts", null), server_key: keyLength ? shadowsocksServerKey(node.parent_created_at ?? node.created_at, keyLength) : null };
+      response = { ...base, cipher, plugin: get(settings, "plugin", null), plugin_opts: get(settings, "plugin_opts", null), server_key: keyLength ? shadowsocksServerKey(node.created_at, keyLength) : null };
       break;
     }
     case "vmess":
@@ -181,7 +181,7 @@ export function buildNodeConfig(node: Row, routeRows: Row[] = []): Row {
   if (outbounds.length) response.custom_outbounds = outbounds;
   if (customRoutes.length) response.custom_routes = customRoutes;
   const cert = objectAt(node.cert_config);
-  if (Object.values(cert).some(value => value !== null && value !== undefined && value !== "")) {
+  if (Object.keys(cert).length) {
     if (cert.mode && !cert.cert_mode) { cert.cert_mode = cert.mode; delete cert.mode; }
     if (cert.cert_mode && cert.cert_mode !== "none") response.cert_config = cert;
   }

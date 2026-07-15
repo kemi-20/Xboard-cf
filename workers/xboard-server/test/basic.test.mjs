@@ -144,8 +144,8 @@ test("a KV outage falls straight through to D1 without a second KV attempt", asy
 
 test("large traffic reports are split before entering the queue", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
-  assert.match(source, /offset \+= 10/);
-  assert.match(source, /payload\.slice\(offset, offset \+ 10\)/);
+  assert.match(source, /offset \+= 1000/);
+  assert.match(source, /payload\.slice\(offset, offset \+ 1000\)/);
   assert.match(source, /TRAFFIC_EVENTS\.sendBatch\(events\)/);
 });
 
@@ -166,6 +166,7 @@ test("websocket device state follows the official per-IP contract", () => {
   assert.match(source, /node:ws:target:\$\{nodeId\}`[\s\S]*expirationTtl: 86400/);
   assert.match(source, /UPDATE v2_user SET online_count = \?/);
   assert.match(source, /Internal sync token is not configured/);
+  assert.match(source, /event === "report\.devices"[\s\S]*socket\.send\(wsMessage\("sync\.devices"/);
 });
 
 test("traffic-exceeded user removals are batched per node", () => {
@@ -191,9 +192,8 @@ test("node synchronization targets live users and preserves child node keys", ()
   const source = fs.readFileSync("src/index.ts", "utf8");
   const protocol = fs.readFileSync("src/protocol.ts", "utf8");
   assert.match(source, /async function nodeWebsocketIsAlive/);
-  assert.match(source, /catch \{ return true; \}/);
+  assert.match(source, /catch \{ return false; \}/);
   assert.match(source, /!Number\(user\.plan_id\)/);
-  assert.match(source, /SELECT created_at FROM v2_server WHERE id = \?/);
-  assert.match(protocol, /node\.parent_created_at \?\? node\.created_at/);
+  assert.match(protocol, /shadowsocksServerKey\(node\.created_at, keyLength\)/);
   assert.match(protocol, /function nullableNested/);
 });

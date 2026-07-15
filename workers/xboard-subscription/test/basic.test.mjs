@@ -428,7 +428,7 @@ test("Sing-box selectors honor include, exclude and fallback and protocol-specif
     { type: "selector", tag: "HK", outbounds: [], include: "HK|香港" },
     { type: "selector", tag: "JP", outbounds: [], include: "JP", fallback: "direct" },
     { type: "direct", tag: "direct" }
-  ] }), user, servers));
+  ] }), user, servers, "sing-box/1.13.0"));
   assert.deepEqual(rendered.outbounds.find(item => item.tag === "HK").outbounds, ["HK Hysteria"]);
   assert.deepEqual(rendered.outbounds.find(item => item.tag === "JP").outbounds, ["direct"]);
   const hysteria = rendered.outbounds.find(item => item.tag === "HK Hysteria");
@@ -587,4 +587,59 @@ test("audited subscription protocol regressions match upstream", () => {
   assert.deepEqual(__test.filterByClientCompatibility("singbox", singboxOld, [
     { type: "tuic", protocol_settings: {} }, { type: "hysteria", protocol_settings: { version: 1 } }, { type: "anytls", protocol_settings: {} }
   ]), []);
+
+  const shadowrocketSecure = __test.shadowrocketLine(user, {
+    type: "hysteria", name: "Hy2", host: "node.example", port: 443,
+    protocol_settings: { version: 2, tls: { allow_insecure: false } }
+  });
+  assert.match(shadowrocketSecure, /insecure=0/);
+  const shadowrocketInsecure = __test.shadowrocketLine(user, {
+    type: "anytls", name: "AnyTLS", host: "node.example", port: 443,
+    protocol_settings: { tls: { allow_insecure: true } }
+  });
+  assert.match(shadowrocketInsecure, /insecure=1/);
+
+  const generalVmess = JSON.parse(Buffer.from(__test.generalUri(user, {
+    type: "vmess", name: "VMess", host: "node.example", port: 443,
+    protocol_settings: {}
+  }).slice("vmess://".length), "base64").toString("utf8"));
+  assert.equal(generalVmess.net, null);
+  const generalHysteria = __test.generalUri(user, {
+    type: "hysteria", name: "Hy2", host: "node.example", port: 443,
+    protocol_settings: { version: 2, tls: {}, obfs: { open: true, type: "custom", password: "secret" } }
+  });
+  assert.match(generalHysteria, /obfs=salamander/);
+  assert.doesNotMatch(generalHysteria, /obfs=custom/);
+
+  const stashVless = __test.clashProxy(user, {
+    type: "vless", name: "VLESS", host: "node.example", port: 443,
+    protocol_settings: { network: "tcp", tls: 0 }
+  }, "stash");
+  assert.equal(stashVless.alterId, undefined);
+  assert.equal(stashVless.cipher, undefined);
+  assert.equal(stashVless.encryption, undefined);
+
+  const plainVmess = __test.clashProxy(user, { type: "vmess", name: "VMess", host: "node.example", port: 80, protocol_settings: { network: "tcp", tls: 0 } }, "clashmeta");
+  assert.equal(plainVmess.tls, undefined);
+  assert.equal(plainVmess["skip-cert-verify"], undefined);
+  const plainHttp = __test.clashProxy(user, { type: "http", name: "HTTP", host: "node.example", port: 80, protocol_settings: {} }, "clashmeta");
+  assert.equal(plainHttp.udp, undefined);
+
+  const loonTrojanTcp = __test.loonLine(user, {
+    type: "trojan", name: "Trojan TCP", host: "node.example", port: 443,
+    protocol_settings: { network: "tcp", tls: 1, tls_settings: {} }
+  });
+  assert.doesNotMatch(loonTrojanTcp, /transport=tcp/);
+
+  for (const type of ["hysteria", "mieru"]) {
+    const proxy = __test.clashProxy(user, { type, name: type, host: "node.example", port: 443, protocol_settings: { version: 2 } }, "clashmeta");
+    assert.equal(proxy.udp, undefined);
+  }
+
+  const hiddify = { outbounds: [{ type: "hysteria2", server_ports: ["1000:2000"], hop_interval: "10s" }] };
+  __test.adaptSingboxConfig(hiddify, "Hiddify/2.5.7");
+  assert.equal(hiddify.outbounds[0].server_ports, undefined);
+  assert.equal(hiddify.outbounds[0].hop_interval, undefined);
+
+  assert.equal(__test.responseHeaders("clash", { app_name: "XBoard" }, user)["profile-web-page-url"], "");
 });

@@ -271,7 +271,10 @@ async function telegram(env: Env, event: any) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, text, parse_mode: parseMode, disable_web_page_preview: payload.disable_web_page_preview })
   });
-  if (!response.ok) throw new Error(`Telegram ${response.status}: ${(await response.text()).slice(0, 500)}`);
+  const responseText = await response.text();
+  let result: any = null;
+  try { result = JSON.parse(responseText); } catch {}
+  if (!response.ok || result?.ok !== true) throw new Error(`Telegram ${response.status}: ${String(result?.description || responseText).slice(0, 500)}`);
   await completeClaim(env, event.event_id, claim, []);
   } catch (error) {
     await failClaim(env, event.event_id, claim, error);
@@ -282,11 +285,11 @@ async function telegram(env: Env, event: any) {
 async function stat(env: Env, event: any) {
   const payload = event.payload || {};
   const recordAt = Number(payload.record_at || dayStart());
-  const existing = await env.XBOARD_DB.prepare("SELECT id FROM v2_stat WHERE record_at = ? ORDER BY id ASC LIMIT 1").bind(recordAt).first<any>();
+  const existing = await env.XBOARD_DB.prepare("SELECT id FROM v2_stat WHERE record_at = ? AND record_type = 'd' ORDER BY id ASC LIMIT 1").bind(recordAt).first<any>();
   const ts = now();
   const statements = existing
     ? [env.XBOARD_DB.prepare("UPDATE v2_stat SET user_count = COALESCE(?, user_count), order_count = COALESCE(?, order_count), transfer_used = COALESCE(?, transfer_used), updated_at = ? WHERE id = ?").bind(payload.user_count ?? null, payload.order_count ?? null, payload.transfer_used ?? null, ts, existing.id)]
-    : [env.XBOARD_DB.prepare("INSERT INTO v2_stat(record_at, user_count, order_count, transfer_used, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)").bind(recordAt, Number(payload.user_count || 0), Number(payload.order_count || 0), Number(payload.transfer_used || 0), ts, ts)];
+    : [env.XBOARD_DB.prepare("INSERT INTO v2_stat(record_at, record_type, user_count, order_count, transfer_used, created_at, updated_at) VALUES (?, 'd', ?, ?, ?, ?, ?)").bind(recordAt, Number(payload.user_count || 0), Number(payload.order_count || 0), Number(payload.transfer_used || 0), ts, ts)];
   await runOnce(env, event.event_id, "stat", event, statements);
 }
 

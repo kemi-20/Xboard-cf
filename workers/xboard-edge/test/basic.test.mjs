@@ -457,7 +457,7 @@ test("admin migration imports official SQLite data in bounded D1 batches", () =>
   assert.match(source, /transfer_used_total/);
   assert.match(source, /\["v2_stat", "v2_stat_user", "v2_stat_server"\][\s\S]*?row\.record_type = "d"/);
   assert.match(source, /v2_server_machine/);
-  assert.match(source, /password_algo = "bcrypt"/);
+  assert.match(source, /row\.password_algo = \/\^\\\$2\[aby\]\\\$\/.+\? "bcrypt" : "pbkdf2"/);
   assert.match(source, /table === "failed_jobs"/);
   assert.match(source, /failedAt < now\(\) - FAILED_JOB_RETENTION_SECONDS/);
   assert.match(source, /DELETE FROM failed_jobs WHERE failed_at < \?/);
@@ -762,10 +762,20 @@ test("admin user updates reject non-numeric numeric fields", () => {
   assert.match(source, /Number\.isFinite\(Number\(value\)\)/);
 });
 
+test("all newly hashed user passwords satisfy the D1 password algorithm constraint", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.doesNotMatch(source, /password_algo\s*=\s*NULL/);
+  assert.doesNotMatch(source, /password_algo, password_salt[\s\S]{0,300}VALUES \([^)]*NULL,NULL/);
+  assert.match(source, /VALUES \(\?, \?, 'bcrypt', NULL,/);
+  assert.match(source, /values\.password_algo = "bcrypt"/);
+  assert.match(source, /SET password = \?, password_algo = 'bcrypt', password_salt = NULL/);
+});
+
 test("user knowledge, server availability and invite commission match upstream contracts", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /function userIsAvailable/);
-  assert.match(source, /transfer_enable \|\| 0\) - Number\(user\.u \|\| 0\) - Number\(user\.d \|\| 0\) > 0/);
+  assert.match(source, /Number\(user\.transfer_enable \|\| 0\) > 0/);
+  assert.doesNotMatch(source, /user\.plan_id !== null/);
   assert.match(source, /language IS NULL/);
   assert.match(source, /SELECT \$\{selected\} FROM v2_knowledge/);
   assert.match(source, /phpUrlEncode\(subscription\)/);
@@ -774,6 +784,30 @@ test("user knowledge, server availability and invite commission match upstream c
   assert.match(source, /AND get_amount > 0/);
   assert.match(source, /crypto\.subtle\.digest\("SHA-1"/);
   assert.match(source, /Number\(coupon\.ended_at \|\| 0\) < ts/);
+});
+
+test("audited notice, ranking and migration edge cases match upstream", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const migration = fs.readFileSync("src/migration.ts", "utf8");
+  assert.match(source, /SELECT \* FROM v2_notice WHERE show = 1 ORDER BY sort ASC, id DESC LIMIT \? OFFSET \?/);
+  assert.match(source, /return json\(\{ data: result\.results \|\| \[\], total \}\)/);
+  assert.match(source, /previousValue/);
+  assert.match(source, /change: calculateChange\(value, previousValue\)/);
+  assert.match(source, /monthStart\(\)\)\.all\(\)/);
+  assert.match(migration, /row\.online_count == null/);
+  assert.match(migration, /row\.last_login_ip = \[24, 16, 8, 0\]/);
+  assert.match(migration, /table === "v2_traffic_reset_logs"/);
+  assert.match(migration, /SELECT id, is_admin FROM v2_user WHERE id IN/);
+  assert.match(migration, /adminUsers\.has\(Number\(row\.user_id/);
+});
+
+test("D1 keeps upstream lookup indexes used by tokens and gift cards", () => {
+  const schema = fs.readFileSync("../../schema/d1.sql", "utf8");
+  assert.match(schema, /idx_personal_access_tokens_tokenable ON personal_access_tokens\(tokenable_type, tokenable_id\)/);
+  assert.match(schema, /idx_gift_template_created_at ON v2_gift_card_template\(created_at\)/);
+  assert.match(schema, /idx_gift_code_user_id ON v2_gift_card_code\(user_id\)/);
+  assert.match(schema, /idx_gift_usage_user_id ON v2_gift_card_usage\(user_id\)/);
+  assert.match(schema, /idx_gift_usage_created_at ON v2_gift_card_usage\(created_at\)/);
 });
 
 test("audited admin and user mutations reject stale or partial operations", () => {

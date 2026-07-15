@@ -25,6 +25,15 @@ test("mail events support Maileroo and Brevo HTTP APIs with idempotency", () => 
   assert.match(source, /message\.retry\(\)/);
 });
 
+test("telegram and daily statistics preserve upstream success and record contracts", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const wrangler = fs.readFileSync("wrangler.toml", "utf8");
+  assert.match(source, /result\?\.ok !== true/);
+  assert.match(source, /SELECT id FROM v2_stat WHERE record_at = \? AND record_type = 'd'/);
+  assert.match(source, /INSERT INTO v2_stat\(record_at, record_type,[\s\S]*VALUES \(\?, 'd'/);
+  assert.match(wrangler, /queue = "telegram-events"[\s\S]*dead_letter_queue = "telegram-events-dlq"/);
+});
+
 test("traffic statistics persist the official server_rate field", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /server_rate, record_type/);
