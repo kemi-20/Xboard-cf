@@ -1,5 +1,19 @@
 import type { D1Database } from "./types";
 const SETTINGS_CACHE_TTL_MS = 60_000;
+const SETTINGS_NAMES = [
+  "app_name",
+  "app_url",
+  "commission_auto_check_enable",
+  "commission_distribution_enable",
+  "commission_distribution_l1",
+  "commission_distribution_l2",
+  "commission_distribution_l3",
+  "internal_sync_token",
+  "remind_mail_enable",
+  "reset_traffic_method",
+  "server_token",
+  "withdraw_close_enable"
+] as const;
 let settingsCache: { value: Record<string, string>; expiresAt: number } | null = null;
 let settingsPromise: Promise<Record<string, string>> | null = null;
 export async function list(db: D1Database, table: string, page = 1, pageSize = 20) {
@@ -12,7 +26,8 @@ export async function list(db: D1Database, table: string, page = 1, pageSize = 2
 export async function settings(db: D1Database) {
   if (settingsCache && settingsCache.expiresAt > Date.now()) return settingsCache.value;
   if (!settingsPromise) {
-    settingsPromise = db.prepare("SELECT name, value FROM v2_settings").all<{ name: string; value: string }>()
+    const placeholders = SETTINGS_NAMES.map(() => "?").join(", ");
+    settingsPromise = db.prepare(`SELECT name, value FROM v2_settings WHERE name IN (${placeholders})`).bind(...SETTINGS_NAMES).all<{ name: string; value: string }>()
       .then(rows => {
         const value = Object.fromEntries((rows.results || []).map(r => [r.name, r.value]));
         settingsCache = { value, expiresAt: Date.now() + SETTINGS_CACHE_TTL_MS };

@@ -92,7 +92,7 @@ Service Binding：XBOARD_SUBSCRIPTION -> xboard-subscription
 Queue Producer：MAIL_EVENTS -> mail-events
 ```
 
-D1 保存用户、套餐、节点、服务器、权限、设置、流量和统计等正式数据。KV 用于 Session、验证码、版本号、订阅缓存和设备限制等短期状态。全部机器与节点的实时运行状态及 24 小时负载采样由 `xboard-server` 中唯一的全局 `StatusHub` Durable Object 持久化，D1 不再写入高频心跳；各 Worker 对 `v2_settings` 使用 60 秒实例内存缓存。
+D1 保存用户、套餐、节点、服务器、权限、设置、流量和统计等正式数据。KV 用于 Session、验证码、版本号、订阅缓存和设备限制等短期状态。全部机器与节点的实时运行状态及 24 小时负载采样由 `xboard-server` 中唯一的全局 `StatusHub` Durable Object 持久化，D1 不再写入高频心跳；`xboard-edge` 对完整 `v2_settings` 使用 60 秒实例内存缓存，其他 Worker 只缓存各自实际使用的设置白名单。
 
 ## Resend 邮件
 
