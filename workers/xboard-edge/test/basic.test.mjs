@@ -74,10 +74,14 @@ test("admin UI and API follow the saved secure path", () => {
 test("dashboard queue statistics honor the official time windows", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /status = 'failed' AND COALESCE\(updated_at, created_at\) >= \?/);
+  assert.match(source, /SELECT COUNT\(\*\) AS count FROM failed_jobs WHERE failed_at >= \?/);
   assert.match(source, /current - 10080 \* 60/);
   assert.match(source, /WHERE created_at >= \?/);
   assert.match(source, /current - 60 \* 60/);
   assert.doesNotMatch(source, /SELECT status, COUNT\(\*\) AS count FROM v2_job_logs GROUP BY status/);
+  assert.match(source, /FROM failed_jobs WHERE failed_at >= \?/);
+  assert.match(source, /FROM v2_job_logs WHERE status = 'failed'/);
+  assert.match(source, /ORDER BY failed_at DESC LIMIT \? OFFSET \?/);
 });
 
 test("registration limits use the Cloudflare visitor IP and preserve it during automatic login", () => {
@@ -347,6 +351,10 @@ test("admin migration imports official SQLite data in bounded D1 batches", () =>
   assert.match(source, /\["v2_stat", "v2_stat_user", "v2_stat_server"\][\s\S]*?row\.record_type = "d"/);
   assert.match(source, /v2_server_machine/);
   assert.match(source, /password_algo = "bcrypt"/);
+  assert.match(source, /table === "failed_jobs"/);
+  assert.match(source, /failedAt < now\(\) - FAILED_JOB_RETENTION_SECONDS/);
+  assert.match(source, /DELETE FROM failed_jobs WHERE failed_at < \?/);
+  assert.match(source, /DELETE FROM v2_job_logs WHERE COALESCE\(updated_at, created_at\) < \?/);
   assert.match(source, /x-migration-token/);
   assert.match(source, /access_token_hash = NULL/);
   assert.match(index, /handleAdminMigration/);

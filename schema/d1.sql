@@ -387,6 +387,8 @@ CREATE TABLE IF NOT EXISTS v2_job_logs (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_failed_jobs_failed_at ON failed_jobs(failed_at);
+CREATE INDEX IF NOT EXISTS idx_v2_job_logs_status_time ON v2_job_logs(status, updated_at, created_at);
 CREATE TABLE IF NOT EXISTS v2_traffic_pending_check (
   user_id INTEGER PRIMARY KEY,
   updated_at INTEGER NOT NULL

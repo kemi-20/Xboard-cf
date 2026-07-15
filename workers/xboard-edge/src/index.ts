@@ -514,6 +514,8 @@ async function ensureBootstrap(env: Env) {
     "CREATE INDEX IF NOT EXISTS idx_v2_stat_user_u ON v2_stat_user(u)",
     "CREATE INDEX IF NOT EXISTS idx_v2_stat_user_d ON v2_stat_user(d)",
     "CREATE INDEX IF NOT EXISTS idx_v2_commission_log_created_at ON v2_commission_log(created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_failed_jobs_failed_at ON failed_jobs(failed_at)",
+    "CREATE INDEX IF NOT EXISTS idx_v2_job_logs_status_time ON v2_job_logs(status, updated_at, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_v2_commission_log_get_amount ON v2_commission_log(get_amount)",
     "CREATE INDEX IF NOT EXISTS idx_v2_user_t ON v2_user(t)",
     "CREATE INDEX IF NOT EXISTS idx_v2_user_online_count ON v2_user(online_count)",
@@ -2869,13 +2871,16 @@ async function adminApi(request: Request, env: Env, path: string) {
   }
   if (path.includes("/system/getQueueStats")) {
     const current = now();
-    const [failed, recent] = await Promise.all([
+    const cutoff = current - 10080 * 60;
+    const [workerFailed, legacyFailed, recent] = await Promise.all([
       env.XBOARD_DB.prepare("SELECT COUNT(*) AS count FROM v2_job_logs WHERE status = 'failed' AND COALESCE(updated_at, created_at) >= ?")
-        .bind(current - 10080 * 60).first<{ count: number }>(),
+        .bind(cutoff).first<{ count: number }>(),
+      env.XBOARD_DB.prepare("SELECT COUNT(*) AS count FROM failed_jobs WHERE failed_at >= ?")
+        .bind(cutoff).first<{ count: number }>(),
       env.XBOARD_DB.prepare("SELECT COUNT(*) AS count FROM v2_job_logs WHERE created_at >= ?")
         .bind(current - 60 * 60).first<{ count: number }>()
     ]);
-    const failedJobs = Number(failed?.count || 0);
+    const failedJobs = Number(workerFailed?.count || 0) + Number(legacyFailed?.count || 0);
     const recentJobs = Number(recent?.count || 0);
     return ok({ failedJobs, jobsPerMinute: 0, pausedMasters: 0, periods: { failedJobs: 10080, recentJobs: 60 }, processes: 1, queueWithMaxRuntime: null, queueWithMaxThroughput: null, recentJobs, status: true, wait: { "cloudflare-queues:default": 0 } });
   }
@@ -2885,8 +2890,25 @@ async function adminApi(request: Request, env: Env, path: string) {
   }
   if (path.includes("/system/getQueueMasters")) return ok([{ name: "xboard-jobs", status: "running", environment: "cloudflare-queues" }]);
   if (request.method === "GET" && route === "/system/getHorizonFailedJobs") {
-    const result = await env.XBOARD_DB.prepare("SELECT * FROM failed_jobs ORDER BY id DESC LIMIT 100").all();
-    return json({ data: result.results || [], total: (result.results || []).length, current_page: 1, per_page: 100 });
+    const url = new URL(request.url);
+    const current = Math.max(1, Math.trunc(Number(url.searchParams.get("current") || 1)) || 1);
+    const pageSize = Math.min(100, Math.max(10, Math.trunc(Number(url.searchParams.get("page_size") || 20)) || 20));
+    const cutoff = now() - 10080 * 60;
+    const offset = (current - 1) * pageSize;
+    const [result, total] = await Promise.all([
+      env.XBOARD_DB.prepare(`SELECT id, connection, queue, payload, exception, failed_at FROM (
+        SELECT 'legacy:' || id AS id, connection, queue, payload, exception, failed_at FROM failed_jobs WHERE failed_at >= ?
+        UNION ALL
+        SELECT event_id AS id, 'cloudflare' AS connection, type AS queue, COALESCE(payload, '') AS payload,
+          COALESCE(error, '') AS exception, COALESCE(updated_at, created_at) AS failed_at
+        FROM v2_job_logs WHERE status = 'failed' AND COALESCE(updated_at, created_at) >= ?
+      ) ORDER BY failed_at DESC LIMIT ? OFFSET ?`).bind(cutoff, cutoff, pageSize, offset).all(),
+      env.XBOARD_DB.prepare(`SELECT
+        (SELECT COUNT(*) FROM failed_jobs WHERE failed_at >= ?) +
+        (SELECT COUNT(*) FROM v2_job_logs WHERE status = 'failed' AND COALESCE(updated_at, created_at) >= ?) AS count`)
+        .bind(cutoff, cutoff).first<{ count: number }>()
+    ]);
+    return json({ data: result.results || [], total: Number(total?.count || 0), current, page_size: pageSize });
   }
   if ((request.method === "GET" || request.method === "POST") && route === "/system/getAuditLog") return ok(await adminAuditLogs(env, request));
   if (path.includes("/server/manage/save")) return saveServer(request, env);

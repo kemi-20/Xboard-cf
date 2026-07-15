@@ -36,6 +36,7 @@ const NON_MIGRATABLE_MAIL_SETTINGS = new Set([
   "resend_api_url", "resend_api_key", "resend_from_address", "resend_from_name"
 ]);
 const DEFAULT_THEME_SETTINGS = new Set(["frontend_theme", "current_theme"]);
+const FAILED_JOB_RETENTION_SECONDS = 7 * 86400;
 
 function isThemeSetting(name: unknown) {
   const key = String(name || "").trim().toLowerCase();
@@ -216,6 +217,11 @@ function normalizedSourceRow(table: string, source: MigrationRow): MigrationRow 
   if (NON_MIGRATABLE_SERVICE_TABLES.has(table)) return null;
   if (table === "v2_settings" && isNonMigratableSetting(source.name)) return null;
   const row = { ...source };
+  if (table === "failed_jobs") {
+    const failedAt = unixTime(row.failed_at);
+    if (failedAt === null || failedAt < now() - FAILED_JOB_RETENTION_SECONDS) return null;
+    row.failed_at = failedAt;
+  }
   if (table === "v2_stat" && row.transfer_used === undefined && row.transfer_used_total !== undefined) row.transfer_used = row.transfer_used_total;
   if (table === "v2_server_machine" && row.enabled === undefined && row.is_active !== undefined) row.enabled = row.is_active;
   if (table === "v2_server_machine") {
@@ -753,6 +759,8 @@ async function finishMigration(request: Request, env: MigrationEnv) {
   try {
     await env.XBOARD_DB.batch([
       env.XBOARD_DB.prepare("DELETE FROM v2_server_machine_load_history"),
+      env.XBOARD_DB.prepare("DELETE FROM failed_jobs WHERE failed_at < ?").bind(now() - FAILED_JOB_RETENTION_SECONDS),
+      env.XBOARD_DB.prepare("DELETE FROM v2_job_logs WHERE COALESCE(updated_at, created_at) < ?").bind(now() - FAILED_JOB_RETENTION_SECONDS),
       env.XBOARD_DB.prepare("UPDATE v2_server_machine SET last_seen_at = NULL, load_status = NULL"),
       env.XBOARD_DB.prepare("UPDATE v2_server SET last_check_at = NULL, last_push_at = NULL, online_user = 0, metrics = NULL")
     ]);

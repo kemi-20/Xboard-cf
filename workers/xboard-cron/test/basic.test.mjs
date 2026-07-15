@@ -52,4 +52,7 @@ test("cron implements the official order, ticket, commission and traffic checks"
   assert.match(source, /last_online_at IS NULL OR last_online_at < \?/);
   assert.match(source, /while \(true\)[\s\S]*commission_status = 1/);
   assert.match(source, /v2_traffic_pending_check[\s\S]*LIMIT 1000[\s\S]*DELETE FROM v2_traffic_pending_check/);
+  assert.match(source, /DELETE FROM failed_jobs WHERE failed_at < \?/);
+  assert.match(source, /DELETE FROM v2_job_logs WHERE COALESCE\(updated_at, created_at\) < \?/);
+  assert.match(source, /ts - 7 \* 86400/);
 });
