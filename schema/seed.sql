@@ -16,7 +16,7 @@ INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES
 ('currency', 'CNY', unixepoch(), unixepoch()),
 ('currency_symbol', '¥', unixepoch(), unixepoch()),
 ('try_out_plan_id', '1', unixepoch(), unixepoch()),
-('try_out_hour', '24', unixepoch(), unixepoch()),
+('try_out_hour', '1', unixepoch(), unixepoch()),
 ('plan_change_enable', '1', unixepoch(), unixepoch()),
 ('reset_traffic_method', '0', unixepoch(), unixepoch()),
 ('surplus_enable', '1', unixepoch(), unixepoch()),

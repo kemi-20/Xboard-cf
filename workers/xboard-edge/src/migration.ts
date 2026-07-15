@@ -245,6 +245,15 @@ function normalizedSourceRow(table: string, source: MigrationRow): MigrationRow 
   }
   if (table === "v2_coupon") row.type = Math.trunc(Number.parseFloat(String(row.type ?? 0)));
   if (table === "v2_user" && row.password_algo == null && /^\$2[aby]\$/.test(String(row.password || ""))) row.password_algo = "bcrypt";
+  if (table === "v2_user") {
+    if (row.remind_expire == null) row.remind_expire = 1;
+    if (row.remind_traffic == null) row.remind_traffic = 1;
+  }
+  if (table === "v2_plan") {
+    if (row.transfer_enable == null) row.transfer_enable = 0;
+    if (row.sort == null) row.sort = 0;
+  }
+  if (table === "v2_server" && row.sort == null) row.sort = 0;
   return row;
 }
 

@@ -1,10 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { __test } from "../src/index.ts";
 
 test("xboard-cron has an entrypoint", () => {
   assert.ok(fs.existsSync("src/index.ts"));
   assert.match(fs.readFileSync("src/index.ts", "utf8"), /export default/);
+});
+
+test("order month arithmetic uses the Asia/Shanghai calendar", () => {
+  const shanghaiMarchFirstAtTwo = Date.UTC(2026, 1, 28, 18, 0, 0) / 1000;
+  const expectedShanghaiAprilFirstAtTwo = Date.UTC(2026, 2, 31, 18, 0, 0) / 1000;
+  assert.equal(__test.addOrderMonths(shanghaiMarchFirstAtTwo, 1), expectedShanghaiAprilFirstAtTwo);
 });
 
 test("migrated boolean settings accept true/false and one/zero strings", () => {
@@ -43,6 +50,9 @@ test("cron implements the official order, ticket, commission and traffic checks"
   assert.match(source, /transfer_used_total = \?/);
   for (const field of ["order_total", "paid_count", "paid_total", "commission_count", "commission_total", "register_count", "invite_count"]) assert.match(source, new RegExp(field));
   assert.match(source, /v2_traffic_reset_logs/);
+  assert.match(source, /new_order_event_id/);
+  assert.match(source, /renew_order_event_id/);
+  assert.match(source, /change_order_event_id/);
   assert.match(source, /v2_traffic_pending_check/);
   assert.match(source, /scope: "users"/);
   assert.match(source, /WHERE status = 0 AND created_at <= \?/);

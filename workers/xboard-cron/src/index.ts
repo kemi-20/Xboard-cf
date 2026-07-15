@@ -1,6 +1,6 @@
-import type { D1Database, Fetcher, KVNamespace, Queue } from "./types";
-import { now, ok } from "./compat";
-import { settings as loadSettings } from "./db";
+import type { D1Database, Fetcher, KVNamespace, Queue } from "./types.ts";
+import { now, ok } from "./compat.ts";
+import { settings as loadSettings } from "./db.ts";
 
 export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; MAIL_EVENTS: Queue; XBOARD_SERVER: Fetcher; }
 
@@ -206,9 +206,9 @@ async function checkTickets(env: Env, ts: number) {
 }
 
 function addOrderMonths(timestamp: number, months: number) {
-  const date = new Date(timestamp * 1000);
+  const date = new Date((timestamp + SHANGHAI_OFFSET) * 1000);
   date.setUTCMonth(date.getUTCMonth() + months);
-  return Math.floor(date.getTime() / 1000);
+  return Math.floor(date.getTime() / 1000) - SHANGHAI_OFFSET;
 }
 
 async function openProcessingOrder(env: Env, order: Record<string, any>, ts: number) {
@@ -226,7 +226,9 @@ async function openProcessingOrder(env: Env, order: Record<string, any>, ts: num
   }
 
   const systemMethod = Number(await setting(env, "reset_traffic_method", "1"));
-  let resetTraffic = false;
+  const eventSetting = Number(order.type) === 1 ? "new_order_event_id" : Number(order.type) === 2 ? "renew_order_event_id" : Number(order.type) === 3 ? "change_order_event_id" : "";
+  const orderEventId = eventSetting ? Number(await setting(env, eventSetting, "0")) : 0;
+  let resetTraffic = orderEventId === 1;
   let nextReset: number | null = user.next_reset_at == null ? null : Number(user.next_reset_at);
   if (period === "reset_traffic") {
     resetTraffic = true;
@@ -235,7 +237,7 @@ async function openProcessingOrder(env: Env, order: Record<string, any>, ts: num
       .bind(Number(order.surplus_credit || 0), ts, nextReset, ts, user.id, order.id));
   } else {
     const transferEnable = Number(plan.transfer_enable || 0) * 1073741824;
-    resetTraffic = period === "onetime" || user.expired_at == null || Number(order.type) === 1;
+    resetTraffic = resetTraffic || period === "onetime" || user.expired_at == null || Number(order.type) === 1;
     let expiredAt: number | null = null;
     if (period !== "onetime") {
       const months: Record<string, number> = { monthly: 1, quarterly: 3, half_yearly: 6, yearly: 12, two_yearly: 24, three_yearly: 36 };
@@ -252,7 +254,7 @@ async function openProcessingOrder(env: Env, order: Record<string, any>, ts: num
     const resetTypes: Record<number, string> = { 0: "first_day_month", 1: "monthly", 3: "first_day_year", 4: "yearly" };
     statements.push(env.XBOARD_DB.prepare(`INSERT INTO v2_traffic_reset_logs(user_id, reset_type, old_u, old_d, old_upload, old_download, old_total, new_upload, new_download, new_total, trigger_source, metadata, reset_time, created_at)
       SELECT ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 'order', ?, ?, ? WHERE ${orderGuard}`)
-      .bind(user.id, resetTypes[method] || "manual", Number(user.u || 0), Number(user.d || 0), Number(user.u || 0), Number(user.d || 0), Number(user.u || 0) + Number(user.d || 0), JSON.stringify({ order_id: order.id, trade_no: order.trade_no }), ts, ts, order.id));
+      .bind(user.id, resetTypes[method] || "manual", Number(user.u || 0), Number(user.d || 0), Number(user.u || 0), Number(user.d || 0), Number(user.u || 0) + Number(user.d || 0), JSON.stringify({ order_id: order.id, trade_no: order.trade_no, event_id: orderEventId || null }), ts, ts, order.id));
   }
   statements.push(env.XBOARD_DB.prepare("UPDATE v2_order SET status = 3, updated_at = ? WHERE id = ? AND status = 1").bind(ts, order.id));
   const results = await env.XBOARD_DB.batch(statements);
@@ -370,7 +372,7 @@ async function run(env: Env, task = "scheduled") {
   }
 }
 
-export const __test = { dayStart, nextResetAt };
+export const __test = { dayStart, nextResetAt, addOrderMonths };
 
 export default {
   async fetch(request: Request, env: Env) {

@@ -1,6 +1,6 @@
-import type { D1Database, D1PreparedStatement, KVNamespace, MessageBatch } from "./types";
-import { now, ok } from "./compat";
-import { settings as loadSettings } from "./db";
+import type { D1Database, D1PreparedStatement, KVNamespace, MessageBatch } from "./types.ts";
+import { now, ok } from "./compat.ts";
+import { settings as loadSettings } from "./db.ts";
 
 export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; MAILEROO_API_KEY?: string; BREVO_API_KEY?: string; TELEGRAM_BOT_TOKEN?: string; }
 
@@ -16,7 +16,11 @@ async function setting(env: Env, name: string) {
 }
 
 function render(source: string, vars: Record<string, unknown>) {
-  return source.replace(/\{\{\s*([^}|]+?)(?:\|([^}]*))?\s*\}\}/g, (_match, key: string, fallback: string | undefined) => String(vars[key.trim()] ?? fallback?.trim() ?? ""));
+  return source.replace(/\{\{\s*([^}|]+?)(?:\|([^}]*))?\s*\}\}/g, (match, key: string, fallback: string | undefined) => {
+    const value = vars[key.trim()];
+    if (value !== undefined && value !== null && value !== "") return String(value);
+    return fallback !== undefined ? fallback.trim() : match;
+  });
 }
 
 async function resolveMailContent(env: Env, payload: any) {

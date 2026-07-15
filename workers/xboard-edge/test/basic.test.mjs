@@ -15,6 +15,32 @@ test("new installations default node polling to five minutes", () => {
   assert.match(seed, /\('server_push_interval', '300'/);
 });
 
+test("fresh trial duration matches upstream while node polling remains cost optimized", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const seed = fs.readFileSync("../../schema/seed.sql", "utf8");
+  assert.match(source, /try_out_plan_id: 1, try_out_hour: 1/);
+  assert.match(seed, /\('try_out_hour', '1'/);
+});
+
+test("SQLite migration normalizes upstream nullable numeric fields required by D1", () => {
+  const source = fs.readFileSync("src/migration.ts", "utf8");
+  for (const field of ["remind_expire", "remind_traffic"]) assert.match(source, new RegExp(`row\\.${field} == null\\) row\\.${field} = 1`));
+  assert.match(source, /table === "v2_plan"[\s\S]*row\.transfer_enable == null\) row\.transfer_enable = 0/);
+  assert.match(source, /table === "v2_plan"[\s\S]*row\.sort == null\) row\.sort = 0/);
+  assert.match(source, /table === "v2_server" && row\.sort == null\) row\.sort = 0/);
+});
+
+test("orders accept canonical periods and expose configured reset and surplus details", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /canonicalOrderPeriods\.has\(value\) \? value : ""/);
+  assert.match(source, /const period = normalizeOrderPeriod\(legacyPeriod\)/);
+  assert.match(source, /new_order_event_id/);
+  assert.match(source, /renew_order_event_id/);
+  assert.match(source, /change_order_event_id/);
+  assert.match(source, /surplus_orders: surplusResult\.results \|\| \[\]/);
+  assert.match(source, /new Date\(\(timestamp \+ EDGE_SHANGHAI_OFFSET\) \* 1000\)/);
+});
+
 test("machine form validates while typing", () => {
   const adminBundle = fs.readFileSync("public/assets/index-CF20260713.js", "utf8");
   const machineFormStart = adminBundle.indexOf("const t3t=");

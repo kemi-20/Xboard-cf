@@ -1,10 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { __test } from "../src/index.ts";
 
 test("xboard-jobs has an entrypoint", () => {
   assert.ok(fs.existsSync("src/index.ts"));
   assert.match(fs.readFileSync("src/index.ts", "utf8"), /export default/);
+});
+
+test("mail rendering preserves unknown placeholders and honors defaults", () => {
+  assert.equal(__test.render("Hello {{known}} {{missing}}", { known: "XBoard" }), "Hello XBoard {{missing}}");
+  assert.equal(__test.render("{{missing|fallback}}", {}), "fallback");
+  assert.equal(__test.render("{{zero}}/{{disabled}}", { zero: 0, disabled: false }), "0/false");
 });
 
 test("mail events support Maileroo and Brevo HTTP APIs with idempotency", () => {

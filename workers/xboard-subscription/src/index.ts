@@ -389,7 +389,7 @@ function clashProxy(user: any, server: any, client: Client = "clashmeta") {
     const common = { sni: ps.tls?.server_name, "skip-cert-verify": Boolean(ps.tls?.allow_insecure), ports: server.ports, "hop-interval": ps.hop_interval ? Number(ps.hop_interval) : undefined };
     if (version === 2) Object.assign(base, client === "stash"
       ? { ...common, type: "hysteria2", auth: server.password || user.uuid, "up-speed": ps.bandwidth?.up, "down-speed": ps.bandwidth?.down, "fast-open": true, obfs: ps.obfs?.open ? ps.obfs?.type || "salamander" : undefined, "obfs-password": ps.obfs?.open ? ps.obfs?.password : undefined }
-      : { ...common, type: "hysteria2", password: server.password || user.uuid, obfs: ps.obfs?.open ? ps.obfs?.type : undefined, "obfs-password": ps.obfs?.open ? ps.obfs?.password : undefined });
+      : { ...common, type: "hysteria2", password: server.password || user.uuid, up: ps.bandwidth?.up, down: ps.bandwidth?.down, obfs: ps.obfs?.open ? ps.obfs?.type : undefined, "obfs-password": ps.obfs?.open ? ps.obfs?.password : undefined });
     else Object.assign(base, client === "stash"
       ? { ...common, type: "hysteria", "auth-str": server.password || user.uuid, protocol: "udp", "up-speed": ps.bandwidth?.up, "down-speed": ps.bandwidth?.down, obfs: ps.obfs?.open ? ps.obfs?.password : undefined }
       : { ...common, type: "hysteria", auth_str: server.password || user.uuid, protocol: "udp", up: ps.bandwidth?.up, down: ps.bandwidth?.down, obfs: ps.obfs?.open ? ps.obfs?.password : undefined, "fast-open": true, disable_mtu_discovery: true });
@@ -551,7 +551,7 @@ function versionLess(left: string, right: string) {
 }
 
 function singboxCoreVersion(userAgent: string) {
-  const direct = userAgent.match(/sing-box\s+v?(\d+(?:\.\d+){0,2})/i);
+  const direct = userAgent.match(/sing-box(?:\/|\s+)v?(\d+(?:\.\d+){0,2})/i);
   if (direct) return direct[1];
   if (/(hiddify|sfm|sing-box)/i.test(userAgent) && /v?\d+(?:\.\d+){0,2}/i.test(userAgent)) return "1.13.0";
   return null;
@@ -993,7 +993,7 @@ async function build(request: Request, env: Env, token: string) {
   const user = await env.XBOARD_DB.prepare("SELECT * FROM v2_user WHERE token = ?").bind(token).first<any>();
   if (!user || Number(user.banned) === 1) return { status: 403, body: "Forbidden", headers: {} };
   if (user.expired_at !== null && Number(user.expired_at) < now()) return { status: 403, body: "", headers: { "content-type": "text/plain" } };
-  if (user.plan_id === null || Number(user.transfer_enable || 0) <= 0 || Number(user.u || 0) + Number(user.d || 0) >= Number(user.transfer_enable)) return { status: 403, body: "", headers: { "content-type": "text/plain" } };
+  if (Number(user.transfer_enable || 0) <= 0) return { status: 403, body: "", headers: { "content-type": "text/plain" } };
 
   const config = await loadSettings(env.XBOARD_DB);
   const templateMap = await templates(env);
@@ -1037,7 +1037,7 @@ function matchesConfiguredSubscribePath(pathname: string, configuredPath: unknow
   return token.length > 0 && !token.includes("/");
 }
 
-export const __test = { clientOf, clientDetails, versionAtLeast, filterByClientCompatibility, regexValue, protocolPrefix, traffic, decorateServers, general, generalUri, yamlProfile, clashProxy, singboxOutbound, singboxProfile, adaptSingboxConfig, shadowsocksProfile, textTemplateProfile, proxyLine, shadowrocketLine, quantumultXLine, loonLine, serverPassword, randomizedPort, replaceByPattern, subscriptionUrl, output, responseHeaders, matchesConfiguredSubscribePath };
+export const __test = { clientOf, clientDetails, versionAtLeast, filterByClientCompatibility, regexValue, protocolPrefix, traffic, decorateServers, general, generalUri, yamlProfile, clashProxy, singboxOutbound, singboxProfile, singboxCoreVersion, adaptSingboxConfig, shadowsocksProfile, textTemplateProfile, proxyLine, shadowrocketLine, quantumultXLine, loonLine, serverPassword, randomizedPort, replaceByPattern, subscriptionUrl, output, responseHeaders, matchesConfiguredSubscribePath };
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {

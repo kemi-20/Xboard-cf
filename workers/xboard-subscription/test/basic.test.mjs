@@ -49,6 +49,22 @@ test("Clash and Sing-box protocol details match upstream edge cases", () => {
 
   const hysteria = __test.clashProxy(user, { ...base, type: "hysteria", protocol_settings: { version: 2, hop_interval: 0, tls: {} } }, "clashmeta");
   assert.equal(hysteria["hop-interval"], undefined);
+
+  const limitedHysteria = __test.clashProxy(user, { ...base, type: "hysteria", protocol_settings: { version: 2, bandwidth: { up: 25, down: 100 }, tls: {} } }, "clashmeta");
+  assert.equal(limitedHysteria.up, 25);
+  assert.equal(limitedHysteria.down, 100);
+});
+
+test("sing-box slash user agents retain their actual core version", () => {
+  assert.equal(__test.singboxCoreVersion("sing-box/1.8.0"), "1.8.0");
+  assert.equal(__test.singboxCoreVersion("sing-box 1.12.4"), "1.12.4");
+});
+
+test("subscription availability follows upstream UserService semantics", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.doesNotMatch(source, /user\.plan_id === null/);
+  assert.doesNotMatch(source, /Number\(user\.u \|\| 0\) \+ Number\(user\.d \|\| 0\) >= Number\(user\.transfer_enable\)/);
+  assert.match(source, /Number\(user\.transfer_enable \|\| 0\) <= 0/);
 });
 
 test("Surge template subscription domain preserves a non-standard port", () => {
@@ -103,7 +119,7 @@ test("client matching and encoded formats follow upstream flags", () => {
 test("subscription preparation follows upstream expiry, group, dynamic-port and SS-2022 rules", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /user\.expired_at !== null/);
-  assert.match(source, /user\.plan_id === null/);
+  assert.match(source, /Number\(user\.transfer_enable \|\| 0\) <= 0/);
   assert.match(source, /groups\.includes\(Number\(user\.group_id/);
   const selected = __test.randomizedPort("2000-1000");
   assert.ok(selected.port >= 1000 && selected.port <= 2000);

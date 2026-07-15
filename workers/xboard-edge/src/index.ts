@@ -542,7 +542,7 @@ async function ensureBootstrap(env: Env) {
     app_name: "XBoard CF", app_description: "XBoard Cloudflare-native panel", app_url: "", logo: "", subscribe_url: "", stop_register: 0,
     subscribe_path: "s", frontend_admin_path: "admin", secure_path: "admin", frontend_theme: "Xboard",
     frontend_theme_sidebar: "light", frontend_theme_header: "dark", frontend_theme_color: "default",
-    currency: "CNY", currency_symbol: "¥", try_out_plan_id: 1, try_out_hour: 24,
+    currency: "CNY", currency_symbol: "¥", try_out_plan_id: 1, try_out_hour: 1,
     plan_change_enable: 1, reset_traffic_method: 0, surplus_enable: 1, default_remind_expire: 1, default_remind_traffic: 1,
     server_token: "xboard-cf-server-token-change-me", server_pull_interval: 300, server_push_interval: 300, server_ws_enable: 1,
     server_ws_url: "", device_limit_mode: 0, payment_enabled: 0, invite_force: 0, invite_commission: 10,
@@ -2354,6 +2354,12 @@ const orderPeriods: Record<string, string> = {
 };
 const legacyOrderPeriods = Object.fromEntries(Object.entries(orderPeriods).map(([legacy, current]) => [current, legacy]));
 const orderPeriodMonths: Record<string, number> = { monthly: 1, quarterly: 3, half_yearly: 6, yearly: 12, two_yearly: 24, three_yearly: 36 };
+const canonicalOrderPeriods = new Set([...Object.values(orderPeriods)]);
+
+function normalizeOrderPeriod(period: unknown) {
+  const value = String(period || "");
+  return orderPeriods[value] || (canonicalOrderPeriods.has(value) ? value : "");
+}
 
 function legacyOrderPeriod(period: unknown) {
   const value = String(period || "");
@@ -2421,10 +2427,12 @@ async function orderDetail(env: Env, id: number) {
   };
 }
 
+const EDGE_SHANGHAI_OFFSET = 8 * 3600;
+
 function addOrderMonths(timestamp: number, months: number) {
-  const date = new Date(timestamp * 1000);
+  const date = new Date((timestamp + EDGE_SHANGHAI_OFFSET) * 1000);
   date.setUTCMonth(date.getUTCMonth() + months);
-  return Math.floor(date.getTime() / 1000);
+  return Math.floor(date.getTime() / 1000) - EDGE_SHANGHAI_OFFSET;
 }
 
 async function orderSurplus(env: Env, user: Record<string, any>, settingsValues: Record<string, any>) {
@@ -2456,7 +2464,6 @@ async function orderSurplus(env: Env, user: Record<string, any>, settingsValues:
   return { amount: Math.trunc(Math.max(0, amountSum * ratio)), orderIds: rows.map(row => Number(row.id)) };
 }
 
-const EDGE_SHANGHAI_OFFSET = 8 * 3600;
 function edgeShanghaiParts(ts: number) {
   const date = new Date((ts + EDGE_SHANGHAI_OFFSET) * 1000);
   return { year: date.getUTCFullYear(), month: date.getUTCMonth(), day: date.getUTCDate(), hour: date.getUTCHours(), minute: date.getUTCMinutes(), second: date.getUTCSeconds() };
@@ -2517,7 +2524,7 @@ async function adminOrder(request: Request, env: Env, route: string): Promise<Re
   if (route === "/order/fetch") return json(await orderRows(env, input));
   if (route === "/order/assign") {
     const email = String(input.email || "").trim().toLowerCase(); const planId = nullableNumber(input.plan_id);
-    const legacyPeriod = String(input.period || ""); const period = orderPeriods[legacyPeriod]; const totalAmount = Number(input.total_amount);
+    const legacyPeriod = String(input.period || ""); const period = normalizeOrderPeriod(legacyPeriod); const totalAmount = Number(input.total_amount);
     if (!email) return fail("邮箱不能为空", 422, 422);
     if (!planId) return fail("订阅不能为空", 422, 422);
     if (!period) return fail("订阅周期格式有误", 422, 422);
@@ -2565,7 +2572,10 @@ async function adminOrder(request: Request, env: Env, route: string): Promise<Re
       statements.push(env.XBOARD_DB.prepare(`UPDATE v2_order SET status=4,updated_at=? WHERE id IN (${surplusOrderIds.map(() => "?").join(",")}) AND ${orderGuard}`)
         .bind(ts, ...surplusOrderIds, order.id));
     }
-    let resetTraffic = false;
+    const allSettings = await settings(env.XBOARD_DB);
+    const eventSetting = Number(order.type) === 1 ? "new_order_event_id" : Number(order.type) === 2 ? "renew_order_event_id" : Number(order.type) === 3 ? "change_order_event_id" : "";
+    const orderEventId = eventSetting ? Number(pickSetting(allSettings, eventSetting, 0)) : 0;
+    let resetTraffic = orderEventId === 1;
     let expiredAt: number | null = user.expired_at == null ? null : Number(user.expired_at);
     if (period === "reset_traffic") {
       resetTraffic = true;
@@ -2574,9 +2584,9 @@ async function adminOrder(request: Request, env: Env, route: string): Promise<Re
       const expiryBase = Number(order.type) === 3 ? ts : Math.max(ts, Number(user.expired_at || 0));
       expiredAt = period === "onetime" ? null : addOrderMonths(expiryBase, months[period] || 0);
       if (period !== "onetime" && !months[period]) return fail("无效的套餐周期", 400, 400);
-      resetTraffic = period === "onetime" || user.expired_at == null || Number(order.type) === 1;
+      resetTraffic = resetTraffic || period === "onetime" || user.expired_at == null || Number(order.type) === 1;
     }
-    const method = plan.reset_traffic_method === null || plan.reset_traffic_method === undefined ? Number(pickSetting(await settings(env.XBOARD_DB), "reset_traffic_method", 0)) : Number(plan.reset_traffic_method);
+    const method = plan.reset_traffic_method === null || plan.reset_traffic_method === undefined ? Number(pickSetting(allSettings, "reset_traffic_method", 0)) : Number(plan.reset_traffic_method);
     const nextReset = resetTraffic ? edgeNextResetAt(expiredAt, method, ts) : user.next_reset_at ?? null;
     if (period === "reset_traffic") {
       statements.push(env.XBOARD_DB.prepare(`UPDATE v2_user SET u=0,d=0,balance=COALESCE(balance,0)+?,last_reset_at=?,next_reset_at=?,reset_count=COALESCE(reset_count,0)+1,updated_at=? WHERE id=? AND ${orderGuard}`)
@@ -2589,7 +2599,7 @@ async function adminOrder(request: Request, env: Env, route: string): Promise<Re
       const resetTypes: Record<number, string> = { 0: "first_day_month", 1: "monthly", 3: "first_day_year", 4: "yearly" };
       statements.push(env.XBOARD_DB.prepare(`INSERT INTO v2_traffic_reset_logs(user_id,reset_type,old_u,old_d,old_upload,old_download,old_total,new_upload,new_download,new_total,trigger_source,metadata,reset_time,created_at)
         SELECT ?,?,?,?,?,?,?,0,0,0,'order',?,?,? WHERE ${orderGuard}`)
-        .bind(user.id, resetTypes[method] || "manual", Number(user.u || 0), Number(user.d || 0), Number(user.u || 0), Number(user.d || 0), Number(user.u || 0) + Number(user.d || 0), JSON.stringify({ order_id: order.id, trade_no: tradeNo }), ts, ts, order.id));
+        .bind(user.id, resetTypes[method] || "manual", Number(user.u || 0), Number(user.d || 0), Number(user.u || 0), Number(user.d || 0), Number(user.u || 0) + Number(user.d || 0), JSON.stringify({ order_id: order.id, trade_no: tradeNo, event_id: orderEventId || null }), ts, ts, order.id));
     }
     statements.push(env.XBOARD_DB.prepare("UPDATE v2_order SET status=3,updated_at=? WHERE id=? AND status=1").bind(ts, order.id));
     const results = await env.XBOARD_DB.batch(statements);
@@ -3554,7 +3564,11 @@ async function userApi(request: Request, env: Env, path: string) {
       if (!order) return fail("订单不存在或已支付", 400, 400);
       const value = await orderResource(order);
       if (!value.plan) return fail("订阅计划不存在", 400, 400);
-      return ok({ ...value, try_out_plan_id: Number(pickSetting(await settings(env.XBOARD_DB), "try_out_plan_id", 0)), surplus_orders: [] });
+      const surplusOrderIds = parseJsonArray(order.surplus_order_ids).map(Number).filter(Boolean);
+      const surplusResult = surplusOrderIds.length
+        ? await env.XBOARD_DB.prepare(`SELECT * FROM v2_order WHERE user_id = ? AND id IN (${surplusOrderIds.map(() => "?").join(",")}) ORDER BY id ASC`).bind(userId, ...surplusOrderIds).all<Record<string, any>>()
+        : { results: [] as Record<string, any>[] };
+      return ok({ ...value, try_out_plan_id: Number(pickSetting(await settings(env.XBOARD_DB), "try_out_plan_id", 0)), surplus_orders: surplusResult.results || [] });
     }
     if (request.method === "GET" && route === "/order/check") {
       const order = await env.XBOARD_DB.prepare("SELECT status FROM v2_order WHERE user_id = ? AND trade_no = ?").bind(userId, String(input.trade_no || "")).first<{ status: number }>();
@@ -3571,7 +3585,7 @@ async function userApi(request: Request, env: Env, path: string) {
       return ok(true);
     }
     if (request.method === "POST" && route === "/order/save") {
-      const planId = nullableNumber(input.plan_id); const legacyPeriod = String(input.period || ""); const period = orderPeriods[legacyPeriod];
+      const planId = nullableNumber(input.plan_id); const legacyPeriod = String(input.period || ""); const period = normalizeOrderPeriod(legacyPeriod);
       if (!planId) return fail("套餐ID不能为空", 422, 422);
       if (!period) return fail("套餐周期错误", 422, 422);
       const pending = await env.XBOARD_DB.prepare("SELECT id FROM v2_order WHERE user_id = ? AND status IN (0,1) LIMIT 1").bind(userId).first();
