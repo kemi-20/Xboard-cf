@@ -829,7 +829,15 @@ function paginated<T extends Record<string, any>>(data: T[], total: number, page
 
 async function subscribeUrl(request: Request, env: Env, userToken: string) {
   const values = await settings(env.XBOARD_DB);
-  const configuredBase = String(values.subscribe_url || new URL(request.url).origin).split(",").map(value => value.trim()).filter(Boolean)[0];
+  const configuredList = String(values.subscribe_url || new URL(request.url).origin).split(",").map(value => value.trim()).filter(Boolean);
+  const selectedBase = configuredList[Math.floor(Math.random() * configuredList.length)] || new URL(request.url).origin;
+  const configuredBase = selectedBase
+    .replace(/\[(\d+)-(\d+)\]/g, (_match, left, right) => {
+      const minimum = Math.min(Number(left), Number(right));
+      const maximum = Math.max(Number(left), Number(right));
+      return String(minimum + Math.floor(Math.random() * (maximum - minimum + 1)));
+    })
+    .replaceAll("[uuid]", crypto.randomUUID());
   const base = /^[a-z][a-z0-9+.-]*:\/\//i.test(configuredBase) ? configuredBase : `https://${configuredBase}`;
   const path = String(values.subscribe_path || "s").replace(/^\/+|\/+$/g, "") || "s";
   return `${base.replace(/\/$/, "")}/${path}/${userToken}`;

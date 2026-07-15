@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   deploy:
@@ -40,6 +40,20 @@ jobs:
       - name: Create or reuse Cloudflare resources
         id: resources
         run: node scripts/prepare-cloudflare-ci.mjs
+
+      - name: Persist Cloudflare resource bindings
+        shell: bash
+        run: |
+          if git diff --quiet -- workers/*/wrangler.toml; then
+            echo "Cloudflare resource bindings already match this account."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add workers/*/wrangler.toml
+          git commit -m "Configure Cloudflare resource bindings"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
 
       - name: Install Worker dependencies
         shell: bash
@@ -84,6 +98,7 @@ jobs:
             echo "## Cloudflare bootstrap result"
             echo
             echo "The Cloudflare resources and existing Workers were bootstrapped by Wrangler."
+            echo "The generated account, D1, and KV identifiers were committed to \`${GITHUB_REF_NAME}\`, so Workers Builds can reuse the same bindings on later pushes."
             echo
             echo "> Before running the connection steps, install/authorize the [Cloudflare Workers & Pages GitHub App](https://github.com/apps/cloudflare-workers-and-pages) for this repository. Git repository access cannot be granted by a Cloudflare API token; this GitHub security boundary has no supported Wrangler or Cloudflare REST API equivalent."
             echo

@@ -232,7 +232,21 @@ test("generated subscription URLs honor configured domain and path", () => {
   assert.match(source, /const values = await settings\(env\.XBOARD_DB\)/);
   assert.match(source, /values\.subscribe_url/);
   assert.match(source, /values\.subscribe_path/);
+  assert.match(source, /configuredList\[Math\.floor\(Math\.random\(\) \* configuredList\.length\)\]/);
+  assert.match(source, /\.replace\(\/\\\[\(\\d\+\)-\(\\d\+\)\\\]\/g/);
+  assert.match(source, /\.replaceAll\("\[uuid\]", crypto\.randomUUID\(\)\)/);
   assert.match(source, /await subscribeUrl\(request, env,/);
+});
+
+test("bootstrap persists generated Cloudflare bindings for Workers Builds", () => {
+  const workflow = fs.readFileSync("../../.github/workflows/deploy.yml", "utf8");
+  const bootstrap = fs.readFileSync("../../scripts/prepare-cloudflare-ci.mjs", "utf8");
+  assert.match(workflow, /permissions:\s+contents: write/);
+  assert.match(workflow, /git diff --quiet -- workers\/\*\/wrangler\.toml/);
+  assert.match(workflow, /git add workers\/\*\/wrangler\.toml/);
+  assert.match(workflow, /git commit -m "Configure Cloudflare resource bindings"/);
+  assert.match(workflow, /git push origin "HEAD:\$\{GITHUB_REF_NAME\}"/);
+  assert.match(bootstrap, /patchWrangler\(worker, account\.id, database\.uuid \|\| database\.id, kv\.id\)/);
 });
 
 test("admin can fetch a fresh subscription URL for the copy action", () => {
