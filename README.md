@@ -80,7 +80,7 @@ Worker 之间没有依赖仓库根目录的共享运行时代码，因此 Cloudf
 | KV | `xboard-kv` / `XBOARD_KV` | Session、验证码、限流、缓存和版本标记 |
 | Queue | `traffic-events` | 节点流量异步入库，由 `xboard-jobs` 消费 |
 | Queue | `mail-events` | 邮件任务，由 `xboard-jobs` 消费 |
-| Queue | `telegram-events` | Telegram 通知任务，由 `xboard-jobs` 消费 |
+| Queue | `telegram-events` | 预留的 Telegram 异步通知入口，由 `xboard-jobs` 消费 |
 | Queue | `traffic-events-dlq` | 流量任务连续失败 5 次后的死信队列 |
 | Queue | `mail-events-dlq` | 邮件任务连续失败 5 次后的死信队列 |
 | Queue | `telegram-events-dlq` | Telegram 任务连续失败 5 次后的死信队列 |
@@ -96,28 +96,109 @@ Worker 之间没有依赖仓库根目录的共享运行时代码，因此 Cloudf
 五个 Worker 都绑定同一个 D1 和 KV。D1 是正式业务数据的唯一权威来源；KV 只保存可重新生成的短期数据。高频机器心跳不写入 D1，而是进入 `StatusHub`。设置读取使用 Worker 内存、KV 版本快照和 D1 三级缓存，各 Worker 只加载自身需要的设置字段。KV 不可用或超过额度时会直接跳过 KV 并回源 D1，不会因为缓存故障阻断登录、订阅、节点上报或定时任务。
 
 ```mermaid
-flowchart LR
-  Browser["后台 / 用户前端"] --> Edge["xboard-edge"]
-  Client["订阅客户端"] --> Edge
-  Edge --> Subscription["xboard-subscription"]
-  Node["Xboard-Node"] --> Edge
-  Edge --> Server["xboard-server"]
-  Server --> NodeHub["NodeHub"]
-  Server --> StatusHub["StatusHub"]
-  Server --> TrafficQ["traffic-events"]
-  Edge --> MailQ["mail-events"]
-  Cron["xboard-cron"] --> MailQ
-  TrafficQ --> Jobs["xboard-jobs"]
+flowchart TB
+  subgraph Clients["访问层"]
+    Admin["后台浏览器<br/>/<secure_path>#/*"]
+    UserUI["第三方用户前端<br/>/api/v1/* 与 /api/v2/user/*"]
+    SubClient["订阅客户端<br/>Clash / Sing-box / Surge / Loon 等"]
+    XNode["原版 Xboard-Node<br/>HTTP / WebSocket / 机器模式"]
+  end
+
+  subgraph Entry["主入口与静态资源"]
+    Edge["xboard-edge<br/>后台 WebUI + 后台 API + 用户 API<br/>认证 / 设置 / 迁移 / CRUD / 节点协议代理"]
+    Assets["Cloudflare Static Assets<br/>官方后台构建产物 / 语言包 / 图片"]
+  end
+
+  Admin -->|"HTTPS"| Edge
+  UserUI -->|"HTTPS"| Edge
+  SubClient -->|"订阅 URL"| Edge
+  XNode -->|"面板主域名 HTTP / WS"| Edge
+  Edge -->|"ASSETS binding"| Assets
+
+  subgraph Workers["独立 Worker 层"]
+    Subscription["xboard-subscription<br/>Token 与套餐校验<br/>协议识别 / 模板渲染 / Base64"]
+    Server["xboard-server<br/>V1 / V2 / Tidalab / 机器接口<br/>流量上报 / WebSocket / 热同步"]
+    Jobs["xboard-jobs<br/>Queue consumer<br/>幂等认领 / 批量聚合 / 通知发送"]
+    Cron["xboard-cron<br/>每分钟单 Trigger<br/>过期 / 流量重置 / 提醒 / 清理 / 汇总"]
+  end
+
+  Edge -->|"XBOARD_SUBSCRIPTION<br/>Service Binding"| Subscription
+  Edge -->|"XBOARD_SERVER<br/>Service Binding"| Server
+  Cron -->|"XBOARD_SERVER<br/>内部同步"| Server
+
+  subgraph Realtime["实时状态与连接协调"]
+    NodeHub["NodeHub Durable Object<br/>按 node:{id} / machine:{id} 分片<br/>WebSocket Hibernation / sync.*"]
+    StatusHub["StatusHub Durable Object<br/>单个 global 实例<br/>节点与机器状态 / 设备 / 24h 负载历史"]
+  end
+
+  Server <-->|"连接与配置热同步"| NodeHub
+  Server <-->|"心跳 / Metrics / 历史查询"| StatusHub
+
+  subgraph Queues["异步任务与失败隔离"]
+    TrafficQ["traffic-events<br/>max retries: 5"]
+    MailQ["mail-events<br/>max retries: 5"]
+    TelegramQ["telegram-events<br/>预留异步入口 / max retries: 5"]
+    TrafficDLQ["traffic-events-dlq"]
+    MailDLQ["mail-events-dlq"]
+    TelegramDLQ["telegram-events-dlq"]
+  end
+
+  Server -->|"TRAFFIC_EVENTS"| TrafficQ
+  Edge -->|"MAIL_EVENTS"| MailQ
+  Cron -->|"MAIL_EVENTS"| MailQ
+  TrafficQ --> Jobs
   MailQ --> Jobs
-  Edge --> D1["D1: xboard-db"]
-  Subscription --> D1
-  Server --> D1
-  Jobs --> D1
-  Cron --> D1
-  Edge -. cache .-> KV["KV: xboard-kv"]
-  Subscription -. cache .-> KV
-  Server -. cache .-> KV
+  TelegramQ --> Jobs
+  TrafficQ -. "连续失败" .-> TrafficDLQ
+  MailQ -. "连续失败" .-> MailDLQ
+  TelegramQ -. "连续失败" .-> TelegramDLQ
+
+  subgraph Data["数据与缓存层"]
+    Memory["各 Worker isolate 内存<br/>设置缓存 + 并发请求合并"]
+    KV["KV: xboard-kv<br/>Session / 验证码 / 限流<br/>版本号 / 设置快照 / 订阅短缓存"]
+    D1["D1: xboard-db<br/>用户 / 套餐 / 节点 / 订单 / 余额<br/>设置 / 最终流量 / 统计 / 审计"]
+    Pending["v2_traffic_pending_check<br/>仅保存真正需要复查的用户"]
+  end
+
+  Edge -. "内存 -> KV -> D1" .-> Memory
+  Subscription -. "内存 -> KV -> D1" .-> Memory
+  Server -. "内存 -> KV -> D1" .-> Memory
+  Jobs -. "内存 -> KV -> D1" .-> Memory
+  Cron -. "内存 -> KV -> D1" .-> Memory
+  Memory -. "版本快照；失败时跳过" .-> KV
+  KV -. "缓存未命中或不可用" .-> D1
+  Edge <-->|"正式业务读写"| D1
+  Subscription -->|"只读业务数据"| D1
+  Server <-->|"配置读取 / 流量事件来源"| D1
+  Jobs -->|"批量写用户、服务器与统计"| D1
+  Cron <-->|"周期业务检查与清理"| D1
+  Jobs --> Pending
+  Pending --> Cron
+
+  subgraph External["外部 HTTPS 服务"]
+    MailProvider["Maileroo / Brevo API"]
+    TelegramAPI["Telegram Bot API"]
+  end
+
+  Jobs -->|"发送邮件"| MailProvider
+  Jobs -->|"发送异步通知"| TelegramAPI
+  Edge -->|"Webhook 设置 / Bot 操作"| TelegramAPI
+
+  subgraph Delivery["首次部署与后续自动部署"]
+    GitHub["GitHub 仓库<br/>master"]
+    Bootstrap["手动 GitHub Action<br/>首次创建资源、初始化 D1、部署五个 Worker"]
+    Builds["Cloudflare Workers Builds<br/>五个 Worker 分别绑定各自根目录"]
+    CFResources["Cloudflare 账号资源<br/>D1 / KV / Queues / DO / Workers"]
+  end
+
+  GitHub -->|"首次手动运行"| Bootstrap
+  Bootstrap --> CFResources
+  Bootstrap -->|"写回 account / D1 / KV ID"| GitHub
+  GitHub -->|"后续 push"| Builds
+  Builds -->|"按根目录测试并部署"| CFResources
 ```
+
+图中实线表示正常请求、内部调用或持久化数据流；虚线表示缓存回源、失败转移或非主路径。五个 Worker 都从同一仓库部署，但构建根目录和 Cloudflare Worker 服务彼此独立。
 
 ### 存储与流量写入
 
