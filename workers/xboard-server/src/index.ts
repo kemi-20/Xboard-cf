@@ -126,7 +126,9 @@ async function authenticateV2(env: Env, input: Row, handshake = false): Promise<
   if (input.machine_id !== undefined && input.machine_id !== null && input.machine_id !== "") {
     if (!Number.isInteger(Number(input.machine_id))) return validationFailure("machine_id", "The machine id must be an integer.");
     if (!input.token) return validationFailure("token");
-    if (!handshake && !Number.isInteger(Number(input.node_id))) return validationFailure("node_id", "The node id field is required.");
+    if (!handshake && (!Number.isInteger(Number(input.node_id)) || Number(input.node_id) < 1)) {
+      return validationFailure("node_id", "The node id must be at least 1.");
+    }
     const machine = await getMachine(env, input.machine_id, input.token);
     if (!machine) return apiFailure("Machine not found or invalid token", 401);
     if (!Number(machine.is_active ?? machine.enabled ?? 1)) return apiFailure("Machine is disabled", 403);
@@ -208,7 +210,7 @@ async function optionalKvDelete(env: Env, key: string) {
 
 function currentRate(node: Row) {
   const parsedFallback = Number(node.rate);
-  const fallback = Number.isFinite(parsedFallback) ? parsedFallback : 1;
+  const fallback = Number.isFinite(parsedFallback) ? parsedFallback : 0;
   if (!Number(node.rate_time_enable)) return fallback;
   const parts = new Intl.DateTimeFormat("en-GB", {
     timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", hourCycle: "h23"

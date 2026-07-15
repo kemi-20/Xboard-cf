@@ -103,3 +103,15 @@ test("traffic-exceeded user removals are batched per node", () => {
   assert.match(source, /input\.scope === "users"/);
   assert.match(source, /action: "remove", users: affected/);
 });
+
+test("machine V2 authentication rejects node zero before node lookup", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /!handshake && \(!Number\.isInteger\(Number\(input\.node_id\)\) \|\| Number\(input\.node_id\) < 1\)/);
+  assert.match(source, /validationFailure\("node_id", "The node id must be at least 1\."\)/);
+});
+
+test("invalid node rates follow the upstream numeric cast instead of charging at rate one", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /Number\.isFinite\(parsedFallback\) \? parsedFallback : 0/);
+  assert.doesNotMatch(source, /Number\.isFinite\(parsedFallback\) \? parsedFallback : 1/);
+});

@@ -525,6 +525,20 @@ test("gift card APIs implement the official admin and user route set", () => {
   assert.match(source, /await db\.batch\(statements\)/);
 });
 
+test("gift card traffic rewards are stored as bytes while API rewards remain in GB", () => {
+  const source = fs.readFileSync("src/gift-card.ts", "utf8");
+  assert.match(source, /updateValues\.push\(Number\(rewards\.transfer_enable\) \* 1073741824\)/);
+  assert.match(source, /Number\(inviteRewards\.transfer_enable \|\| 0\) \* 1073741824/);
+  assert.match(source, /rewards_given: parseJson\(row\.rewards_given, \{\}\)/);
+});
+
+test("fresh D1 schema follows upstream visibility and expiry defaults", () => {
+  const schema = fs.readFileSync("../../schema/d1.sql", "utf8");
+  assert.match(schema, /expired_at INTEGER DEFAULT 0/);
+  assert.equal((schema.match(/show INTEGER NOT NULL DEFAULT 0/g) || []).length, 5);
+  assert.doesNotMatch(schema, /show INTEGER NOT NULL DEFAULT 1/);
+});
+
 test("mail APIs enqueue Resend jobs instead of returning SMTP placeholders", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   const adminBundle = fs.readFileSync("public/assets/index-CF20260713.js", "utf8");

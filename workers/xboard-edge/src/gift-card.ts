@@ -187,7 +187,10 @@ async function redeem(db: D1Database, card: AnyRow, user: AnyRow, request: Reque
   const assignments: string[] = [];
   const updateValues: unknown[] = [];
   if (Number(rewards.balance || 0) > 0) { assignments.push("balance = COALESCE(balance, 0) + ?"); updateValues.push(Number(rewards.balance)); }
-  if (Number(rewards.transfer_enable || 0) > 0) { assignments.push("transfer_enable = COALESCE(transfer_enable, 0) + ?"); updateValues.push(Number(rewards.transfer_enable)); }
+  if (Number(rewards.transfer_enable || 0) > 0) {
+    assignments.push("transfer_enable = COALESCE(transfer_enable, 0) + ?");
+    updateValues.push(Number(rewards.transfer_enable) * 1073741824);
+  }
   if (Number(rewards.device_limit || 0) > 0) { assignments.push("device_limit = COALESCE(device_limit, 0) + ?"); updateValues.push(Number(rewards.device_limit)); }
   let resetMethod: number | null = null;
   let nextReset: number | null = null;
@@ -236,7 +239,7 @@ async function redeem(db: D1Database, card: AnyRow, user: AnyRow, request: Reque
     .bind(...updateValues, ts, user.id, card.id, nonce));
   if (inviteRewards && user.invite_user_id) statements.push(db.prepare(`UPDATE v2_user SET balance = COALESCE(balance, 0) + ?,
     transfer_enable = COALESCE(transfer_enable, 0) + ?, updated_at = ? WHERE id = ? AND ${guard}`)
-    .bind(Number(inviteRewards.balance || 0), Number(inviteRewards.transfer_enable || 0), ts, user.invite_user_id, card.id, nonce));
+    .bind(Number(inviteRewards.balance || 0), Number(inviteRewards.transfer_enable || 0) * 1073741824, ts, user.invite_user_id, card.id, nonce));
   if (rewards.reset_package && user.plan_id) {
     const resetTypes: Record<number, string> = { 0: "first_day_month", 1: "monthly", 3: "first_day_year", 4: "yearly" };
     statements.push(db.prepare(`INSERT INTO v2_traffic_reset_logs(user_id, reset_type, old_u, old_d, old_upload, old_download,

@@ -425,3 +425,42 @@ test("Sing-box templates adapt to the requesting core version", () => {
   assert.equal(legacy.inbounds[0].inet6_address, "fdfe:dcba:9876::1/126");
   assert.equal(legacy.inbounds[0].endpoint_independent_nat, true);
 });
+
+test("Sing-box Hysteria port hopping fields require core 1.11 or newer", () => {
+  const oldCore = __test.adaptSingboxConfig({ outbounds: [{ type: "hysteria2", server_ports: ["2000:3000"], hop_interval: "15s" }], route: { rules: [] } }, "sing-box 1.10.7");
+  assert.equal(oldCore.outbounds[0].server_ports, undefined);
+  assert.equal(oldCore.outbounds[0].hop_interval, undefined);
+  const newCore = __test.adaptSingboxConfig({ outbounds: [{ type: "hysteria2", server_ports: ["2000:3000"], hop_interval: "15s" }], route: { rules: [] } }, "sing-box 1.11.0");
+  assert.deepEqual(newCore.outbounds[0].server_ports, ["2000:3000"]);
+  assert.equal(newCore.outbounds[0].hop_interval, "15s");
+});
+
+test("Loon preserves upstream VMess and Trojan transport fields", () => {
+  const user = { uuid: "00000000-0000-4000-8000-000000000000" };
+  const vmessTcp = __test.loonLine(user, { type: "vmess", name: "VMess HTTP", host: "node.example.com", port: 443, protocol_settings: { network: "tcp", network_settings: { header: { type: "http", request: { path: ["/request"], headers: { Host: ["cdn.example.com"] } } } } } });
+  assert.match(vmessTcp, /transport=http/);
+  assert.match(vmessTcp, /path=\/request/);
+  assert.match(vmessTcp, /host=cdn\.example\.com/);
+  const vmessUpgrade = __test.loonLine(user, { type: "vmess", name: "VMess Upgrade", host: "node.example.com", port: 443, protocol_settings: { network: "httpupgrade", network_settings: { path: "/up", headers: { Host: "edge.example.com" } } } });
+  assert.match(vmessUpgrade, /transport=httpupgrade/);
+  assert.match(vmessUpgrade, /host=edge\.example\.com/);
+  const trojanH2 = __test.loonLine(user, { type: "trojan", name: "Trojan H2", host: "node.example.com", port: 443, protocol_settings: { network: "h2", network_settings: { path: "/h2", host: ["h2.example.com"] } } });
+  assert.match(trojanH2, /transport=h2/);
+  assert.match(trojanH2, /path=\/h2/);
+  assert.match(trojanH2, /host=h2\.example\.com/);
+});
+
+test("Shadowrocket VLESS Reality omits standard TLS-only parameters", () => {
+  const line = __test.shadowrocketLine({ uuid: "00000000-0000-4000-8000-000000000000" }, realityVless);
+  assert.match(line, /tls=1/);
+  assert.match(line, /sni=www\.example\.com/);
+  assert.match(line, /pbk=reality-public-key/);
+  assert.doesNotMatch(line, /allowInsecure=/);
+  assert.doesNotMatch(line, /peer=/);
+});
+
+test("subscription labels and exact traffic boundaries match upstream", () => {
+  assert.equal(__test.protocolPrefix({ type: "http", protocol_settings: {} }), "");
+  assert.equal(__test.traffic(1073741824), "1024 MB");
+  assert.equal(__test.traffic(1073741825), "1 GB");
+});

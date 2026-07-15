@@ -221,14 +221,14 @@ function filterByClientCompatibility(client: Client, request: Request, servers: 
 
 function protocolPrefix(server: any) {
   if (server.type === "hysteria") return Number(server.protocol_settings?.version || 1) === 2 ? "[Hy2]" : "[Hy]";
-  const prefixes: Config = { vless: "[vless]", shadowsocks: "[ss]", vmess: "[vmess]", trojan: "[trojan]", tuic: "[tuic]", socks: "[socks]", anytls: "[anytls]", http: "[http]" };
+  const prefixes: Config = { vless: "[vless]", shadowsocks: "[ss]", vmess: "[vmess]", trojan: "[trojan]", tuic: "[tuic]", socks: "[socks]", anytls: "[anytls]" };
   return prefixes[server.type] || "";
 }
 
 function traffic(value: number) {
   const units = ["B", "KB", "MB", "GB", "TB"];
   let amount = Math.max(0, value || 0), unit = 0;
-  while (amount >= 1024 && unit < units.length - 1) { amount /= 1024; unit++; }
+  while (amount > 1024 && unit < units.length - 1) { amount /= 1024; unit++; }
   return `${Math.round(amount * 100) / 100} ${units[unit]}`;
 }
 
@@ -545,6 +545,11 @@ function adaptSingboxConfig(document: Config, userAgent: string) {
     }
   }
   if (versionLess(version, "1.11.0")) {
+    for (const outbound of document.outbounds) {
+      if (!["hysteria", "hysteria2"].includes(outbound?.type)) continue;
+      delete outbound.server_ports;
+      delete outbound.hop_interval;
+    }
     let needsDns = false, needsBlock = false;
     for (const rule of document.route.rules) {
       if (rule.action === "hijack-dns") { delete rule.action; rule.outbound = "dns-out"; needsDns = true; }
@@ -673,7 +678,8 @@ function shadowrocketLine(user: any, server: any) {
     const params: Config = { tfo: 1, remark: server.name };
     if (server.type === "vmess") params.alterId = 0;
     if (ps.flow) Object.assign(params, { tls: 1, xtls: ({ none: 0, "xtls-rprx-direct": 1, "xtls-rprx-vision": 2 } as Config)[ps.flow] });
-    if (ps.tls) Object.assign(params, { tls: 1, allowInsecure: Number(ps.tls) === 2 ? Number(Boolean(ps.reality_settings?.allow_insecure)) : Number(Boolean(ps.tls_settings?.allow_insecure)), peer: ps.tls_settings?.server_name, sni: ps.reality_settings?.server_name, pbk: ps.reality_settings?.public_key, sid: ps.reality_settings?.short_id, fp: tlsFingerprint(ps) });
+    if (Number(ps.tls) === 1) Object.assign(params, { tls: 1, allowInsecure: Number(Boolean(ps.tls_settings?.allow_insecure)), peer: ps.tls_settings?.server_name, fp: tlsFingerprint(ps) });
+    else if (Number(ps.tls) === 2) Object.assign(params, { tls: 1, sni: ps.reality_settings?.server_name, pbk: ps.reality_settings?.public_key, sid: ps.reality_settings?.short_id, fp: tlsFingerprint(ps) });
     const ns = ps.network_settings || {};
     if (ps.network === "tcp" && ns.header?.type && ns.header.type !== "none") {
       const paths = Array.isArray(ns.header?.request?.path) ? ns.header.request.path : [ns.header?.request?.path || "/"];
@@ -808,10 +814,24 @@ function loonLine(user: any, server: any) {
     if (tls === 2 && ps.reality_settings?.short_id) parts.push(`short-id=${ps.reality_settings.short_id}`);
     if (server.type === "vless" && ps.flow) parts.push(`flow=${ps.flow}`);
     const network = ps.network || "tcp";
-    parts.push(`transport=${network === "tcp" ? "tcp" : network}`);
-    if (network === "ws" && ps.network_settings?.path) parts.push(`path=${ps.network_settings.path}`);
-    if (network === "ws" && ps.network_settings?.headers?.Host) parts.push(`host=${ps.network_settings.headers.Host}`);
-    if (network === "grpc" && ps.network_settings?.serviceName) parts.push(`grpc-service-name=${ps.network_settings.serviceName}`);
+    const networkSettings = ps.network_settings || {};
+    let transport = network;
+    if (server.type === "vmess" && network === "tcp" && networkSettings.header?.type) transport = networkSettings.header.type;
+    parts.push(`transport=${transport}`);
+    if (server.type === "vmess" && network === "tcp") {
+      const paths = Array.isArray(networkSettings.header?.request?.path) ? networkSettings.header.request.path : [];
+      const hosts = Array.isArray(networkSettings.header?.request?.headers?.Host) ? networkSettings.header.request.headers.Host : [];
+      if (paths.length) parts.push(`path=${paths[Math.floor(Math.random() * paths.length)]}`);
+      if (hosts.length) parts.push(`host=${hosts[Math.floor(Math.random() * hosts.length)]}`);
+    }
+    if (["ws", "h2", "httpupgrade"].includes(network) && networkSettings.path) parts.push(`path=${networkSettings.path}`);
+    if (network === "ws" && networkSettings.headers?.Host) parts.push(`host=${networkSettings.headers.Host}`);
+    if (network === "h2" && networkSettings.host) parts.push(`host=${Array.isArray(networkSettings.host) ? networkSettings.host[0] : networkSettings.host}`);
+    if (network === "httpupgrade") {
+      const host = server.type === "vmess" ? networkSettings.headers?.Host : networkSettings.host || server.host;
+      if (host) parts.push(`host=${Array.isArray(host) ? host[0] : host}`);
+    }
+    if (network === "grpc" && networkSettings.serviceName) parts.push(`grpc-service-name=${networkSettings.serviceName}`);
   }
   return parts.filter(value => value !== undefined && value !== null && value !== "").join(",") + "\r\n";
 }
@@ -984,7 +1004,7 @@ function matchesConfiguredSubscribePath(pathname: string, configuredPath: unknow
   return token.length > 0 && !token.includes("/");
 }
 
-export const __test = { clientOf, clientDetails, versionAtLeast, filterByClientCompatibility, regexValue, decorateServers, general, generalUri, yamlProfile, clashProxy, singboxOutbound, singboxProfile, adaptSingboxConfig, shadowsocksProfile, textTemplateProfile, proxyLine, shadowrocketLine, quantumultXLine, loonLine, serverPassword, randomizedPort, replaceByPattern, subscriptionUrl, output, responseHeaders, matchesConfiguredSubscribePath };
+export const __test = { clientOf, clientDetails, versionAtLeast, filterByClientCompatibility, regexValue, protocolPrefix, traffic, decorateServers, general, generalUri, yamlProfile, clashProxy, singboxOutbound, singboxProfile, adaptSingboxConfig, shadowsocksProfile, textTemplateProfile, proxyLine, shadowrocketLine, quantumultXLine, loonLine, serverPassword, randomizedPort, replaceByPattern, subscriptionUrl, output, responseHeaders, matchesConfiguredSubscribePath };
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
