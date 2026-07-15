@@ -46,18 +46,22 @@ export async function settings(db: D1Database, kv?: KVNamespace) {
   if (!settingsPromise) {
     settingsPromise = (async () => {
       let version = settingsCache?.version || "0";
-      if (kv) {
-        try { version = await kv.get("settings_version") || "0"; }
-        catch { if (settingsCache && settingsCache.expiresAt > Date.now()) return settingsCache.value; }
+      let availableKv = kv;
+      if (availableKv) {
+        try { version = await availableKv.get("settings_version") || "0"; }
+        catch {
+          availableKv = undefined;
+          if (settingsCache && settingsCache.expiresAt > Date.now()) return settingsCache.value;
+        }
       }
       if (settingsCache && settingsCache.expiresAt > Date.now() && settingsCache.version === version) {
         settingsCache.versionCheckedAt = Date.now();
         return settingsCache.value;
       }
       const snapshotKey = `settings:snapshot:${SETTINGS_CACHE_SCOPE}:${version}`;
-      if (kv) {
+      if (availableKv) {
         try {
-          const snapshot = await kv.get(snapshotKey);
+          const snapshot = await availableKv.get(snapshotKey);
           if (snapshot) {
             const value = JSON.parse(snapshot) as Record<string, unknown>;
             settingsCache = { value, version, expiresAt: Date.now() + SETTINGS_CACHE_TTL_MS, versionCheckedAt: Date.now() };
@@ -68,8 +72,8 @@ export async function settings(db: D1Database, kv?: KVNamespace) {
       const rows = await db.prepare("SELECT name, value FROM v2_settings").all<{ name: string; value: string }>();
       const value = Object.fromEntries((rows.results || []).map(r => [r.name, parseSettingValue(r.value)]));
       settingsCache = { value, version, expiresAt: Date.now() + SETTINGS_CACHE_TTL_MS, versionCheckedAt: Date.now() };
-      if (kv) {
-        try { await kv.put(snapshotKey, JSON.stringify(value), { expirationTtl: SETTINGS_SNAPSHOT_TTL_SECONDS }); } catch {}
+      if (availableKv) {
+        try { await availableKv.put(snapshotKey, JSON.stringify(value), { expirationTtl: SETTINGS_SNAPSHOT_TTL_SECONDS }); } catch {}
       }
       return value;
     })()

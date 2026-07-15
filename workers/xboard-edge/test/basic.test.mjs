@@ -212,7 +212,8 @@ test("worker settings use memory, versioned KV snapshots and D1 fallback", () =>
     assert.match(source, /const SETTINGS_CACHE_TTL_MS = 300_000/);
     assert.match(source, /const SETTINGS_VERSION_CHECK_MS = 30_000/);
     assert.match(source, /settings:snapshot:/);
-    assert.match(source, /kv\.get\("settings_version"\)/);
+    assert.match(source, /availableKv\.get\("settings_version"\)/);
+    assert.match(source, /availableKv = undefined/);
     assert.match(source, /expirationTtl: SETTINGS_SNAPSHOT_TTL_SECONDS/);
     assert.match(source, /SELECT name, value FROM v2_settings/);
   }

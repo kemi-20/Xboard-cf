@@ -92,7 +92,8 @@ test("settings use a coalesced memory and KV snapshot cache", () => {
   assert.match(source, /const SETTINGS_CACHE_TTL_MS = 300_000/);
   assert.match(source, /const SETTINGS_VERSION_CHECK_MS = 30_000/);
   assert.match(source, /settings:snapshot:/);
-  assert.match(source, /kv\.get\("settings_version"\)/);
+  assert.match(source, /availableKv\.get\("settings_version"\)/);
+  assert.match(source, /availableKv = undefined/);
   assert.match(source, /let settingsPromise: Promise<Record<string, string>> \| null = null/);
   assert.match(source, /SELECT name, value FROM v2_settings/);
   assert.doesNotMatch(source, /SELECT value FROM v2_settings WHERE name = \?/);
@@ -113,6 +114,31 @@ test("a versioned KV settings snapshot avoids a D1 read", async () => {
     async delete() {}
   };
   assert.equal((await settings(db, kv)).server_token, "cached-token");
+  invalidateSettingsCache();
+});
+
+test("a KV outage falls straight through to D1 without a second KV attempt", async () => {
+  invalidateSettingsCache();
+  let kvReads = 0;
+  let kvWrites = 0;
+  let d1Reads = 0;
+  const kv = {
+    async get() { kvReads += 1; throw new Error("KV unavailable"); },
+    async put() { kvWrites += 1; },
+    async delete() {}
+  };
+  const statement = {
+    bind() { return statement; },
+    async all() {
+      d1Reads += 1;
+      return { success: true, results: [{ name: "server_token", value: "d1-token" }] };
+    }
+  };
+  const db = { prepare() { return statement; } };
+  assert.equal((await settings(db, kv)).server_token, "d1-token");
+  assert.equal(kvReads, 1);
+  assert.equal(kvWrites, 0);
+  assert.equal(d1Reads, 1);
   invalidateSettingsCache();
 });
 
