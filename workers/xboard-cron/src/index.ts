@@ -129,9 +129,11 @@ async function checkCommission(env: Env, ts: number) {
         const amount = Math.trunc(Number(order.commission_balance || 0) * share / 100);
         if (amount > 0) {
           const column = settings.closeWithdraw ? "balance" : "commission_balance";
-          statements.push(env.XBOARD_DB.prepare(`UPDATE v2_user SET ${column} = COALESCE(${column}, 0) + ?, updated_at = ? WHERE id = ?`).bind(amount, ts, inviter.id));
-          statements.push(env.XBOARD_DB.prepare("INSERT INTO v2_commission_log(invite_user_id, user_id, order_id, trade_no, order_amount, get_amount, amount, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
-            .bind(Number(inviter.id), Number(order.user_id), Number(order.id), String(order.trade_no || ""), Number(order.total_amount || 0), amount, amount, ts, ts));
+          statements.push(env.XBOARD_DB.prepare(`UPDATE v2_user SET ${column} = COALESCE(${column}, 0) + ?, updated_at = ? WHERE id = ? AND EXISTS (SELECT 1 FROM v2_order WHERE id = ? AND commission_status = 1)`)
+            .bind(amount, ts, inviter.id, order.id));
+          statements.push(env.XBOARD_DB.prepare(`INSERT INTO v2_commission_log(invite_user_id, user_id, order_id, trade_no, order_amount, get_amount, amount, created_at, updated_at)
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM v2_order WHERE id = ? AND commission_status = 1)`)
+            .bind(Number(inviter.id), Number(order.user_id), Number(order.id), String(order.trade_no || ""), Number(order.total_amount || 0), amount, amount, ts, ts, order.id));
           actual += amount;
         }
         inviterId = Number(inviter.invite_user_id || 0);
@@ -216,20 +218,21 @@ async function openProcessingOrder(env: Env, order: Record<string, any>, ts: num
 
   const period = String(order.period || "");
   const statements = [];
+  const orderGuard = "EXISTS (SELECT 1 FROM v2_order WHERE id = ? AND status = 1)";
   if (order.surplus_order_ids) {
     let ids: number[] = [];
     try { ids = JSON.parse(String(order.surplus_order_ids)).map(Number).filter(Boolean); } catch {}
-    if (ids.length) statements.push(env.XBOARD_DB.prepare(`UPDATE v2_order SET status = 4, updated_at = ? WHERE id IN (${ids.map(() => "?").join(",")})`).bind(ts, ...ids));
+    if (ids.length) statements.push(env.XBOARD_DB.prepare(`UPDATE v2_order SET status = 4, updated_at = ? WHERE id IN (${ids.map(() => "?").join(",")}) AND ${orderGuard}`).bind(ts, ...ids, order.id));
   }
 
-  const balance = Number(user.balance || 0) + Number(order.surplus_credit || 0);
   const systemMethod = Number(await setting(env, "reset_traffic_method", "1"));
   let resetTraffic = false;
   let nextReset: number | null = user.next_reset_at == null ? null : Number(user.next_reset_at);
   if (period === "reset_traffic") {
     resetTraffic = true;
     nextReset = nextResetAt({ ...user, reset_traffic_method: plan.reset_traffic_method }, systemMethod, ts);
-    statements.push(env.XBOARD_DB.prepare("UPDATE v2_user SET u = 0, d = 0, balance = ?, last_reset_at = ?, next_reset_at = ?, reset_count = COALESCE(reset_count, 0) + 1, updated_at = ? WHERE id = ?").bind(balance, ts, nextReset, ts, user.id));
+    statements.push(env.XBOARD_DB.prepare(`UPDATE v2_user SET u = 0, d = 0, balance = COALESCE(balance, 0) + ?, last_reset_at = ?, next_reset_at = ?, reset_count = COALESCE(reset_count, 0) + 1, updated_at = ? WHERE id = ? AND ${orderGuard}`)
+      .bind(Number(order.surplus_credit || 0), ts, nextReset, ts, user.id, order.id));
   } else {
     const transferEnable = Number(plan.transfer_enable || 0) * 1073741824;
     resetTraffic = period === "onetime" || user.expired_at == null || Number(order.type) === 1;
@@ -241,18 +244,19 @@ async function openProcessingOrder(env: Env, order: Record<string, any>, ts: num
       expiredAt = addOrderMonths(base, months[period]);
     }
     if (resetTraffic) nextReset = nextResetAt({ ...user, expired_at: expiredAt, reset_traffic_method: plan.reset_traffic_method }, systemMethod, ts);
-    statements.push(env.XBOARD_DB.prepare(`UPDATE v2_user SET plan_id = ?, group_id = ?, transfer_enable = ?, speed_limit = ?, device_limit = ?, expired_at = ?, u = ?, d = ?, balance = ?, last_reset_at = ?, next_reset_at = ?, reset_count = COALESCE(reset_count, 0) + ?, updated_at = ? WHERE id = ?`)
-      .bind(plan.id, plan.group_id, transferEnable, plan.speed_limit ?? null, plan.device_limit ?? null, expiredAt, resetTraffic ? 0 : Number(user.u || 0), resetTraffic ? 0 : Number(user.d || 0), balance, resetTraffic ? ts : user.last_reset_at ?? null, nextReset, resetTraffic ? 1 : 0, ts, user.id));
+    statements.push(env.XBOARD_DB.prepare(`UPDATE v2_user SET plan_id = ?, group_id = ?, transfer_enable = ?, speed_limit = ?, device_limit = ?, expired_at = ?, u = ?, d = ?, balance = COALESCE(balance, 0) + ?, last_reset_at = ?, next_reset_at = ?, reset_count = COALESCE(reset_count, 0) + ?, updated_at = ? WHERE id = ? AND ${orderGuard}`)
+      .bind(plan.id, plan.group_id, transferEnable, plan.speed_limit ?? null, plan.device_limit ?? null, expiredAt, resetTraffic ? 0 : Number(user.u || 0), resetTraffic ? 0 : Number(user.d || 0), Number(order.surplus_credit || 0), resetTraffic ? ts : user.last_reset_at ?? null, nextReset, resetTraffic ? 1 : 0, ts, user.id, order.id));
   }
   if (resetTraffic) {
     const method = plan.reset_traffic_method === null || plan.reset_traffic_method === undefined ? systemMethod : Number(plan.reset_traffic_method);
     const resetTypes: Record<number, string> = { 0: "first_day_month", 1: "monthly", 3: "first_day_year", 4: "yearly" };
     statements.push(env.XBOARD_DB.prepare(`INSERT INTO v2_traffic_reset_logs(user_id, reset_type, old_u, old_d, old_upload, old_download, old_total, new_upload, new_download, new_total, trigger_source, metadata, reset_time, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 'order', ?, ?, ?)`)
-      .bind(user.id, resetTypes[method] || "manual", Number(user.u || 0), Number(user.d || 0), Number(user.u || 0), Number(user.d || 0), Number(user.u || 0) + Number(user.d || 0), JSON.stringify({ order_id: order.id, trade_no: order.trade_no }), ts, ts));
+      SELECT ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 'order', ?, ?, ? WHERE ${orderGuard}`)
+      .bind(user.id, resetTypes[method] || "manual", Number(user.u || 0), Number(user.d || 0), Number(user.u || 0), Number(user.d || 0), Number(user.u || 0) + Number(user.d || 0), JSON.stringify({ order_id: order.id, trade_no: order.trade_no }), ts, ts, order.id));
   }
   statements.push(env.XBOARD_DB.prepare("UPDATE v2_order SET status = 3, updated_at = ? WHERE id = ? AND status = 1").bind(ts, order.id));
-  await env.XBOARD_DB.batch(statements);
+  const results = await env.XBOARD_DB.batch(statements);
+  if (Number((results.at(-1)?.meta as any)?.changes || 0) !== 1) return;
   await optionalKvPut(env, `user_version:${user.id}`, String(ts));
   const syncToken = await setting(env, "internal_sync_token", await setting(env, "server_token"));
   if (syncToken) {
@@ -274,7 +278,7 @@ async function checkOrders(env: Env, ts: number) {
     for (const order of expired.results || []) {
       const statements = [];
       if (Number(order.balance_amount || 0) > 0) {
-        statements.push(env.XBOARD_DB.prepare("UPDATE v2_user SET balance = COALESCE(balance, 0) + (SELECT COALESCE(balance_amount, 0) FROM v2_order WHERE id = ? AND status = 0), updated_at = ? WHERE id = ?")
+        statements.push(env.XBOARD_DB.prepare("UPDATE v2_user SET balance = COALESCE(balance, 0) + COALESCE((SELECT balance_amount FROM v2_order WHERE id = ? AND status = 0), 0), updated_at = ? WHERE id = ?")
           .bind(order.id, ts, order.user_id));
       }
       statements.push(env.XBOARD_DB.prepare("UPDATE v2_order SET status = 2, updated_at = ? WHERE id = ? AND status = 0").bind(ts, order.id));

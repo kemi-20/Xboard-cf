@@ -47,7 +47,7 @@ test("cron implements the official order, ticket, commission and traffic checks"
   assert.match(source, /scope: "users"/);
   assert.match(source, /WHERE status = 0 AND created_at <= \?/);
   assert.match(source, /SELECT id, user_id, balance_amount FROM v2_order/);
-  assert.match(source, /balance = COALESCE\(balance, 0\) \+ \(SELECT COALESCE\(balance_amount, 0\)/);
+  assert.match(source, /balance = COALESCE\(balance, 0\) \+ COALESCE\(\(SELECT balance_amount/);
   assert.match(source, /WHERE status = 1 ORDER BY id ASC LIMIT 200/);
   assert.match(source, /UPDATE v2_order SET status = 3/);
   assert.match(source, /ORDER BY u\.id ASC LIMIT 100/);
@@ -57,4 +57,14 @@ test("cron implements the official order, ticket, commission and traffic checks"
   assert.match(source, /DELETE FROM failed_jobs WHERE failed_at < \?/);
   assert.match(source, /DELETE FROM v2_job_logs WHERE COALESCE\(updated_at, created_at\) < \?/);
   assert.match(source, /ts - 7 \* 86400/);
+});
+
+test("order and commission retries cannot credit balances twice", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /EXISTS \(SELECT 1 FROM v2_order WHERE id = \? AND commission_status = 1\)/);
+  assert.match(source, /SELECT \?, \?, \?, \?, \?, \?, \?, \?, \? WHERE EXISTS/);
+  assert.match(source, /balance = COALESCE\(balance, 0\) \+ \?/);
+  assert.match(source, /const orderGuard = "EXISTS \(SELECT 1 FROM v2_order WHERE id = \? AND status = 1\)"/);
+  assert.match(source, /WHERE id = \? AND \$\{orderGuard\}/);
+  assert.match(source, /results\.at\(-1\).*changes/);
 });

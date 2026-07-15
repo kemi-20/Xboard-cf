@@ -2504,9 +2504,10 @@ async function orderCommission(env: Env, user: Record<string, any>, totalAmount:
 async function cancelOrder(env: Env, order: Record<string, any>, ts: number) {
   const refund = Math.max(0, Number(order.balance_amount || 0));
   const statements = [];
-  if (refund) statements.push(env.XBOARD_DB.prepare("UPDATE v2_user SET balance = COALESCE(balance, 0) + (SELECT COALESCE(balance_amount, 0) FROM v2_order WHERE id = ? AND status = 0), updated_at = ? WHERE id = ?").bind(order.id, ts, order.user_id));
+  if (refund) statements.push(env.XBOARD_DB.prepare("UPDATE v2_user SET balance = COALESCE(balance, 0) + COALESCE((SELECT balance_amount FROM v2_order WHERE id = ? AND status = 0), 0), updated_at = ? WHERE id = ?").bind(order.id, ts, order.user_id));
   statements.push(env.XBOARD_DB.prepare("UPDATE v2_order SET status = 2, updated_at = ? WHERE id = ? AND status = 0").bind(ts, order.id));
-  await env.XBOARD_DB.batch(statements);
+  const results = await env.XBOARD_DB.batch(statements);
+  return Number((results.at(-1)?.meta as any)?.changes || 0) === 1;
 }
 
 async function adminOrder(request: Request, env: Env, route: string): Promise<Response | null> {
@@ -2547,15 +2548,23 @@ async function adminOrder(request: Request, env: Env, route: string): Promise<Re
   }
   if (Number(order.status) !== 0) return fail("只能对待支付的订单进行操作", 400, 400);
   if (route === "/order/cancel") {
-    await cancelOrder(env, order, now());
-    return ok(true);
+    return await cancelOrder(env, order, now()) ? ok(true) : fail("只能对待支付的订单进行操作", 400, 400);
   }
   if (route === "/order/paid") {
     const plan = await env.XBOARD_DB.prepare("SELECT * FROM v2_plan WHERE id=?").bind(order.plan_id).first<Record<string, any>>();
     const user = await env.XBOARD_DB.prepare("SELECT * FROM v2_user WHERE id=?").bind(order.user_id).first<Record<string, any>>();
     if (!plan || !user) return fail("订单关联的用户或订阅不存在", 400, 400202);
     const period = String(order.period || ""); const ts = now();
+    const claimed = await env.XBOARD_DB.prepare("UPDATE v2_order SET status=1,paid_at=?,callback_no='manual_operation',updated_at=? WHERE id=? AND status=0 RETURNING id")
+      .bind(ts, ts, order.id).first<{ id: number }>();
+    if (!claimed) return fail("只能对待支付的订单进行操作", 400, 400);
     const statements: D1PreparedStatement[] = [];
+    const orderGuard = "EXISTS (SELECT 1 FROM v2_order WHERE id = ? AND status = 1)";
+    const surplusOrderIds = parseJsonArray(order.surplus_order_ids).map(Number).filter(Boolean);
+    if (surplusOrderIds.length) {
+      statements.push(env.XBOARD_DB.prepare(`UPDATE v2_order SET status=4,updated_at=? WHERE id IN (${surplusOrderIds.map(() => "?").join(",")}) AND ${orderGuard}`)
+        .bind(ts, ...surplusOrderIds, order.id));
+    }
     let resetTraffic = false;
     let expiredAt: number | null = user.expired_at == null ? null : Number(user.expired_at);
     if (period === "reset_traffic") {
@@ -2570,18 +2579,21 @@ async function adminOrder(request: Request, env: Env, route: string): Promise<Re
     const method = plan.reset_traffic_method === null || plan.reset_traffic_method === undefined ? Number(pickSetting(await settings(env.XBOARD_DB), "reset_traffic_method", 0)) : Number(plan.reset_traffic_method);
     const nextReset = resetTraffic ? edgeNextResetAt(expiredAt, method, ts) : user.next_reset_at ?? null;
     if (period === "reset_traffic") {
-      statements.push(env.XBOARD_DB.prepare("UPDATE v2_user SET u=0,d=0,last_reset_at=?,next_reset_at=?,reset_count=COALESCE(reset_count,0)+1,updated_at=? WHERE id=?").bind(ts, nextReset, ts, user.id));
+      statements.push(env.XBOARD_DB.prepare(`UPDATE v2_user SET u=0,d=0,balance=COALESCE(balance,0)+?,last_reset_at=?,next_reset_at=?,reset_count=COALESCE(reset_count,0)+1,updated_at=? WHERE id=? AND ${orderGuard}`)
+        .bind(Number(order.surplus_credit || 0), ts, nextReset, ts, user.id, order.id));
     } else {
-      statements.push(env.XBOARD_DB.prepare("UPDATE v2_user SET plan_id=?,group_id=?,transfer_enable=?,speed_limit=?,device_limit=?,expired_at=?,u=?,d=?,last_reset_at=?,next_reset_at=?,reset_count=COALESCE(reset_count,0)+?,updated_at=? WHERE id=?")
-        .bind(plan.id, plan.group_id, Number(plan.transfer_enable || 0) * 1073741824, plan.speed_limit ?? null, plan.device_limit ?? null, expiredAt, resetTraffic ? 0 : Number(user.u || 0), resetTraffic ? 0 : Number(user.d || 0), resetTraffic ? ts : user.last_reset_at ?? null, nextReset, resetTraffic ? 1 : 0, ts, user.id));
+      statements.push(env.XBOARD_DB.prepare(`UPDATE v2_user SET plan_id=?,group_id=?,transfer_enable=?,speed_limit=?,device_limit=?,expired_at=?,u=?,d=?,balance=COALESCE(balance,0)+?,last_reset_at=?,next_reset_at=?,reset_count=COALESCE(reset_count,0)+?,updated_at=? WHERE id=? AND ${orderGuard}`)
+        .bind(plan.id, plan.group_id, Number(plan.transfer_enable || 0) * 1073741824, plan.speed_limit ?? null, plan.device_limit ?? null, expiredAt, resetTraffic ? 0 : Number(user.u || 0), resetTraffic ? 0 : Number(user.d || 0), Number(order.surplus_credit || 0), resetTraffic ? ts : user.last_reset_at ?? null, nextReset, resetTraffic ? 1 : 0, ts, user.id, order.id));
     }
     if (resetTraffic) {
       const resetTypes: Record<number, string> = { 0: "first_day_month", 1: "monthly", 3: "first_day_year", 4: "yearly" };
-      statements.push(env.XBOARD_DB.prepare("INSERT INTO v2_traffic_reset_logs(user_id,reset_type,old_u,old_d,old_upload,old_download,old_total,new_upload,new_download,new_total,trigger_source,metadata,reset_time,created_at) VALUES (?,?,?,?,?,?,?,0,0,0,'order',?,?,?)")
-        .bind(user.id, resetTypes[method] || "manual", Number(user.u || 0), Number(user.d || 0), Number(user.u || 0), Number(user.d || 0), Number(user.u || 0) + Number(user.d || 0), JSON.stringify({ order_id: order.id, trade_no: tradeNo }), ts, ts));
+      statements.push(env.XBOARD_DB.prepare(`INSERT INTO v2_traffic_reset_logs(user_id,reset_type,old_u,old_d,old_upload,old_download,old_total,new_upload,new_download,new_total,trigger_source,metadata,reset_time,created_at)
+        SELECT ?,?,?,?,?,?,?,0,0,0,'order',?,?,? WHERE ${orderGuard}`)
+        .bind(user.id, resetTypes[method] || "manual", Number(user.u || 0), Number(user.d || 0), Number(user.u || 0), Number(user.d || 0), Number(user.u || 0) + Number(user.d || 0), JSON.stringify({ order_id: order.id, trade_no: tradeNo }), ts, ts, order.id));
     }
-    statements.push(env.XBOARD_DB.prepare("UPDATE v2_order SET status=3,paid_at=?,callback_no='manual_operation',updated_at=? WHERE trade_no=?").bind(ts, ts, tradeNo));
-    await env.XBOARD_DB.batch(statements);
+    statements.push(env.XBOARD_DB.prepare("UPDATE v2_order SET status=3,updated_at=? WHERE id=? AND status=1").bind(ts, order.id));
+    const results = await env.XBOARD_DB.batch(statements);
+    if (Number((results.at(-1)?.meta as any)?.changes || 0) !== 1) return fail("订单开通失败，请稍后重试", 500, 500);
     await bump(env.XBOARD_KV, `user_version:${order.user_id}`);
     return ok(true);
   }
@@ -3487,9 +3499,9 @@ async function userApi(request: Request, env: Env, path: string) {
     const amount = Math.trunc(Number(input.transfer_amount || 0));
     if (amount <= 0) return fail("转入金额必须大于0", 422, 422);
     if (amount > Number((user as any).commission_balance || 0)) return fail("推广佣金不足", 400, 400);
-    await env.XBOARD_DB.prepare("UPDATE v2_user SET commission_balance = commission_balance - ?, balance = balance + ?, updated_at = ? WHERE id = ? AND commission_balance >= ?")
+    const result = await env.XBOARD_DB.prepare("UPDATE v2_user SET commission_balance = commission_balance - ?, balance = balance + ?, updated_at = ? WHERE id = ? AND commission_balance >= ?")
       .bind(amount, amount, now(), (user as any).id, amount).run();
-    return ok(true);
+    return Number((result.meta as any)?.changes || 0) === 1 ? ok(true) : fail("推广佣金不足", 400, 400);
   }
   if (request.method === "POST" && route === "/getQuickLoginUrl") {
     const input = await body<Record<string, any>>(request); const verify = randomString(32);
@@ -3575,7 +3587,7 @@ async function userApi(request: Request, env: Env, path: string) {
       let totalAmount = Math.trunc(price * 100);
       let discountAmount = 0;
       let couponId: number | null = null;
-      let couponUpdate: D1PreparedStatement | null = null;
+      let couponHasGlobalLimit = false;
       const couponCode = String(input.coupon_code || "").trim();
       if (couponCode) {
         const coupon = await env.XBOARD_DB.prepare("SELECT * FROM v2_coupon WHERE code = ?").bind(couponCode).first<Record<string, any>>();
@@ -3595,7 +3607,7 @@ async function userApi(request: Request, env: Env, path: string) {
         discountAmount = couponType === 1 ? Number(coupon.value || 0) : couponType === 2 ? totalAmount * Number(coupon.value || 0) / 100 : 0;
         discountAmount = Math.min(totalAmount, Math.trunc(discountAmount));
         couponId = Number(coupon.id);
-        if (coupon.limit_use !== null) couponUpdate = env.XBOARD_DB.prepare("UPDATE v2_coupon SET limit_use = limit_use - 1, updated_at = ? WHERE id = ? AND limit_use > 0").bind(ts, coupon.id);
+        couponHasGlobalLimit = coupon.limit_use !== null;
       }
       if (Number((user as any).discount || 0) > 0) discountAmount += Math.trunc(totalAmount * Number((user as any).discount) / 100);
       discountAmount = Math.min(totalAmount, discountAmount);
@@ -3622,13 +3634,20 @@ async function userApi(request: Request, env: Env, path: string) {
         }
       }
       const commission = await orderCommission(env, currentUser, totalAmount);
-      const balanceAmount = Math.min(Math.max(0, Number(currentUser.balance || 0)), totalAmount);
-      totalAmount -= balanceAmount;
-      const statements = [env.XBOARD_DB.prepare("INSERT INTO v2_order(user_id, plan_id, period, trade_no, status, total_amount, balance_amount, discount_amount, coupon_id, type, surplus_amount, surplus_credit, surplus_order_ids, invite_user_id, commission_balance, created_at, updated_at) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-        .bind(userId, planId, period, tradeNo, totalAmount, balanceAmount, discountAmount, couponId, type, surplusAmount, surplusCredit, JSON.stringify(surplusOrderIds), commission.inviteUserId, commission.commissionBalance, ts, ts)];
-      if (balanceAmount) statements.push(env.XBOARD_DB.prepare("UPDATE v2_user SET balance = balance - ?, updated_at = ? WHERE id = ? AND balance >= ?").bind(balanceAmount, ts, userId, balanceAmount));
-      if (couponUpdate) statements.push(couponUpdate);
-      await env.XBOARD_DB.batch(statements);
+      const payableAmount = totalAmount;
+      const couponAvailability = couponHasGlobalLimit ? " AND EXISTS (SELECT 1 FROM v2_coupon WHERE id=? AND limit_use>0)" : "";
+      const statements = [env.XBOARD_DB.prepare(`INSERT INTO v2_order(user_id, plan_id, period, trade_no, status, total_amount, balance_amount, discount_amount, coupon_id, type, surplus_amount, surplus_credit, surplus_order_ids, invite_user_id, commission_balance, created_at, updated_at)
+        SELECT ?,?,?,?,0,MAX(0,?-MIN(MAX(COALESCE(u.balance,0),0),?)),MIN(MAX(COALESCE(u.balance,0),0),?),?,?,?,?,?,?,?,?,?,?
+        FROM v2_user u WHERE u.id=? AND NOT EXISTS (SELECT 1 FROM v2_order WHERE user_id=u.id AND status IN (0,1))${couponAvailability}`)
+        .bind(userId, planId, period, tradeNo, payableAmount, payableAmount, payableAmount, discountAmount, couponId, type, surplusAmount, surplusCredit, JSON.stringify(surplusOrderIds), commission.inviteUserId, commission.commissionBalance, ts, ts, userId, ...(couponHasGlobalLimit ? [couponId] : []))];
+      statements.push(env.XBOARD_DB.prepare(`UPDATE v2_user SET balance=balance-(SELECT balance_amount FROM v2_order WHERE trade_no=?),updated_at=?
+        WHERE id=? AND EXISTS (SELECT 1 FROM v2_order WHERE trade_no=? AND user_id=? AND status=0) AND (SELECT balance_amount FROM v2_order WHERE trade_no=?)>0`)
+        .bind(tradeNo, ts, userId, tradeNo, userId, tradeNo));
+      if (couponHasGlobalLimit) statements.push(env.XBOARD_DB.prepare("UPDATE v2_coupon SET limit_use=limit_use-1,updated_at=? WHERE id=? AND limit_use>0 AND EXISTS (SELECT 1 FROM v2_order WHERE trade_no=?)").bind(ts, couponId, tradeNo));
+      const results = await env.XBOARD_DB.batch(statements);
+      if (Number((results[0]?.meta as any)?.changes || 0) !== 1) return couponHasGlobalLimit
+        ? fail("优惠券已用完", 400, 400)
+        : fail("您有未支付或开通中的订单，请稍后再试或取消它", 400, 400);
       return ok(tradeNo);
     }
     if (request.method === "POST" && route === "/order/checkout") {
