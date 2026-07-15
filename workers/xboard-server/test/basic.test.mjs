@@ -22,6 +22,14 @@ test("node polling defaults to five minutes", () => {
   assert.doesNotMatch(source, /setting\(env, "server_(?:push|pull)_interval", "60"\)/);
 });
 
+test("websocket settings accept both SQLite booleans and numeric flags", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /function booleanSetting\(value: unknown, fallback = false\)/);
+  assert.match(source, /String\(value\)\.toLowerCase\(\) === "true"/);
+  assert.match(source, /booleanSetting\(await setting\(env, "server_ws_enable", "1"\), true\)/);
+  assert.doesNotMatch(source, /Number\(await setting\(env, "server_ws_enable", "1"\)\)/);
+});
+
 test("official server routes use exact method and path matching", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.doesNotMatch(source, /pathname\.includes\(/);
@@ -68,6 +76,15 @@ test("settings use a coalesced sixty-second instance cache", () => {
   assert.match(source, /let settingsPromise: Promise<Record<string, string>> \| null = null/);
   assert.match(source, /SELECT name, value FROM v2_settings/);
   assert.doesNotMatch(source, /SELECT value FROM v2_settings WHERE name = \?/);
+});
+
+test("admin changes and migrations can invalidate the server settings cache immediately", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const db = fs.readFileSync("src/db.ts", "utf8");
+  assert.match(db, /export function invalidateSettingsCache\(\)/);
+  assert.match(source, /url\.pathname === "\/internal\/settings\/invalidate"/);
+  assert.match(source, /SELECT name, value FROM v2_settings WHERE name IN \('internal_sync_token', 'server_token'\)/);
+  assert.match(source, /invalidateSettingsCache\(\)/);
 });
 
 test("websocket device state follows the official per-IP contract", () => {

@@ -10,6 +10,10 @@ const SETTINGS_NAMES = [
 ] as const;
 let settingsCache: { value: Record<string, string>; expiresAt: number } | null = null;
 let settingsPromise: Promise<Record<string, string>> | null = null;
+export function invalidateSettingsCache() {
+  settingsCache = null;
+  settingsPromise = null;
+}
 export async function list(db: D1Database, table: string, page = 1, pageSize = 20) {
   const safe = table.replace(/[^a-zA-Z0-9_]/g, "");
   const offset = Math.max(0, page - 1) * pageSize;

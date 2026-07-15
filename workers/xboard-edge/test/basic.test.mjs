@@ -145,6 +145,17 @@ test("cache version bumps cannot turn successful D1 saves into API errors", () =
   assert.match(source, /try[\s\S]*await kv\.put\(key, String\(Date\.now\(\)\)\)[\s\S]*catch/);
 });
 
+test("settings saves invalidate the xboard-server instance cache", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const migration = fs.readFileSync("src/migration.ts", "utf8");
+  assert.match(source, /async function invalidateServerSettings\(env: Env\)/);
+  assert.match(source, /internal\/settings\/invalidate/);
+  assert.match(source, /invalidateSettingsCache\(\);\s*await invalidateServerSettings\(env\)/);
+  assert.match(migration, /async function resetServerRuntime\(env: MigrationEnv\)/);
+  assert.match(migration, /internal\/settings\/invalidate/);
+  assert.match(migration, /await resetServerRuntime\(env\)/);
+});
+
 test("node protocol paths are proxied through the xboard-server service binding", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   const wrangler = fs.readFileSync("wrangler.toml", "utf8");

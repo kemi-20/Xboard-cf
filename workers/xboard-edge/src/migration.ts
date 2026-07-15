@@ -64,6 +64,17 @@ function unixTime(value: unknown) {
   return Number.isFinite(parsed) ? Math.trunc(parsed / 1000) : null;
 }
 
+async function resetServerRuntime(env: MigrationEnv) {
+  try {
+    const values = await env.XBOARD_DB.prepare("SELECT name, value FROM v2_settings WHERE name IN ('internal_sync_token', 'server_token')").all<{ name: string; value: string }>();
+    const config = Object.fromEntries((values.results || []).map(row => [row.name, row.value]));
+    const token = config.internal_sync_token || config.server_token || "";
+    if (!token) return;
+    await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/settings/invalidate", { method: "POST", headers: { "x-xboard-internal-token": token } });
+    await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/status/reset", { method: "POST", headers: { "x-xboard-internal-token": token } });
+  } catch { /* Nodes repopulate runtime state after migration or rollback. */ }
+}
+
 async function ensureMigrationSchema(env: MigrationEnv) {
   await env.XBOARD_DB.prepare(`CREATE TABLE IF NOT EXISTS v2_migration_runs (
     id TEXT PRIMARY KEY, source_type TEXT NOT NULL, source_name TEXT, source_size INTEGER NOT NULL DEFAULT 0,
@@ -701,6 +712,7 @@ async function finishRollback(request: Request, env: MigrationEnv) {
     env.XBOARD_DB.prepare("UPDATE v2_server SET last_check_at = NULL, last_push_at = NULL, online_user = 0, metrics = NULL")
   ]);
   invalidateSettingsCache();
+  await resetServerRuntime(env);
   const ts = now();
   const report = { restored_counts: expected, restored_at: ts };
   await env.XBOARD_DB.prepare("UPDATE v2_migration_runs SET status = 'rolled_back', rollback_progress = ?, report = ?, error = NULL, access_token_hash = NULL, finished_at = ?, updated_at = ? WHERE id = ?")
@@ -771,12 +783,7 @@ async function finishMigration(request: Request, env: MigrationEnv) {
     await env.XBOARD_KV.put("servers_version", String(Date.now()));
   } catch { /* Cache invalidation is best effort. */ }
   invalidateSettingsCache();
-  try {
-    const values = await env.XBOARD_DB.prepare("SELECT name, value FROM v2_settings WHERE name IN ('internal_sync_token', 'server_token')").all<{ name: string; value: string }>();
-    const config = Object.fromEntries((values.results || []).map(row => [row.name, row.value]));
-    const token = config.internal_sync_token || config.server_token || "";
-    if (token) await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/status/reset", { method: "POST", headers: { "x-xboard-internal-token": token } });
-  } catch { /* Nodes will repopulate StatusHub after migration. */ }
+  await resetServerRuntime(env);
   try {
     await env.XBOARD_DB.batch([
       env.XBOARD_DB.prepare("DELETE FROM v2_migration_snapshot_rows WHERE run_id = ?").bind(runId),

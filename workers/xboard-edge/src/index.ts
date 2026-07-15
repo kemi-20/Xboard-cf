@@ -179,6 +179,17 @@ async function internalSyncToken(env: Env) {
   return String(values.internal_sync_token || values.server_token || "");
 }
 
+async function invalidateServerSettings(env: Env) {
+  try {
+    const token = await internalSyncToken(env);
+    if (!token) return;
+    await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/settings/invalidate", {
+      method: "POST",
+      headers: { "x-xboard-internal-token": token }
+    });
+  } catch { /* Other workers refresh their short cache naturally if the service is unavailable. */ }
+}
+
 type NodeSyncIntent = { scope: "all" } | { scope: "user"; user_id: number; old_group_id?: number };
 
 async function notifyNodeSync(env: Env, intent: NodeSyncIntent = { scope: "all" }) {
@@ -2075,6 +2086,7 @@ async function createOrUpdate(table: string, request: Request, env: Env, id?: st
   }
   if (table === "v2_settings") {
     invalidateSettingsCache();
+    await invalidateServerSettings(env);
     await bump(env.XBOARD_KV, "settings_version");
   }
   if (table === "v2_server" || table === "v2_plan") await bump(env.XBOARD_KV, "servers_version");
@@ -2732,6 +2744,7 @@ async function adminApi(request: Request, env: Env, path: string) {
       }
     }
     invalidateSettingsCache();
+    await invalidateServerSettings(env);
     await bump(env.XBOARD_KV, "settings_version");
     return ok(true);
   }

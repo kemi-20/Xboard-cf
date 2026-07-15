@@ -1,6 +1,6 @@
 import type { D1Database, KVNamespace, Queue, DurableObjectState, ExecutionContext } from "./types.ts";
 import { now } from "./compat.ts";
-import { settings as loadSettings } from "./db.ts";
+import { invalidateSettingsCache, settings as loadSettings } from "./db.ts";
 import {
   availableUser, buildNodeConfig, isValidNodeType, normalizeNodeType,
   parseJson, parseTraffic, responseEtag, type Row
@@ -59,6 +59,12 @@ async function readInput(request: Request): Promise<Row> {
 async function setting(env: Env, name: string, fallback = "") {
   const values = await loadSettings(env.XBOARD_DB);
   return values[name] ?? fallback;
+}
+
+function booleanSetting(value: unknown, fallback = false) {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value === "boolean") return value;
+  return value === 1 || value === "1" || String(value).toLowerCase() === "true";
 }
 
 const STATUS_HUB_ID = "global";
@@ -839,7 +845,7 @@ for (const [family, type, actions] of [
 routes.set("GET /api/v2/server/handshake", async (request, env, input) => {
   const auth = await authenticateV2(env, input, true);
   if (auth instanceof Response) return auth;
-  const enabled = Number(await setting(env, "server_ws_enable", "1")) === 1;
+  const enabled = booleanSetting(await setting(env, "server_ws_enable", "1"), true);
   if (!enabled) return json({ websocket: { enabled: false } });
   const custom = (await setting(env, "server_ws_url", "")).trim();
   const url = new URL(request.url);
@@ -885,6 +891,14 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/health") return json({ data: { service: "xboard-server", time: now() } });
+    if (url.pathname === "/internal/settings/invalidate" && request.method === "POST") {
+      const rows = await env.XBOARD_DB.prepare("SELECT name, value FROM v2_settings WHERE name IN ('internal_sync_token', 'server_token')").all<{ name: string; value: string }>();
+      const values = Object.fromEntries((rows.results || []).map(row => [row.name, row.value]));
+      const configuredToken = String(values.internal_sync_token || values.server_token || "").trim();
+      if (!configuredToken || request.headers.get("x-xboard-internal-token") !== configuredToken) return json({ message: "Unauthorized" }, 401);
+      invalidateSettingsCache();
+      return json({ data: true });
+    }
     if (url.pathname.startsWith("/internal/status/")) {
       const configuredToken = await internalToken(env);
       if (!configuredToken || request.headers.get("x-xboard-internal-token") !== configuredToken) return json({ message: "Unauthorized" }, 401);
@@ -894,7 +908,7 @@ export default {
       return statusHub(env).fetch(new Request(target.toString(), request));
     }
     if (url.pathname === "/ws") {
-      if (Number(await setting(env, "server_ws_enable", "1")) !== 1) return websocketError("websocket disabled");
+      if (!booleanSetting(await setting(env, "server_ws_enable", "1"), true)) return websocketError("websocket disabled");
       const input: Row = {};
       url.searchParams.forEach((value, key) => { input[key] = value; });
       let name: string;
