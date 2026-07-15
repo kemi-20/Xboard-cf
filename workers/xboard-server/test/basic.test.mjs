@@ -15,6 +15,13 @@ test("device state expiry matches the upstream five-minute Redis TTL", () => {
   assert.match(source, /JSON\.stringify\(next\), \{ expirationTtl: 300 \}/);
 });
 
+test("node polling defaults to five minutes", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /setting\(env, "server_push_interval", "300"\)/);
+  assert.match(source, /setting\(env, "server_pull_interval", "300"\)/);
+  assert.doesNotMatch(source, /setting\(env, "server_(?:push|pull)_interval", "60"\)/);
+});
+
 test("official server routes use exact method and path matching", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.doesNotMatch(source, /pathname\.includes\(/);

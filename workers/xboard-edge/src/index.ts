@@ -530,7 +530,7 @@ async function ensureBootstrap(env: Env) {
     frontend_theme_sidebar: "light", frontend_theme_header: "dark", frontend_theme_color: "default",
     currency: "CNY", currency_symbol: "¥", try_out_plan_id: 1, try_out_hour: 24,
     plan_change_enable: 1, reset_traffic_method: 0, surplus_enable: 1, default_remind_expire: 1, default_remind_traffic: 1,
-    server_token: "xboard-cf-server-token-change-me", server_pull_interval: 60, server_push_interval: 60, server_ws_enable: 1,
+    server_token: "xboard-cf-server-token-change-me", server_pull_interval: 300, server_push_interval: 300, server_ws_enable: 1,
     server_ws_url: "", device_limit_mode: 0, payment_enabled: 0, invite_force: 0, invite_commission: 10,
     invite_gen_limit: 5, invite_never_expire: 0, commission_first_time_enable: 1, commission_auto_check_enable: 1,
     commission_withdraw_limit: 100, commission_withdraw_method: ["USDT", "支付宝"], email_verify: 0, safe_mode_enable: 0,
@@ -677,8 +677,8 @@ async function adminConfig(env: Env, request: Request) {
     },
     server: {
       server_token: pickSetting(all, "server_token", ""),
-      server_pull_interval: pickSetting(all, "server_pull_interval", 60),
-      server_push_interval: pickSetting(all, "server_push_interval", 60),
+      server_pull_interval: pickSetting(all, "server_pull_interval", 300),
+      server_push_interval: pickSetting(all, "server_push_interval", 300),
       device_limit_mode: Number(pickSetting(all, "device_limit_mode", 0)),
       server_ws_enable: !!pickSetting(all, "server_ws_enable", 1),
       server_ws_url: pickSetting(all, "server_ws_url", "")

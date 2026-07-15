@@ -169,8 +169,8 @@ async function routeRows(env: Env, node: Row): Promise<Row[]> {
 async function nodeConfig(env: Env, node: Row) {
   const config = buildNodeConfig(node, await routeRows(env, node));
   config.base_config = {
-    push_interval: Number(await setting(env, "server_push_interval", "60")),
-    pull_interval: Number(await setting(env, "server_pull_interval", "60"))
+    push_interval: Number(await setting(env, "server_push_interval", "300")),
+    pull_interval: Number(await setting(env, "server_pull_interval", "300"))
   };
   return config;
 }
@@ -332,7 +332,7 @@ async function processStatus(env: Env, node: Row, status: unknown) {
   if (value.net?.in_speed !== undefined && value.net?.out_speed !== undefined) {
     load.net = { in_speed: Number(value.net.in_speed), out_speed: Number(value.net.out_speed) };
   }
-  await optionalKvPut(env, `node:load:${node.id}`, JSON.stringify(load), { expirationTtl: Math.max(300, Number(await setting(env, "server_push_interval", "60")) * 3) });
+  await optionalKvPut(env, `node:load:${node.id}`, JSON.stringify(load), { expirationTtl: Math.max(300, Number(await setting(env, "server_push_interval", "300")) * 3) });
 }
 
 async function processMetrics(env: Env, node: Row, metrics: unknown) {
@@ -344,7 +344,7 @@ async function processMetrics(env: Env, node: Row, metrics: unknown) {
   } catch {
     // Older databases are migrated by xboard-edge bootstrap; KV still serves metrics during that window.
   }
-  await optionalKvPut(env, `node:metrics:${node.id}`, value, { expirationTtl: Math.max(300, Number(await setting(env, "server_push_interval", "60")) * 3) });
+  await optionalKvPut(env, `node:metrics:${node.id}`, value, { expirationTtl: Math.max(300, Number(await setting(env, "server_push_interval", "300")) * 3) });
 }
 
 function validateStatus(input: Row, optional = false): Response | null {
@@ -438,7 +438,7 @@ async function machineNodes(env: Env, machine: Row) {
   const result = await env.XBOARD_DB.prepare("SELECT id, type, name FROM v2_server WHERE machine_id = ? AND enabled = 1 ORDER BY sort ASC").bind(machine.id).all<Row>();
   return {
     nodes: result.results || [],
-    base_config: { push_interval: Number(await setting(env, "server_push_interval", "60")), pull_interval: Number(await setting(env, "server_pull_interval", "60")) }
+    base_config: { push_interval: Number(await setting(env, "server_push_interval", "300")), pull_interval: Number(await setting(env, "server_pull_interval", "300")) }
   };
 }
 
@@ -783,7 +783,7 @@ routes.set("POST /api/v2/server/report", async (_request, env, input) => {
   await touchNode(env, node);
   if (input.traffic && typeof input.traffic === "object") await enqueueTraffic(env, node, input.traffic);
   if (input.alive && typeof input.alive === "object") await processAlive(env, Number(node.id), input.alive);
-  if (input.online && typeof input.online === "object") await optionalKvPut(env, `node:connections:${node.id}`, JSON.stringify(input.online), { expirationTtl: Math.max(300, Number(await setting(env, "server_push_interval", "60")) * 3) });
+  if (input.online && typeof input.online === "object") await optionalKvPut(env, `node:connections:${node.id}`, JSON.stringify(input.online), { expirationTtl: Math.max(300, Number(await setting(env, "server_push_interval", "300")) * 3) });
   if (input.status && typeof input.status === "object") await processStatus(env, node, input.status);
   if (input.metrics && typeof input.metrics === "object") await processMetrics(env, node, input.metrics);
   return json({ data: true });

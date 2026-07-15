@@ -7,6 +7,14 @@ test("xboard-edge has an entrypoint", () => {
   assert.match(fs.readFileSync("src/index.ts", "utf8"), /export default/);
 });
 
+test("new installations default node polling to five minutes", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const seed = fs.readFileSync("../../schema/seed.sql", "utf8");
+  assert.match(source, /server_pull_interval: 300, server_push_interval: 300/);
+  assert.match(seed, /\('server_pull_interval', '300'/);
+  assert.match(seed, /\('server_push_interval', '300'/);
+});
+
 test("machine form validates while typing", () => {
   const adminBundle = fs.readFileSync("public/assets/index-CF20260713.js", "utf8");
   const machineFormStart = adminBundle.indexOf("const t3t=");
