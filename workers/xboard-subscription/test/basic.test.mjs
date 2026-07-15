@@ -643,3 +643,13 @@ test("audited subscription protocol regressions match upstream", () => {
 
   assert.equal(__test.responseHeaders("clash", { app_name: "XBoard" }, user)["profile-web-page-url"], "");
 });
+
+test("Sing-box TCP HTTP transport omits an empty host like upstream", () => {
+  const outbound = __test.singboxOutbound({ uuid: "user" }, {
+    type: "vmess", host: "node.example", port: 443,
+    protocol_settings: { network: "tcp", network_settings: { header: { type: "http", request: { path: ["/"] } } } }
+  });
+  assert.equal(outbound.transport.type, "http");
+  assert.equal("host" in outbound.transport, true);
+  assert.equal(outbound.transport.host, undefined);
+});

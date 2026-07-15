@@ -184,6 +184,15 @@ test("machine V2 authentication rejects node zero before node lookup", () => {
   assert.match(source, /validationFailure\("node_id", "The node id must be at least 1\."\)/);
 });
 
+test("V2 handshake checks the websocket runtime and Tidalab forces its node type", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /async function websocketRuntimeAvailable/);
+  assert.match(source, /env\.NODE_HUB\.idFromName\("health"\)/);
+  assert.match(source, /!enabled \|\| !await websocketRuntimeAvailable\(env\)/);
+  assert.match(source, /authenticateV1\(env, input, type\)/);
+  assert.doesNotMatch(source, /family === "ShadowsocksTidalab" \? undefined : type/);
+});
+
 test("invalid node rates follow the upstream numeric cast instead of charging at rate one", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /Number\.isFinite\(parsedFallback\) \? parsedFallback : 0/);

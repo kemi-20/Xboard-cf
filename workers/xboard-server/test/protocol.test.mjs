@@ -112,7 +112,7 @@ test("ETag uses PHP json_encode escaping", async () => {
 
 test("empty certificate configuration is omitted like upstream", () => {
   const base = { type: "vmess", host: "node.example", server_port: 443, protocol_settings: { network: "tcp" } };
-  assert.equal(buildNodeConfig({ ...base, cert_config: { mode: null } }).cert_config, undefined);
+  assert.deepEqual(buildNodeConfig({ ...base, cert_config: { mode: null } }).cert_config, { mode: null });
   assert.equal(buildNodeConfig({ ...base, cert_config: { mode: "none" } }).cert_config, undefined);
   assert.deepEqual(buildNodeConfig({ ...base, cert_config: { mode: "file", cert: "/cert.pem" } }).cert_config, { cert_mode: "file", cert: "/cert.pem" });
 });

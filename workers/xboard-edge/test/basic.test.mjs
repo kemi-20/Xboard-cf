@@ -617,7 +617,10 @@ test("admin user relations, CSV units and smoke tests cover functional paths", (
 
 test("traffic history exposes the official server_rate field", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
-  assert.match(source, /server_rate: Number\(row\.server_rate \?\? row\.rate \?\? 1\) \|\| 1/);
+  assert.match(source, /server_rate: Number\(row\.server_rate \?\? 1\) \|\| 1/);
+  assert.match(source, /GROUP BY user_id, server_rate, record_type, record_at/);
+  assert.match(source, /GROUP BY user_id, server_rate, record_at ORDER BY record_at DESC/);
+  assert.match(source, /MIN\(id\) AS id/);
   assert.match(source, /ALTER TABLE v2_stat_user ADD COLUMN server_rate/);
   assert.match(source, /UPDATE v2_stat_user SET server_rate = COALESCE\(rate, 1\)/);
 });
@@ -793,7 +796,7 @@ test("audited notice, ranking and migration edge cases match upstream", () => {
   assert.match(source, /return json\(\{ data: result\.results \|\| \[\], total \}\)/);
   assert.match(source, /previousValue/);
   assert.match(source, /change: calculateChange\(value, previousValue\)/);
-  assert.match(source, /monthStart\(\)\)\.all\(\)/);
+  assert.match(source, /monthStart\(\)\)\.all(?:<Record<string, any>>)?\(\)/);
   assert.match(migration, /row\.online_count == null/);
   assert.match(migration, /row\.last_login_ip = \[24, 16, 8, 0\]/);
   assert.match(migration, /table === "v2_traffic_reset_logs"/);
@@ -860,10 +863,16 @@ test("admin ticket, coupon and audit handlers preserve upstream behavior", () =>
   assert.match(source, /parseJsonArray\(input\.reply_status\)/);
   assert.match(source, /const ticketFields:/);
   assert.match(source, /const couponFields = new Set/);
+  assert.match(source, /return json\(paginated\(\(result\.results \|\| \[\]\)\.map/);
   assert.match(source, /route === "\/server\/group\/save"/);
   assert.match(source, /if \(!name\) return fail\("组名不能为空"/);
   assert.match(source, /INSERT INTO v2_admin_audit_log\(admin_id, action, target, metadata, ip, method, uri, request_data/);
   assert.match(source, /replaceAll\("-", "_"\)/);
   assert.match(source, /const sensitive = \/\(\^\|_\)\(password\|token\|secret\|key\|api_key\)\$\/i/);
   assert.match(source, /const userMap = new Map\(userEntries\)/);
+});
+
+test("bootstrap defaults never overwrite customized mail templates", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /ON CONFLICT\(name\) DO UPDATE SET subject = excluded\.subject, content = excluded\.content[\s\S]*WHERE v2_mail_templates\.content IS NULL OR v2_mail_templates\.content = ''/);
 });

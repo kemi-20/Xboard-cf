@@ -879,9 +879,18 @@ for (const [family, type, actions] of [
   for (const action of actions) {
     const method = action === "user" || action === "config" ? "GET" : "POST";
     routes.set(`${method} /api/v1/server/${family}/${action}`, async (request, env, input) => {
-      const auth = await authenticateV1(env, input, family === "ShadowsocksTidalab" ? undefined : type);
+      const auth = await authenticateV1(env, input, type);
       return auth instanceof Response ? auth : handleTidalab(request, env, family, action, auth);
     });
+  }
+}
+
+async function websocketRuntimeAvailable(env: Env) {
+  try {
+    const stub = env.NODE_HUB.get(env.NODE_HUB.idFromName("health"));
+    return (await stub.fetch("https://node-hub.internal/health")).ok;
+  } catch {
+    return false;
   }
 }
 
@@ -889,7 +898,7 @@ routes.set("GET /api/v2/server/handshake", async (request, env, input) => {
   const auth = await authenticateV2(env, input, true);
   if (auth instanceof Response) return auth;
   const enabled = booleanSetting(await setting(env, "server_ws_enable", "1"), true);
-  if (!enabled) return json({ websocket: { enabled: false } });
+  if (!enabled || !await websocketRuntimeAvailable(env)) return json({ websocket: { enabled: false } });
   const custom = (await setting(env, "server_ws_url", "")).trim();
   const url = new URL(request.url);
   return json({ websocket: { enabled: true, ws_url: custom ? custom.replace(/\/$/, "") : `${url.protocol === "https:" ? "wss" : "ws"}://${url.host}/ws` } });

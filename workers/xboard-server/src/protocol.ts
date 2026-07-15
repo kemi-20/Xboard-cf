@@ -182,8 +182,8 @@ export function buildNodeConfig(node: Row, routeRows: Row[] = []): Row {
   if (customRoutes.length) response.custom_routes = customRoutes;
   const cert = objectAt(node.cert_config);
   if (Object.keys(cert).length) {
-    if (cert.mode && !cert.cert_mode) { cert.cert_mode = cert.mode; delete cert.mode; }
-    if (cert.cert_mode && cert.cert_mode !== "none") response.cert_config = cert;
+    if (cert.mode !== null && cert.mode !== undefined && cert.cert_mode === undefined) { cert.cert_mode = cert.mode; delete cert.mode; }
+    if (cert.cert_mode !== "none") response.cert_config = cert;
   }
   return response;
 }

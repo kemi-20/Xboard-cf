@@ -554,7 +554,7 @@ function singboxOutbound(user: any, server: any) {
   const ns = ps.network_settings || {};
   if (ps.network === "tcp" && ns.header?.type === "http") {
     const paths = Array.isArray(ns.header?.request?.path) && ns.header.request.path.length ? ns.header.request.path : ["/"];
-    outbound.transport = { type: "http", path: paths[Math.floor(Math.random() * paths.length)], host: ns.header?.request?.headers?.Host || [] };
+    outbound.transport = { type: "http", path: paths[Math.floor(Math.random() * paths.length)], host: ns.header?.request?.headers?.Host || undefined };
   }
   else if (ps.network === "ws") outbound.transport = { type: "ws", path: ns.path, headers: ns.headers?.Host ? { Host: ns.headers.Host } : undefined, max_early_data: 0 };
   else if (ps.network === "grpc") outbound.transport = { type: "grpc", service_name: ns.serviceName };

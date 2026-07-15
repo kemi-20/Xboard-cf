@@ -29,8 +29,9 @@ test("telegram and daily statistics preserve upstream success and record contrac
   const source = fs.readFileSync("src/index.ts", "utf8");
   const wrangler = fs.readFileSync("wrangler.toml", "utf8");
   assert.match(source, /result\?\.ok !== true/);
-  assert.match(source, /SELECT id FROM v2_stat WHERE record_at = \? AND record_type = 'd'/);
-  assert.match(source, /INSERT INTO v2_stat\(record_at, record_type,[\s\S]*VALUES \(\?, 'd'/);
+  assert.doesNotMatch(source, /SELECT id FROM v2_stat WHERE record_at = \? AND record_type = 'd'/);
+  assert.match(source, /INSERT INTO v2_stat\(record_at, record_type,[\s\S]*ON CONFLICT\(record_at, record_type\) DO UPDATE/);
+  assert.match(source, /CASE WHEN \? IS NULL THEN v2_stat\.user_count ELSE excluded\.user_count END/);
   assert.match(wrangler, /queue = "telegram-events"[\s\S]*dead_letter_queue = "telegram-events-dlq"/);
 });
 
@@ -38,6 +39,8 @@ test("traffic statistics persist the official server_rate field", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /server_rate, record_type/);
   assert.match(source, /server_rate = excluded\.server_rate/);
+  assert.match(source, /v2_stat_server\(server_id, server_type, u, d, record_type,[\s\S]*VALUES \(\?, \?, \?, \?, 'd'/);
+  assert.match(source, /UPDATE v2_stat_server SET record_type = 'd'/);
   assert.match(source, /SET u = u \+ \?, d = d \+ \?, t = \?, updated_at = \?/);
 });
 
@@ -172,4 +175,7 @@ test("database mail templates use safe variables and preserve text line breaks",
   assert.match(source, /escapeHtml\(value\)/);
   assert.match(source, /contentMode === "text"/);
   assert.match(source, /mailLogin:/);
+  assert.match(source, /const target = payload\.to \?\? payload\.email/);
+  assert.match(source, /INSERT INTO v2_mail_log\(email, subject, template_name, error/);
+  assert.match(source, /if \(parseMode\) telegramBody\.parse_mode = parseMode/);
 });

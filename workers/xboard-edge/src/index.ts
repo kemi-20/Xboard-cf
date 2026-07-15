@@ -491,6 +491,7 @@ async function ensureBootstrap(env: Env) {
   for (const sql of alters) await runSqlIgnore(env, sql);
   await runSqlIgnore(env, "UPDATE v2_coupon SET type = CAST(type AS INTEGER) WHERE CAST(type AS TEXT) LIKE '%.0'");
   await runSqlIgnore(env, "UPDATE v2_order SET status = 2 WHERE status IS NULL OR CAST(status AS TEXT) NOT IN ('0','1','2','3','4')");
+  await runSqlIgnore(env, "UPDATE v2_stat_server SET record_type = 'd' WHERE record_type IS NULL OR record_type = ''");
   await runSqlIgnore(env, "UPDATE v2_stat_user SET server_rate = COALESCE(rate, 1)");
   await runSqlIgnore(env, "CREATE INDEX IF NOT EXISTS idx_machine_load_recorded ON v2_server_machine_load_history(machine_id, recorded_at)");
   for (const sql of [
@@ -621,7 +622,7 @@ async function ensureBootstrap(env: Env) {
       ["remind_expire", "Service expiry reminder", "Your service is about to expire."],
       ["remind_traffic", "Traffic usage reminder", "Your traffic usage is high."]
     ]) {
-      await runSqlIgnore(env, "INSERT INTO v2_mail_templates(name, subject, content, enabled, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?) ON CONFLICT(name) DO UPDATE SET subject = excluded.subject, content = excluded.content, enabled = excluded.enabled, updated_at = excluded.updated_at", [name, subject, content, ts, ts]);
+      await runSqlIgnore(env, "INSERT INTO v2_mail_templates(name, subject, content, enabled, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?) ON CONFLICT(name) DO UPDATE SET subject = excluded.subject, content = excluded.content, enabled = excluded.enabled, updated_at = excluded.updated_at WHERE v2_mail_templates.content IS NULL OR v2_mail_templates.content = ''", [name, subject, content, ts, ts]);
     }
     for (const [name, content] of Object.entries(defaultSubscribeTemplates)) {
       await runSqlIgnore(env, "INSERT INTO v2_subscribe_templates(name, type, content, template, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?) ON CONFLICT(name) DO UPDATE SET content = CASE WHEN v2_subscribe_templates.content IS NULL OR v2_subscribe_templates.content = '' THEN excluded.content ELSE v2_subscribe_templates.content END, template = CASE WHEN v2_subscribe_templates.template IS NULL OR v2_subscribe_templates.template = '' THEN excluded.template ELSE v2_subscribe_templates.template END, enabled = 1, updated_at = excluded.updated_at", [name, name, content, content, ts, ts]);
@@ -2378,17 +2379,14 @@ async function adminCoupon(request: Request, env: Env, route: string): Promise<R
     const result = await env.XBOARD_DB.prepare(`SELECT * FROM v2_coupon${where} ORDER BY ${order} LIMIT ? OFFSET ?`).bind(...binds, pageSize, (current - 1) * pageSize).all<Record<string, any>>();
     const totalRow = await env.XBOARD_DB.prepare(`SELECT COUNT(*) AS count FROM v2_coupon${where}`).bind(...binds).first<{ count: number }>();
     const total = Number(totalRow?.count || 0);
-    return json({
-      data: (result.results || []).map(row => ({
+    return json(paginated((result.results || []).map(row => ({
         ...row,
         type: Math.trunc(Number.parseFloat(String(row.type ?? 0))),
         value: Number(row.value ?? 0),
         show: !!row.show,
         limit_plan_ids: parseJsonArray(row.limit_plan_ids),
         limit_period: parseJsonArray(row.limit_period)
-      })),
-      total
-    });
+      })), total, current, pageSize));
   }
   const id = nullableNumber(input.id);
   if (route === "/coupon/generate") {
@@ -3052,17 +3050,16 @@ async function adminApi(request: Request, env: Env, path: string) {
     if (!userId) return fail("user_id 字段是必须的", 422, 422);
     const page = Math.max(1, Number(input.page || 1));
     const pageSize = Math.min(100, Math.max(1, Number(input.pageSize || input.page_size || 10)));
-    const result = await env.XBOARD_DB.prepare("SELECT * FROM v2_stat_user WHERE user_id = ? ORDER BY record_at DESC LIMIT ? OFFSET ?").bind(userId, pageSize, (page - 1) * pageSize).all();
-    const total = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_stat_user WHERE user_id = ${userId}`);
-    return json({
-      data: (result.results || []).map((row: any) => ({
-        ...row,
-        u: Number(row.u || 0),
-        d: Number(row.d || 0),
-        server_rate: Number(row.server_rate ?? row.rate ?? 1) || 1
-      })),
-      total
-    });
+    const result = await env.XBOARD_DB.prepare(`SELECT MIN(id) AS id, user_id, server_rate, SUM(u) AS u, SUM(d) AS d,
+      record_type, record_at, MIN(created_at) AS created_at, MAX(updated_at) AS updated_at
+      FROM v2_stat_user WHERE user_id = ?
+      GROUP BY user_id, server_rate, record_type, record_at
+      ORDER BY record_at DESC LIMIT ? OFFSET ?`).bind(userId, pageSize, (page - 1) * pageSize).all<Record<string, any>>();
+    const totalRow = await env.XBOARD_DB.prepare(`SELECT COUNT(*) AS count FROM (
+      SELECT 1 FROM v2_stat_user WHERE user_id = ? GROUP BY user_id, server_rate, record_type, record_at
+    )`).bind(userId).first<{ count: number }>();
+    const data = (result.results || []).map(row => ({ ...row, u: Number(row.u || 0), d: Number(row.d || 0), server_rate: Number(row.server_rate ?? 1) || 1 }));
+    return json(paginated(data, Number(totalRow?.count || 0), page, pageSize));
   }
   if (request.method === "GET" && route === "/stat/getRanking") {
     const url = new URL(request.url);
@@ -3632,8 +3629,13 @@ async function userApi(request: Request, env: Env, path: string) {
     return ok((result.results || []).map(row => row.category));
   }
   if (request.method === "GET" && route === "/stat/getTrafficLog") {
-    const result = await env.XBOARD_DB.prepare("SELECT * FROM v2_stat_user WHERE user_id = ? AND record_at >= ? ORDER BY record_at DESC").bind((user as any).id, monthStart()).all();
-    return ok(result.results || []);
+    const result = await env.XBOARD_DB.prepare(`SELECT user_id, server_rate, SUM(u) AS u, SUM(d) AS d, record_at
+      FROM v2_stat_user WHERE user_id = ? AND record_at >= ?
+      GROUP BY user_id, server_rate, record_at ORDER BY record_at DESC`).bind((user as any).id, monthStart()).all<Record<string, any>>();
+    return ok((result.results || []).map(row => ({
+      d: Number(row.d || 0), u: Number(row.u || 0), record_at: Number(row.record_at),
+      server_rate: Number(row.server_rate ?? 1) || 1, user_id: Number(row.user_id)
+    })));
   }
   if (request.method === "GET" && route === "/info") {
     const value = safeUser(user as Record<string, any>) as Record<string, any>;

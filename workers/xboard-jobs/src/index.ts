@@ -40,15 +40,21 @@ function safeMailVars(vars: Record<string, unknown>, contentMode: unknown) {
 async function ensureStatAggregateSchema(env: Env) {
   if (statAggregateSchemaReady) return;
   try {
-    if (await env.XBOARD_KV.get("schema:v2_stat_record_type:v1")) {
+    if (await env.XBOARD_KV.get("schema:v2_stat_record_type:v2")) {
       statAggregateSchemaReady = true;
       return;
     }
   } catch {}
-  await env.XBOARD_DB.prepare("UPDATE v2_stat SET record_type = 'd' WHERE record_type IS NULL OR record_type = ''").run();
-  await env.XBOARD_DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_stat_record_type ON v2_stat(record_at, record_type)").run();
-  statAggregateSchemaReady = true;
-  try { await env.XBOARD_KV.put("schema:v2_stat_record_type:v1", "1"); } catch {}
+  try {
+    await env.XBOARD_DB.prepare("UPDATE v2_stat SET record_type = 'd' WHERE record_type IS NULL OR record_type = ''").run();
+    await env.XBOARD_DB.prepare("UPDATE v2_stat_server SET record_type = 'd' WHERE record_type IS NULL OR record_type = ''").run();
+    await env.XBOARD_DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_stat_record_type ON v2_stat(record_at, record_type)").run();
+    try { await env.XBOARD_KV.put("schema:v2_stat_record_type:v2", "1"); } catch {}
+  } catch (error) {
+    console.error("Failed to verify aggregate statistics schema", { error });
+  } finally {
+    statAggregateSchemaReady = true;
+  }
 }
 
 async function resolveMailContent(env: Env, payload: any) {
@@ -219,7 +225,7 @@ async function trafficBatch(env: Env, events: any[]) {
   }
   for (const value of aggregate.servers.values()) {
     statements.push(env.XBOARD_DB.prepare("UPDATE v2_server SET u = u + ?, d = d + ?, updated_at = ? WHERE id = ?").bind(value.u, value.d, ts, value.serverId));
-    statements.push(env.XBOARD_DB.prepare("INSERT INTO v2_stat_server(server_id, server_type, u, d, record_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(server_id, server_type, record_at) DO UPDATE SET u = u + excluded.u, d = d + excluded.d, updated_at = excluded.updated_at")
+    statements.push(env.XBOARD_DB.prepare("INSERT INTO v2_stat_server(server_id, server_type, u, d, record_type, record_at, created_at, updated_at) VALUES (?, ?, ?, ?, 'd', ?, ?, ?) ON CONFLICT(server_id, server_type, record_at) DO UPDATE SET u = u + excluded.u, d = d + excluded.d, record_type = 'd', updated_at = excluded.updated_at")
       .bind(value.serverId, value.serverType, value.u, value.d, recordAt, ts, ts));
   }
   if (aggregate.transferUsed) {
@@ -249,8 +255,9 @@ async function traffic(env: Env, event: any) {
 async function mail(env: Env, event: any) {
   const claim = await claimEvent(env, event.event_id, "mail", event);
   if (!claim) return;
+  let payload = event.payload || {};
   try {
-  const payload = await resolveMailContent(env, event.payload || {});
+  payload = await resolveMailContent(env, payload);
   const provider = String(await setting(env, "email_driver")).toLowerCase() === "brevo" ? "brevo" : "maileroo";
   const apiKey = (provider === "brevo" ? env.BREVO_API_KEY : env.MAILEROO_API_KEY) || await setting(env, "email_password");
   const fromAddress = await setting(env, "email_from_address");
@@ -258,8 +265,9 @@ async function mail(env: Env, event: any) {
   const providerName = provider === "brevo" ? "Brevo" : "Maileroo";
   if (!apiKey) throw new Error(`${providerName} API Key 未配置`);
   if (!fromAddress) throw new Error(`${providerName} 发件人地址未配置`);
-  if (!payload.to || !payload.subject || (!payload.html && !payload.text)) throw new Error("邮件任务参数不完整");
-  const recipients: string[] = Array.isArray(payload.to) ? payload.to.map(String) : [String(payload.to)];
+  const target = payload.to ?? payload.email;
+  if (!target || !payload.subject || (!payload.html && !payload.text)) throw new Error("邮件任务参数不完整");
+  const recipients: string[] = Array.isArray(target) ? target.map(String) : [String(target)];
   const endpoint = provider === "brevo" ? "https://api.brevo.com/v3/smtp/email" : "https://smtp.maileroo.com/api/v2/emails";
   const response = await fetch(endpoint, provider === "brevo" ? {
     method: "POST",
@@ -295,6 +303,15 @@ async function mail(env: Env, event: any) {
       .bind(email, String(payload.subject), String(payload.template_name || "notify"), ts, ts)
   ));
   } catch (error) {
+    const target = payload.to ?? payload.email;
+    const recipients = (Array.isArray(target) ? target : target ? [target] : []).map(String);
+    const ts = now();
+    if (recipients.length) {
+      try {
+        await env.XBOARD_DB.batch(recipients.map(email => env.XBOARD_DB.prepare("INSERT INTO v2_mail_log(email, subject, template_name, error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
+          .bind(email, String(payload.subject || ""), String(payload.template_name || "notify"), String((error as any)?.message || error), ts, ts)));
+      } catch (logError) { console.error("Failed to write mail failure log", { error: logError }); }
+    }
     await failClaim(env, event.event_id, claim, error);
     throw error;
   }
@@ -308,12 +325,14 @@ async function telegram(env: Env, event: any) {
   const botToken = env.TELEGRAM_BOT_TOKEN || await setting(env, "telegram_bot_token");
   const chatId = payload.chat_id || payload.chatId || await setting(env, "telegram_discuss_id");
   if (!botToken || !chatId || !payload.text) throw new Error("Telegram 任务参数不完整");
-  const parseMode = String(payload.parse_mode || "markdown").toLowerCase();
+  const parseMode = String(payload.parse_mode || "").toLowerCase();
   const text = parseMode === "markdown" ? String(payload.text).replaceAll("_", "\\_") : String(payload.text);
+  const telegramBody: Record<string, unknown> = { chat_id: chatId, text, disable_web_page_preview: payload.disable_web_page_preview };
+  if (parseMode) telegramBody.parse_mode = parseMode;
   const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text, parse_mode: parseMode, disable_web_page_preview: payload.disable_web_page_preview })
+    body: JSON.stringify(telegramBody)
   });
   const responseText = await response.text();
   let result: any = null;
@@ -329,11 +348,18 @@ async function telegram(env: Env, event: any) {
 async function stat(env: Env, event: any) {
   const payload = event.payload || {};
   const recordAt = Number(payload.record_at || dayStart());
-  const existing = await env.XBOARD_DB.prepare("SELECT id FROM v2_stat WHERE record_at = ? AND record_type = 'd' ORDER BY id ASC LIMIT 1").bind(recordAt).first<any>();
   const ts = now();
-  const statements = existing
-    ? [env.XBOARD_DB.prepare("UPDATE v2_stat SET user_count = COALESCE(?, user_count), order_count = COALESCE(?, order_count), transfer_used = COALESCE(?, transfer_used), updated_at = ? WHERE id = ?").bind(payload.user_count ?? null, payload.order_count ?? null, payload.transfer_used ?? null, ts, existing.id)]
-    : [env.XBOARD_DB.prepare("INSERT INTO v2_stat(record_at, record_type, user_count, order_count, transfer_used, created_at, updated_at) VALUES (?, 'd', ?, ?, ?, ?, ?)").bind(recordAt, Number(payload.user_count || 0), Number(payload.order_count || 0), Number(payload.transfer_used || 0), ts, ts)];
+  const userCount = payload.user_count ?? null;
+  const orderCount = payload.order_count ?? null;
+  const transferUsed = payload.transfer_used ?? null;
+  const statements = [env.XBOARD_DB.prepare(`INSERT INTO v2_stat(record_at, record_type, user_count, order_count, transfer_used, created_at, updated_at)
+    VALUES (?, 'd', COALESCE(?, 0), COALESCE(?, 0), COALESCE(?, 0), ?, ?)
+    ON CONFLICT(record_at, record_type) DO UPDATE SET
+      user_count = CASE WHEN ? IS NULL THEN v2_stat.user_count ELSE excluded.user_count END,
+      order_count = CASE WHEN ? IS NULL THEN v2_stat.order_count ELSE excluded.order_count END,
+      transfer_used = CASE WHEN ? IS NULL THEN v2_stat.transfer_used ELSE excluded.transfer_used END,
+      updated_at = excluded.updated_at`)
+    .bind(recordAt, userCount, orderCount, transferUsed, ts, ts, userCount, orderCount, transferUsed)];
   await runOnce(env, event.event_id, "stat", event, statements);
 }
 
