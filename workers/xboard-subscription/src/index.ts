@@ -364,8 +364,10 @@ function clashProxy(user: any, server: any, client: Client = "clashmeta") {
     applyClashExtras(base, ps, client);
   }
   else if (server.type === "vless") {
-    Object.assign(base, { uuid: user.uuid, alterId: 0, cipher: "auto", flow: client === "stash" && Number(ps.tls) !== 2 ? undefined : ps.flow, encryption: ps.encryption?.enabled ? ps.encryption?.encryption || "none" : "none", tls: Boolean(ps.tls), "skip-cert-verify": Number(ps.tls) === 2 ? Boolean(ps.reality_settings?.allow_insecure) : Boolean(ps.tls_settings?.allow_insecure), servername: ps.reality_settings?.server_name || ps.tls_settings?.server_name });
-    if (Number(ps.tls) === 2) base["reality-opts"] = { "public-key": ps.reality_settings?.public_key, "short-id": ps.reality_settings?.short_id };
+    const tlsMode = Number(ps.tls || 0);
+    const tlsSettings = tlsMode === 2 ? ps.reality_settings : tlsMode === 1 ? ps.tls_settings : undefined;
+    Object.assign(base, { uuid: user.uuid, alterId: 0, cipher: "auto", flow: client === "stash" && tlsMode !== 2 ? undefined : ps.flow, encryption: ps.encryption?.enabled ? ps.encryption?.encryption || "none" : "none", tls: tlsMode > 0, "skip-cert-verify": Boolean(tlsSettings?.allow_insecure), servername: tlsSettings?.server_name });
+    if (tlsMode === 2) base["reality-opts"] = { "public-key": ps.reality_settings?.public_key, "short-id": ps.reality_settings?.short_id };
     if (client !== "clash" && tlsFingerprint(ps)) base["client-fingerprint"] = tlsFingerprint(ps);
     const ns = ps.network_settings || {};
     if (ps.network === "tcp" && ns.header?.type === "http") Object.assign(base, { network: "http", "http-opts": { headers: ns.header?.request?.headers, path: ns.header?.request?.path || ["/"] } });
@@ -384,8 +386,10 @@ function clashProxy(user: any, server: any, client: Client = "clashmeta") {
     if (echOptions) base["ech-opts"] = echOptions;
   }
   else if (server.type === "trojan") {
-    Object.assign(base, { password: server.password || user.uuid, sni: ps.reality_settings?.server_name || ps.tls_settings?.server_name, network: ps.network || "tcp", "skip-cert-verify": Number(ps.tls) === 2 ? Boolean(ps.reality_settings?.allow_insecure) : Boolean(ps.tls_settings?.allow_insecure) });
-    if (Number(ps.tls) === 2) base["reality-opts"] = { "public-key": ps.reality_settings?.public_key, "short-id": ps.reality_settings?.short_id };
+    const tlsMode = client === "clash" ? 1 : Number(ps.tls ?? 1);
+    const tlsSettings = tlsMode === 2 ? ps.reality_settings : ps.tls_settings;
+    Object.assign(base, { password: server.password || user.uuid, sni: tlsSettings?.server_name, network: ps.network || "tcp", "skip-cert-verify": Boolean(tlsSettings?.allow_insecure) });
+    if (tlsMode === 2) base["reality-opts"] = { "public-key": ps.reality_settings?.public_key, "short-id": ps.reality_settings?.short_id };
     applyClashTransport(base, ps, server);
     applyClashExtras(base, ps, client);
   }
@@ -532,10 +536,13 @@ function singboxOutbound(user: any, server: any) {
   const tlsEnabled = ["trojan", "hysteria", "tuic", "anytls"].includes(server.type)
     || (["vmess", "vless", "http"].includes(server.type) && Boolean(ps.tls));
   if (tlsEnabled) {
-    outbound.tls = { enabled: true, server_name: ps.reality_settings?.server_name || ps.tls_settings?.server_name || ps.tls?.server_name, insecure: Number(ps.tls) === 2 ? Boolean(ps.reality_settings?.allow_insecure) : Boolean(ps.tls_settings?.allow_insecure || ps.tls?.allow_insecure), alpn: ps.alpn || (["tuic", "anytls"].includes(server.type) ? ["h3"] : undefined) };
-    if (Number(ps.tls) === 2) outbound.tls.reality = { enabled: true, public_key: ps.reality_settings?.public_key, short_id: ps.reality_settings?.short_id };
+    const xrayProtocol = ["vmess", "vless", "trojan", "http"].includes(server.type);
+    const tlsMode = xrayProtocol ? Number(ps.tls ?? (server.type === "trojan" ? 1 : 0)) : 1;
+    const tlsSettings = xrayProtocol ? (tlsMode === 2 ? ps.reality_settings : ps.tls_settings) : ps.tls;
+    outbound.tls = { enabled: true, server_name: tlsSettings?.server_name, insecure: Boolean(tlsSettings?.allow_insecure), alpn: ps.alpn || (["tuic", "anytls"].includes(server.type) ? ["h3"] : undefined) };
+    if (xrayProtocol && tlsMode === 2) outbound.tls.reality = { enabled: true, public_key: ps.reality_settings?.public_key, short_id: ps.reality_settings?.short_id };
     if (tlsFingerprint(ps)) outbound.tls.utls = { enabled: true, fingerprint: tlsFingerprint(ps) };
-    const ech = ps.tls_settings?.ech || ps.tls?.ech;
+    const ech = xrayProtocol ? (tlsMode === 1 ? ps.tls_settings?.ech : undefined) : ps.tls?.ech;
     if (ech?.enabled) outbound.tls.ech = { enabled: true, config: ech.config ? [ech.config] : undefined, query_server_name: ech.query_server_name };
   }
   if (ps.multiplex?.enabled) outbound.multiplex = { enabled: true, protocol: ps.multiplex.protocol || "yamux", max_connections: ps.multiplex.max_connections, min_streams: ps.multiplex.min_streams, max_streams: ps.multiplex.max_streams, padding: Boolean(ps.multiplex.padding), brutal: ps.multiplex.brutal?.enabled ? { enabled: true, up_mbps: ps.multiplex.brutal.up_mbps, down_mbps: ps.multiplex.brutal.down_mbps } : undefined };
@@ -693,7 +700,7 @@ function proxyLine(user: any, server: any, style: "surge" | "surfboard") {
     if (ps.tls) parts.push("tls=true", ps.tls_settings?.allow_insecure ? "skip-cert-verify=true" : "", ps.tls_settings?.server_name ? `sni=${ps.tls_settings.server_name}` : "");
     if (ps.network === "ws") parts.push("ws=true", ps.network_settings?.path ? `ws-path=${ps.network_settings.path}` : "", ps.network_settings?.headers?.Host ? `ws-headers=Host:${ps.network_settings.headers.Host}` : "");
   } else if (server.type === "trojan") {
-    parts.push(`password=${password}`, (ps.reality_settings?.server_name || ps.tls_settings?.server_name) ? `sni=${ps.reality_settings?.server_name || ps.tls_settings?.server_name}` : "", (Number(ps.tls) === 2 ? ps.reality_settings?.allow_insecure : ps.tls_settings?.allow_insecure) ? "skip-cert-verify=true" : "", "tfo=true", "udp-relay=true");
+    parts.push(`password=${password}`, ps.tls_settings?.server_name ? `sni=${ps.tls_settings.server_name}` : "", ps.tls_settings?.allow_insecure ? "skip-cert-verify=true" : "", "tfo=true", "udp-relay=true");
   } else if (server.type === "hysteria") {
     if (Number(ps.version || 1) !== 2) return "";
     parts.push(`password=${password}`, ps.tls?.server_name ? `sni=${ps.tls.server_name}` : "", "udp-relay=true", ps.bandwidth?.up ? `upload-bandwidth=${ps.bandwidth.up}` : "", ps.bandwidth?.down ? `download-bandwidth=${ps.bandwidth.down}` : "", ps.tls?.allow_insecure ? "skip-cert-verify=true" : "");

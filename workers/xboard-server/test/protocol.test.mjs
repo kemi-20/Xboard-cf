@@ -35,6 +35,34 @@ test("builds the official VLESS node configuration shape", () => {
   });
 });
 
+test("node config uses only the TLS settings selected by the active mode", () => {
+  const node = {
+    id: 12,
+    type: "vless",
+    host: "edge.example",
+    server_port: 61674,
+    protocol_settings: {
+      tls: 1,
+      tls_settings: { server_name: "us2.example.com", allow_insecure: false },
+      reality_settings: { server_name: "apple.com", public_key: "stale", short_id: "stale" },
+      network: "ws",
+      network_settings: { path: "/cadillac", headers: { Host: "us2.example.com" } }
+    }
+  };
+  const standard = buildNodeConfig(node);
+  assert.equal(standard.tls, 1);
+  assert.equal(standard.tls_settings.server_name, "us2.example.com");
+  assert.equal(standard.networkSettings.headers.Host, "us2.example.com");
+  assert.notEqual(standard.tls_settings.server_name, "apple.com");
+
+  const reality = buildNodeConfig({ ...node, protocol_settings: {
+    tls: 2,
+    tls_settings: { server_name: "unused.example" },
+    reality_settings: { server_name: "apple.com", public_key: "active", short_id: "active" }
+  } });
+  assert.equal(reality.tls_settings.server_name, "apple.com");
+});
+
 test("builds every protocol accepted by the official node client", () => {
   const settings = {
     shadowsocks: { cipher: "aes-128-gcm", plugin: null, plugin_opts: null },

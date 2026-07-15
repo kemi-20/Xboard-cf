@@ -60,6 +60,42 @@ test("Clash and Sing-box protocol details match upstream edge cases", () => {
   assert.equal(limitedHysteria.down, 100);
 });
 
+test("inactive Reality settings never override the active standard TLS SNI", () => {
+  const user = { uuid: "00000000-0000-4000-8000-000000000000" };
+  const server = {
+    id: 12,
+    type: "vless",
+    name: "US 2-2",
+    host: "edge.example",
+    port: 443,
+    protocol_settings: {
+      tls: 1,
+      tls_settings: { server_name: "us2.example.com", allow_insecure: false },
+      reality_settings: { server_name: "apple.com", allow_insecure: true, public_key: "stale", short_id: "stale" },
+      network: "ws",
+      network_settings: { path: "/cadillac", headers: { Host: "us2.example.com" } }
+    }
+  };
+  const clash = __test.clashProxy(user, server, "clashmeta");
+  assert.equal(clash.servername, "us2.example.com");
+  assert.equal(clash["skip-cert-verify"], false);
+  assert.equal(clash["reality-opts"], undefined);
+  const singbox = __test.singboxOutbound(user, server);
+  assert.equal(singbox.tls.server_name, "us2.example.com");
+  assert.equal(singbox.tls.insecure, false);
+  assert.equal(singbox.tls.reality, undefined);
+
+  const trojan = { ...server, type: "trojan" };
+  assert.equal(__test.clashProxy(user, trojan, "clashmeta").sni, "us2.example.com");
+  assert.match(__test.proxyLine(user, trojan, "surge"), /sni=us2\.91786913\.xyz/);
+  assert.doesNotMatch(__test.proxyLine(user, trojan, "surge"), /apple\.com/);
+
+  const realityTrojan = { ...trojan, protocol_settings: { ...trojan.protocol_settings, tls: 2 } };
+  assert.equal(__test.clashProxy(user, realityTrojan, "clash").sni, "us2.example.com");
+  assert.equal(__test.clashProxy(user, realityTrojan, "clash")["reality-opts"], undefined);
+  assert.equal(__test.clashProxy(user, realityTrojan, "clashmeta").sni, "apple.com");
+});
+
 test("sing-box slash user agents retain their actual core version", () => {
   assert.equal(__test.singboxCoreVersion("sing-box/1.8.0"), "1.8.0");
   assert.equal(__test.singboxCoreVersion("sing-box 1.12.4"), "1.12.4");
