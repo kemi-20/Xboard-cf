@@ -118,7 +118,7 @@ flowchart TB
   subgraph Workers["独立 Worker 层"]
     Subscription["xboard-subscription<br/>Token 与套餐校验<br/>协议识别 / 模板渲染 / Base64"]
     Server["xboard-server<br/>V1 / V2 / Tidalab / 机器接口<br/>流量上报 / WebSocket / 热同步"]
-    Jobs["xboard-jobs<br/>Queue consumer<br/>幂等认领 / 批量聚合 / 通知发送"]
+    Jobs["xboard-jobs<br/>Queue consumer<br/>原子幂等 / 批量聚合 / 通知发送"]
     Cron["xboard-cron<br/>每分钟单 Trigger<br/>过期 / 流量重置 / 提醒 / 清理 / 汇总"]
   end
 
@@ -205,10 +205,12 @@ flowchart TB
 - **D1**：用户、套餐、权限组、节点配置、订单、余额、最终流量、统计和系统设置的权威数据。
 - **KV**：Session、验证码、限流、版本号和可重建缓存；不是 Redis 数据的逐键永久替代品。
 - **NodeHub**：维护节点或机器的 WebSocket 连接及配置、用户热同步。
-- **StatusHub**：保存高频在线状态、设备状态、机器心跳和滚动 24 小时负载采样，避免每次心跳写 D1。
+- **StatusHub**：保存高频在线状态、设备状态、机器心跳和滚动 24 小时负载采样；运行状态最多每 60 秒持久化一次，设备成员最多每 240 秒持久化一次，负载历史每 300 秒采样一次。
 - **Queues**：把高频流量、邮件和 Telegram 任务与 HTTP 请求解耦；连续失败超过重试上限后进入对应 DLQ。
 
-流量事件先按稳定 `event_id` 原子认领，重复投递不会重复计费。同一 Queue batch 内会按用户和服务器聚合后再写 D1；只有确实可能超出流量的用户才写入 `v2_traffic_pending_check`，由 Cron 后续检查并删除已处理记录。这些机制用于降低 D1 的行读取和行写入量。
+流量事件使用稳定 `event_id` 去重，业务更新与最终 `done` 记录在同一个 D1 原子批次内提交，重复投递不会重复计费，也不再为每个事件先写一次 `processing` 再写一次 `done`。Cloudflare Queue 最多聚合 100 条消息，Jobs Worker 内部按 25 条子批次处理；节点上报按最多 250 个用户拆分事件，避免超过 D1 批次限制。同一子批次内会按用户和服务器聚合后再写 D1；只有已经达到流量阈值、真正需要复查的用户才写入 `v2_traffic_pending_check`，由 Cron 后续检查并删除已处理记录。
+
+后台 Queue 统计使用 Worker isolate 内存与 Cloudflare Cache API 缓存 60 秒，流量排行缓存 30 秒，不增加 KV 写入。Cron 只有一个每分钟 Trigger，并使用一个共享 D1 所有权锁；健康心跳 `schedule:last_check_at` 最多每 300 秒刷新一次。WebSocket 在线路由 KV 只在连接变化、断开或持续在线满 6 小时时刷新，不随每次 `pong` 写入。
 
 ## 邮件服务
 

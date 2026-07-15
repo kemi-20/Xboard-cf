@@ -5,7 +5,6 @@ import { settings as loadSettings } from "./db.ts";
 export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; MAILEROO_API_KEY?: string; BREVO_API_KEY?: string; TELEGRAM_BOT_TOKEN?: string; }
 
 const SHANGHAI_OFFSET = 8 * 3600;
-let statAggregateSchemaReady = false;
 
 function dayStart(ts = now()) {
   return Math.floor((ts + SHANGHAI_OFFSET) / 86400) * 86400 - SHANGHAI_OFFSET;
@@ -35,26 +34,6 @@ function safeMailVars(vars: Record<string, unknown>, contentMode: unknown) {
     safe.content = contentMode === "text" ? content.replace(/\r?\n/g, "<br>\n") : content;
   }
   return safe;
-}
-
-async function ensureStatAggregateSchema(env: Env) {
-  if (statAggregateSchemaReady) return;
-  try {
-    if (await env.XBOARD_KV.get("schema:v2_stat_record_type:v2")) {
-      statAggregateSchemaReady = true;
-      return;
-    }
-  } catch {}
-  try {
-    await env.XBOARD_DB.prepare("UPDATE v2_stat SET record_type = 'd' WHERE record_type IS NULL OR record_type = ''").run();
-    await env.XBOARD_DB.prepare("UPDATE v2_stat_server SET record_type = 'd' WHERE record_type IS NULL OR record_type = ''").run();
-    await env.XBOARD_DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_stat_record_type ON v2_stat(record_at, record_type)").run();
-    try { await env.XBOARD_KV.put("schema:v2_stat_record_type:v2", "1"); } catch {}
-  } catch (error) {
-    console.error("Failed to verify aggregate statistics schema", { error });
-  } finally {
-    statAggregateSchemaReady = true;
-  }
 }
 
 async function resolveMailContent(env: Env, payload: any) {
@@ -131,34 +110,23 @@ async function runOnce(env: Env, eventId: string, type: string, payload: unknown
   }
 }
 
-async function signalTrafficPending(env: Env, eventId: string, ts: number) {
-  const signalEventId = `traffic-signal:${eventId}`;
-  const claim = await claimEvent(env, signalEventId, "traffic_signal", { event_id: eventId, created_at: ts });
-  if (!claim) return;
-  try {
-    await env.XBOARD_KV.put("traffic:pending_check", String(ts), { expirationTtl: 3600 });
-    await completeClaim(env, signalEventId, claim, []);
-  } catch (error) {
-    await failClaim(env, signalEventId, claim, error);
-    throw error;
-  }
-}
-
-type ClaimedTrafficEvent = { event: any; claim: string };
-
-async function claimTrafficEvents(env: Env, events: any[]): Promise<ClaimedTrafficEvent[]> {
-  const ts = now();
-  const candidates = events.map(event => ({ event, claim: `processing:${crypto.randomUUID()}` }));
-  const results = await env.XBOARD_DB.batch(candidates.map(({ event, claim }) =>
-    env.XBOARD_DB.prepare(`INSERT INTO v2_job_logs(event_id, type, status, payload, error, created_at, updated_at)
-      VALUES (?, 'traffic', ?, ?, NULL, ?, ?)
-      ON CONFLICT(event_id) DO UPDATE SET type = excluded.type, status = excluded.status, payload = excluded.payload,
-        error = NULL, updated_at = excluded.updated_at
-      WHERE v2_job_logs.status = 'failed'
-        OR (v2_job_logs.status LIKE 'processing:%' AND v2_job_logs.updated_at < ?)`)
-      .bind(event.event_id, claim, JSON.stringify(event), ts, ts, ts - 120)
-  ));
-  return candidates.filter((_, index) => Number((results[index]?.meta as any)?.changes || 0) === 1);
+async function trafficCandidates(env: Env, events: any[]) {
+  const unique = [...new Map(events.filter(event => event?.event_id).map(event => [String(event.event_id), event])).values()];
+  if (!unique.length) return { candidates: [] as any[], staleEventIds: [] as string[] };
+  const ids = unique.map(event => String(event.event_id));
+  const existing = await env.XBOARD_DB.prepare(`SELECT event_id, status, updated_at FROM v2_job_logs WHERE event_id IN (${ids.map(() => "?").join(",")})`)
+    .bind(...ids).all<{ event_id: string; status: string; updated_at: number }>();
+  const rows = new Map((existing.results || []).map(row => [String(row.event_id), row]));
+  const staleEventIds: string[] = [];
+  const candidates = unique.filter(event => {
+    const row = rows.get(String(event.event_id));
+    if (!row) return true;
+    if (row.status === "done") return false;
+    if (String(row.status || "").startsWith("processing:") && Number(row.updated_at || 0) >= now() - 120) return false;
+    staleEventIds.push(String(event.event_id));
+    return true;
+  });
+  return { candidates, staleEventIds };
 }
 
 function aggregateTrafficEvents(events: any[]) {
@@ -204,20 +172,20 @@ function aggregateTrafficEvents(events: any[]) {
 
 async function trafficBatch(env: Env, events: any[]) {
   if (!events.length) return;
-  await ensureStatAggregateSchema(env);
-  const claimed = await claimTrafficEvents(env, events);
-  if (!claimed.length) return;
+  const { candidates, staleEventIds } = await trafficCandidates(env, events);
+  if (!candidates.length) return;
   const recordAt = dayStart();
-  const aggregate = aggregateTrafficEvents(claimed.map(item => item.event));
+  const aggregate = aggregateTrafficEvents(candidates);
   const ts = now();
   const statements: D1PreparedStatement[] = [];
-  const pendingResultIndexes: number[] = [];
+  for (const eventId of staleEventIds) {
+    statements.push(env.XBOARD_DB.prepare("DELETE FROM v2_job_logs WHERE event_id = ? AND status != 'done'").bind(eventId));
+  }
   for (const [userId, value] of aggregate.users) {
     statements.push(env.XBOARD_DB.prepare("UPDATE v2_user SET u = u + ?, d = d + ?, t = ?, updated_at = ? WHERE id = ?").bind(value.u, value.d, ts, ts, userId));
-    pendingResultIndexes.push(statements.length);
     statements.push(env.XBOARD_DB.prepare(`INSERT INTO v2_traffic_pending_check(user_id, updated_at)
       SELECT id, ? FROM v2_user WHERE id = ? AND banned = 0 AND transfer_enable > 0 AND u + d >= transfer_enable
-      ON CONFLICT(user_id) DO UPDATE SET updated_at = excluded.updated_at`).bind(ts, userId));
+      ON CONFLICT(user_id) DO NOTHING`).bind(ts, userId));
   }
   for (const value of aggregate.userStats.values()) {
     statements.push(env.XBOARD_DB.prepare("INSERT INTO v2_stat_user(user_id, server_id, server_type, u, d, rate, server_rate, record_type, record_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'd', ?, ?, ?) ON CONFLICT(user_id, server_id, server_type, record_at) DO UPDATE SET u = u + excluded.u, d = d + excluded.d, rate = excluded.rate, server_rate = excluded.server_rate, updated_at = excluded.updated_at")
@@ -232,18 +200,14 @@ async function trafficBatch(env: Env, events: any[]) {
     statements.push(env.XBOARD_DB.prepare("INSERT INTO v2_stat(record_at, record_type, user_count, order_count, transfer_used, created_at, updated_at) VALUES (?, 'd', 0, 0, ?, ?, ?) ON CONFLICT(record_at, record_type) DO UPDATE SET transfer_used = v2_stat.transfer_used + excluded.transfer_used, updated_at = excluded.updated_at")
       .bind(recordAt, aggregate.transferUsed, ts, ts));
   }
-  for (const item of claimed) {
-    statements.push(env.XBOARD_DB.prepare("UPDATE v2_job_logs SET status = 'done', error = NULL, updated_at = ? WHERE event_id = ? AND status = ?")
-      .bind(ts, item.event.event_id, item.claim));
+  for (const event of candidates) {
+    statements.push(env.XBOARD_DB.prepare(`INSERT INTO v2_job_logs(event_id, type, status, payload, error, created_at, updated_at)
+      VALUES (?, 'traffic', 'done', '', NULL, ?, ?)`)
+      .bind(String(event.event_id), ts, ts));
   }
   try {
-    const results = await env.XBOARD_DB.batch(statements);
-    if (pendingResultIndexes.some(index => Number((results[index]?.meta as any)?.changes || 0) > 0)) {
-      try { await env.XBOARD_KV.put("traffic:pending_check", String(ts), { expirationTtl: 3600 }); } catch {}
-    }
+    await env.XBOARD_DB.batch(statements);
   } catch (error) {
-    await env.XBOARD_DB.batch(claimed.map(item => env.XBOARD_DB.prepare("UPDATE v2_job_logs SET status = 'failed', error = ?, updated_at = ? WHERE event_id = ? AND status = ?")
-      .bind(String((error as any)?.message || error), now(), item.event.event_id, item.claim)));
     throw error;
   }
 }
@@ -373,7 +337,7 @@ async function handle(env: Env, event: any) {
   else throw new Error(`Unsupported queue event type: ${String(event.type || "unknown")}`);
 }
 
-export const __test = { dayStart, render, claimEvent, completeClaim, failClaim, aggregateTrafficEvents, traffic, trafficBatch };
+export const __test = { dayStart, render, claimEvent, completeClaim, failClaim, aggregateTrafficEvents, traffic, trafficBatch, trafficCandidates };
 
 export default {
   async fetch() { return ok({ service: "xboard-jobs", time: now() }); },
@@ -381,7 +345,9 @@ export default {
     const trafficMessages = batch.messages.filter(message => (message.body as any)?.type === "traffic");
     if (trafficMessages.length) {
       try {
-        await trafficBatch(env, trafficMessages.map(message => message.body as any));
+        for (let offset = 0; offset < trafficMessages.length; offset += 25) {
+          await trafficBatch(env, trafficMessages.slice(offset, offset + 25).map(message => message.body as any));
+        }
         for (const message of trafficMessages) message.ack();
       } catch (error) {
         for (const message of trafficMessages) message.retry();

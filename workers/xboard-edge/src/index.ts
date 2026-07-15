@@ -9,6 +9,71 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; ASSETS: Fetcher; XBOARD_SERVER: Fetcher; XBOARD_SUBSCRIPTION: Fetcher; MAIL_EVENTS: Queue; }
 
+const responseDataCache = new Map<string, { value: unknown; expiresAt: number }>();
+let storageOptimizationReady = false;
+
+async function cachedData<T>(key: string, ttlSeconds: number, loader: () => Promise<T>): Promise<T> {
+  const current = Date.now();
+  const memory = responseDataCache.get(key);
+  if (memory && memory.expiresAt > current) return memory.value as T;
+  const cache = (globalThis as any).caches?.default;
+  const request = new Request(`https://xboard-cache.internal/${encodeURIComponent(key)}`);
+  if (cache) {
+    try {
+      const hit = await cache.match(request);
+      if (hit) {
+        const value = await hit.json() as T;
+        responseDataCache.set(key, { value, expiresAt: current + ttlSeconds * 1000 });
+        return value;
+      }
+    } catch {}
+  }
+  const value = await loader();
+  responseDataCache.set(key, { value, expiresAt: current + ttlSeconds * 1000 });
+  if (cache) {
+    try {
+      await cache.put(request, new Response(JSON.stringify(value), {
+        headers: { "content-type": "application/json", "cache-control": `public, max-age=${ttlSeconds}` }
+      }));
+    } catch {}
+  }
+  return value;
+}
+
+async function ensureStorageOptimization(env: Env) {
+  if (storageOptimizationReady) return;
+  const markerKey = "bootstrap:storage:v1";
+  if (await optionalKvGet(env, markerKey)) {
+    storageOptimizationReady = true;
+    return;
+  }
+  try {
+    const persisted = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = 'system_storage_optimization_version'").first<{ value: string }>();
+    if (persisted?.value === "v1") {
+      storageOptimizationReady = true;
+      await optionalKvPut(env, markerKey, String(now()));
+      return;
+    }
+    for (const sql of [
+      "DROP INDEX IF EXISTS idx_v2_stat_user_u",
+      "DROP INDEX IF EXISTS idx_v2_stat_user_d",
+      "DROP INDEX IF EXISTS idx_v2_stat_user_record",
+      "DROP INDEX IF EXISTS idx_v2_stat_server_upload",
+      "DROP INDEX IF EXISTS idx_v2_stat_server_download",
+      "DROP INDEX IF EXISTS idx_v2_stat_server_record",
+      "CREATE INDEX IF NOT EXISTS idx_v2_stat_server_record_server ON v2_stat_server(record_at, server_id, server_type)"
+    ]) await runSqlIgnore(env, sql);
+    const timestamp = now();
+    await env.XBOARD_DB.prepare(`INSERT INTO v2_settings(name, value, created_at, updated_at)
+      VALUES ('system_storage_optimization_version', 'v1', ?, ?)
+      ON CONFLICT(name) DO UPDATE SET value = 'v1', updated_at = excluded.updated_at`).bind(timestamp, timestamp).run();
+    storageOptimizationReady = true;
+    await optionalKvPut(env, markerKey, String(timestamp));
+  } catch {
+    // A fresh database may not have v2_settings until the main bootstrap completes.
+  }
+}
+
 const adminTableRoutes: Array<[string, string]> = [
   ["/server/group/", "v2_server_group"],
   ["/server/route/", "v2_server_route"],
@@ -344,6 +409,7 @@ FINAL,Proxy
 };
 
 async function ensureBootstrap(env: Env) {
+  await ensureStorageOptimization(env);
   const marker = await optionalKvGet(env, "bootstrap:edge:v19");
   if (marker) return;
   try {
@@ -534,11 +600,7 @@ async function ensureBootstrap(env: Env) {
     "CREATE INDEX IF NOT EXISTS idx_v2_ticket_status ON v2_ticket(status)",
     "CREATE INDEX IF NOT EXISTS idx_v2_ticket_created_at ON v2_ticket(created_at)",
     "CREATE INDEX IF NOT EXISTS idx_v2_stat_server_server ON v2_stat_server(server_id, record_at)",
-    "CREATE INDEX IF NOT EXISTS idx_v2_stat_server_upload ON v2_stat_server(u)",
-    "CREATE INDEX IF NOT EXISTS idx_v2_stat_server_download ON v2_stat_server(d)",
     "CREATE INDEX IF NOT EXISTS idx_v2_user_availability ON v2_user(banned, expired_at, group_id, transfer_enable, u, d)",
-    "CREATE INDEX IF NOT EXISTS idx_v2_stat_user_u ON v2_stat_user(u)",
-    "CREATE INDEX IF NOT EXISTS idx_v2_stat_user_d ON v2_stat_user(d)",
     "CREATE INDEX IF NOT EXISTS idx_v2_commission_log_created_at ON v2_commission_log(created_at)",
     "CREATE INDEX IF NOT EXISTS idx_failed_jobs_failed_at ON failed_jobs(failed_at)",
     "CREATE INDEX IF NOT EXISTS idx_v2_job_logs_status_time ON v2_job_logs(status, updated_at, created_at)",
@@ -632,6 +694,7 @@ async function ensureBootstrap(env: Env) {
   await runSqlIgnore(env, "INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES ('system_bootstrap_edge_version', 'v19', ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at", [ts, ts]);
   invalidateSettingsCache();
   await optionalKvPut(env, "bootstrap:edge:v19", String(ts));
+  await ensureStorageOptimization(env);
 }
 
 async function firstNumber(env: Env, sql: string, fallback = 0) {
@@ -1218,6 +1281,9 @@ async function trafficRank(env: Env, url: URL) {
   const type = url.searchParams.get("type") || "user";
   const start = Number(url.searchParams.get("start_time") || 0);
   const end = Number(url.searchParams.get("end_time") || now());
+  const startBucket = Math.floor(start / 30);
+  const endBucket = Math.floor(end / 30);
+  return cachedData(`traffic-rank:${type}:${startBucket}:${endBucket}`, 30, async () => {
   const previousStart = start - Math.max(0, end - start);
   const calculateChange = (value: number, previousValue: number) => previousValue > 0
     ? Math.round(((value - previousValue) / previousValue) * 1000) / 10
@@ -1225,14 +1291,18 @@ async function trafficRank(env: Env, url: URL) {
   if (type === "node") {
     try {
       const rows = await env.XBOARD_DB.prepare(
-        `SELECT ss.server_id AS id, s.name AS name, COALESCE(SUM(ss.u + ss.d), 0) AS value,
-          COALESCE((SELECT SUM(previous.u + previous.d) FROM v2_stat_server previous
-            WHERE previous.server_id = ss.server_id AND previous.record_at >= ? AND previous.record_at < ?
-              AND COALESCE(previous.record_type, 'd') = 'd'), 0) AS previousValue
-         FROM v2_stat_server ss LEFT JOIN v2_server s ON s.id = ss.server_id
-         WHERE ss.record_at >= ? AND ss.record_at <= ? AND COALESCE(ss.record_type, 'd') = 'd'
-         GROUP BY ss.server_id ORDER BY value DESC LIMIT 10`
-      ).bind(previousStart, start, start, end).all<{ id: number; name: string; value: number; previousValue: number }>();
+        `WITH traffic AS (
+           SELECT server_id AS id,
+             SUM(CASE WHEN record_at >= ? AND record_at <= ? THEN u + d ELSE 0 END) AS value,
+             SUM(CASE WHEN record_at >= ? AND record_at < ? THEN u + d ELSE 0 END) AS previousValue
+           FROM v2_stat_server
+           WHERE record_at >= ? AND record_at <= ? AND COALESCE(record_type, 'd') = 'd'
+           GROUP BY server_id
+         )
+         SELECT traffic.id, s.name, COALESCE(traffic.value, 0) AS value, COALESCE(traffic.previousValue, 0) AS previousValue
+         FROM traffic LEFT JOIN v2_server s ON s.id = traffic.id
+         WHERE traffic.value > 0 ORDER BY traffic.value DESC LIMIT 10`
+      ).bind(start, end, previousStart, start, previousStart, end).all<{ id: number; name: string; value: number; previousValue: number }>();
       const ranked = (rows.results || []).map(row => {
         const value = Number(row.value || 0); const previousValue = Number(row.previousValue || 0);
         return { id: String(row.id), name: row.name || `Node ${row.id}`, value, previousValue, change: calculateChange(value, previousValue), timestamp: new Date(end * 1000).toISOString() };
@@ -1246,14 +1316,18 @@ async function trafficRank(env: Env, url: URL) {
   }
   try {
     const rows = await env.XBOARD_DB.prepare(
-      `SELECT su.user_id AS id, u.email AS name, COALESCE(SUM(su.u + su.d), 0) AS value,
-        COALESCE((SELECT SUM(previous.u + previous.d) FROM v2_stat_user previous
-          WHERE previous.user_id = su.user_id AND previous.record_at >= ? AND previous.record_at < ?
-            AND COALESCE(previous.record_type, 'd') = 'd'), 0) AS previousValue
-       FROM v2_stat_user su LEFT JOIN v2_user u ON u.id = su.user_id
-       WHERE su.record_at >= ? AND su.record_at <= ? AND COALESCE(su.record_type, 'd') = 'd'
-       GROUP BY su.user_id ORDER BY value DESC LIMIT 10`
-    ).bind(previousStart, start, start, end).all<{ id: number; name: string; value: number; previousValue: number }>();
+      `WITH traffic AS (
+         SELECT user_id AS id,
+           SUM(CASE WHEN record_at >= ? AND record_at <= ? THEN u + d ELSE 0 END) AS value,
+           SUM(CASE WHEN record_at >= ? AND record_at < ? THEN u + d ELSE 0 END) AS previousValue
+         FROM v2_stat_user
+         WHERE record_at >= ? AND record_at <= ? AND COALESCE(record_type, 'd') = 'd'
+         GROUP BY user_id
+       )
+       SELECT traffic.id, u.email AS name, COALESCE(traffic.value, 0) AS value, COALESCE(traffic.previousValue, 0) AS previousValue
+       FROM traffic LEFT JOIN v2_user u ON u.id = traffic.id
+       WHERE traffic.value > 0 ORDER BY traffic.value DESC LIMIT 10`
+    ).bind(start, end, previousStart, start, previousStart, end).all<{ id: number; name: string; value: number; previousValue: number }>();
     const ranked = (rows.results || []).map(row => {
       const value = Number(row.value || 0); const previousValue = Number(row.previousValue || 0);
       return { id: String(row.id), name: row.name || `User ${row.id}`, value, previousValue, change: calculateChange(value, previousValue), timestamp: new Date(end * 1000).toISOString() };
@@ -1264,6 +1338,7 @@ async function trafficRank(env: Env, url: URL) {
   } catch {
     return [];
   }
+  });
 }
 
 async function planById(env: Env, id: unknown) {
@@ -3127,23 +3202,29 @@ async function adminApi(request: Request, env: Env, path: string) {
     return ok(true);
   }
   if (path.includes("/system/getSystemStatus")) {
-    const lastRun = await optionalKvGet(env, "schedule:last_run:xboard:statistics");
-    return ok({ schedule: !!lastRun && now() - Number(lastRun) < 120, horizon: true, schedule_last_runtime: lastRun ? Number(lastRun) : null });
+    const lastRun = await optionalKvGet(env, "schedule:last_check_at");
+    return ok({ schedule: !!lastRun && now() - Number(lastRun) < 600, horizon: true, schedule_last_runtime: lastRun ? Number(lastRun) : null });
   }
   if (path.includes("/system/getQueueStats")) {
-    const current = now();
-    const cutoff = current - 10080 * 60;
-    const [workerFailed, legacyFailed, recent] = await Promise.all([
-      env.XBOARD_DB.prepare("SELECT COUNT(*) AS count FROM v2_job_logs WHERE status = 'failed' AND COALESCE(updated_at, created_at) >= ?")
-        .bind(cutoff).first<{ count: number }>(),
-      env.XBOARD_DB.prepare("SELECT COUNT(*) AS count FROM failed_jobs WHERE failed_at >= ?")
-        .bind(cutoff).first<{ count: number }>(),
-      env.XBOARD_DB.prepare("SELECT COUNT(*) AS count FROM v2_job_logs WHERE created_at >= ?")
-        .bind(current - 60 * 60).first<{ count: number }>()
-    ]);
-    const failedJobs = Number(workerFailed?.count || 0) + Number(legacyFailed?.count || 0);
-    const recentJobs = Number(recent?.count || 0);
-    return ok({ failedJobs, jobsPerMinute: 0, pausedMasters: 0, periods: { failedJobs: 10080, recentJobs: 60 }, processes: 1, queueWithMaxRuntime: null, queueWithMaxThroughput: null, recentJobs, status: true, wait: { "cloudflare-queues:default": 0 } });
+    const stats = await cachedData("queue-stats", 60, async () => {
+      const current = now();
+      const cutoff = current - 10080 * 60;
+      const [workerFailed, legacyFailed, recent] = await Promise.all([
+        env.XBOARD_DB.prepare("SELECT COUNT(*) AS count FROM v2_job_logs WHERE status = 'failed' AND COALESCE(updated_at, created_at) >= ?")
+          .bind(cutoff).first<{ count: number }>(),
+        env.XBOARD_DB.prepare("SELECT COUNT(*) AS count FROM failed_jobs WHERE failed_at >= ?")
+          .bind(cutoff).first<{ count: number }>(),
+        env.XBOARD_DB.prepare(`SELECT COALESCE(SUM(count), 0) AS count FROM (
+          SELECT COUNT(*) AS count FROM v2_job_logs WHERE status = 'done' AND updated_at >= ?
+          UNION ALL
+          SELECT COUNT(*) AS count FROM v2_job_logs WHERE status = 'failed' AND updated_at >= ?
+        )`).bind(current - 60 * 60, current - 60 * 60).first<{ count: number }>()
+      ]);
+      const failedJobs = Number(workerFailed?.count || 0) + Number(legacyFailed?.count || 0);
+      const recentJobs = Number(recent?.count || 0);
+      return { failedJobs, jobsPerMinute: 0, pausedMasters: 0, periods: { failedJobs: 10080, recentJobs: 60 }, processes: 1, queueWithMaxRuntime: null, queueWithMaxThroughput: null, recentJobs, status: true, wait: { "cloudflare-queues:default": 0 } };
+    });
+    return ok(stats);
   }
   if (path.includes("/system/getQueueWorkload")) {
     const result = await env.XBOARD_DB.prepare("SELECT type AS name, SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS length FROM v2_job_logs GROUP BY type ORDER BY type").all<Record<string, any>>();

@@ -148,7 +148,7 @@ test("a stale cron owner cannot release its replacement's lock", async () => {
   assert.equal(db.rows.get("schedule:lock:check:order").status, "done");
 });
 
-test("scheduled cron keeps one trigger while locking every upstream task independently", () => {
+test("scheduled cron keeps one trigger and one shared minute lock", () => {
   const ordinaryMinute = Date.UTC(2026, 6, 15, 4, 17) / 1000;
   const hourlyMinute = Date.UTC(2026, 6, 15, 5, 0) / 1000;
   assert.deepEqual(__test.scheduledTasks(ordinaryMinute), ["check:order", "check:ticket", "check:commission", "check:traffic-exceeded", "reset:traffic"]);
@@ -156,9 +156,10 @@ test("scheduled cron keeps one trigger while locking every upstream task indepen
     "check:order", "check:ticket", "check:commission", "check:traffic-exceeded", "reset:traffic", "cleanup:online-status"
   ]);
   const source = fs.readFileSync("src/index.ts", "utf8");
-  assert.match(source, /for \(const current of tasks\) \{\s*const claim = await acquireTaskLock\(env, current, now\(\)\)/);
-  assert.match(source, /await releaseTaskLock\(env, current, claim/);
-  assert.doesNotMatch(source, /schedule:lock:scheduled/);
+  assert.match(source, /acquireTaskLock\(env, "scheduled", ts\)/);
+  assert.match(source, /releaseTaskLock\(env, "scheduled", scheduledClaim/);
+  assert.doesNotMatch(source, /schedule:last_run:\$\{current\}/);
+  assert.match(source, /ts - previous >= 300/);
 });
 
 test("settings read D1 when KV fails after the memory cache is warm", async () => {

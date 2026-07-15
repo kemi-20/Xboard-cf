@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { OFFICIAL_HTTP_ROUTES, OFFICIAL_WS_EVENTS } from "../src/contracts.ts";
-import { appendMachineHistory, REGISTERED_HTTP_ROUTES } from "../src/index.ts";
+import { appendMachineHistory, REGISTERED_HTTP_ROUTES, StatusHub } from "../src/index.ts";
 import { invalidateSettingsCache, settings } from "../src/db.ts";
 
 test("xboard-server has an entrypoint", () => {
@@ -10,10 +10,12 @@ test("xboard-server has an entrypoint", () => {
   assert.match(fs.readFileSync("src/index.ts", "utf8"), /export default/);
 });
 
-test("device state expiry matches the upstream five-minute Redis TTL", () => {
+test("device state keeps the upstream five-minute activity window without KV heartbeats", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
-  assert.match(source, /`node:devices:\$\{nodeId\}`/);
-  assert.match(source, /JSON\.stringify\(next\), \{ expirationTtl: 300 \}/);
+  assert.match(source, /status-hub\.internal\/devices\/report/);
+  assert.match(source, /Number\(seenAt\) >= timestamp - 300/);
+  assert.doesNotMatch(source, /`node:devices:\$\{nodeId\}`/);
+  assert.doesNotMatch(source, /`user:devices:\$\{userId\}`/);
 });
 
 test("node polling defaults to five minutes", () => {
@@ -52,8 +54,9 @@ test("node status accepts official flat metrics and nested status payloads", () 
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /const status = data\.status \?\? \(data\.mem && data\.disk \? data : null\)/);
   assert.match(source, /const metrics = data\.metrics \?\? data/);
-  assert.match(source, /if \(status\) await processStatus/);
-  assert.match(source, /await processMetrics/);
+  assert.match(source, /const load = statusState\(status\)/);
+  assert.match(source, /const metricValues = metricsState\(metrics\)/);
+  assert.match(source, /await reportStatus\(this\.env, "node", Number\(node\.id\), runtime\)/);
 });
 
 test("node and machine runtime status persist in the global StatusHub", () => {
@@ -62,8 +65,9 @@ test("node and machine runtime status persist in the global StatusHub", () => {
   assert.match(source, /export class StatusHub/);
   assert.match(source, /const STATUS_HUB_ID = "global"/);
   assert.match(source, /env\.STATUS_HUB\.idFromName\(STATUS_HUB_ID\)/);
-  assert.match(source, /this\.state\.storage\.put\(writes\)/);
-  assert.match(source, /writes\[historyKey\] = appendMachineHistory\(history, point, updatedAt\)/);
+  assert.match(source, /updatedAt - Number\(this\.persistedStatusAt\.get\(key\) \|\| 0\) >= 60/);
+  assert.match(source, /updatedAt - lastRecordedAt >= 300/);
+  assert.match(source, /await this\.state\.storage\.put\(historyKey, nextHistory\)/);
   assert.match(wrangler, /name = "STATUS_HUB"/);
   assert.match(wrangler, /class_name = "StatusHub"/);
   assert.match(wrangler, /tag = "v2"[\s\S]*new_sqlite_classes = \["StatusHub"\]/);
@@ -85,6 +89,68 @@ test("machine load history appends every report like upstream", () => {
 
   const stale = { cpu: 1, recorded_at: recent - 86401 };
   assert.deepEqual(appendMachineHistory([stale], second, recent), [second]);
+});
+
+function statusHubStorage() {
+  const rows = new Map();
+  const writes = [];
+  return {
+    rows,
+    writes,
+    async get(key) { return rows.get(key); },
+    async put(key, value) {
+      if (typeof key === "string") { rows.set(key, value); writes.push(key); }
+      else for (const [entryKey, entryValue] of Object.entries(key)) { rows.set(entryKey, entryValue); writes.push(entryKey); }
+    },
+    async delete(key) { return rows.delete(key); },
+    async list(options = {}) { return new Map([...rows].filter(([key]) => !options.prefix || key.startsWith(options.prefix))); },
+    async setAlarm() {}
+  };
+}
+
+test("StatusHub coalesces heartbeat storage while preserving device expiry and history", async () => {
+  const storage = statusHubStorage();
+  const hub = new StatusHub({ storage });
+  const originalNow = Date.now;
+  let clock = 2_000_000_000_000;
+  Date.now = () => clock;
+  try {
+    const report = state => hub.fetch(new Request("https://status-hub.internal/report", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ kind: "node", id: 1, state })
+    }));
+    await report({ last_check_at: 1 });
+    await report({ last_check_at: 2 });
+    assert.equal(storage.writes.filter(key => key === "node:1").length, 1);
+    await report({ connected: false });
+    assert.equal(storage.writes.filter(key => key === "node:1").length, 2);
+
+    const deviceReport = (timestamp, devices) => hub.fetch(new Request("https://status-hub.internal/devices/report", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ node_id: 1, timestamp, devices })
+    }));
+    await deviceReport(1000, { 7: { "1.1.1.1": 1000 } });
+    await deviceReport(1060, { 7: { "1.1.1.1": 1060 } });
+    assert.equal(storage.writes.filter(key => key === "devices:1").length, 1);
+    await deviceReport(1241, { 7: { "1.1.1.1": 1241 } });
+    assert.equal(storage.writes.filter(key => key === "devices:1").length, 2);
+    const listed = await hub.fetch(new Request("https://status-hub.internal/devices/list", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ user_ids: [7], timestamp: 1241 })
+    }));
+    assert.deepEqual((await listed.json()).data.users, { 7: ["1.1.1.1"] });
+
+    const machineReport = () => hub.fetch(new Request("https://status-hub.internal/report", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind: "machine", id: 3, history: true, state: { load_status: { cpu: 10, mem: {}, disk: {} } } })
+    }));
+    await machineReport();
+    clock += 60_000;
+    await machineReport();
+    assert.equal(storage.writes.filter(key => key === "history:3").length, 1);
+    clock += 241_000;
+    await machineReport();
+    assert.equal(storage.writes.filter(key => key === "history:3").length, 2);
+  } finally {
+    Date.now = originalNow;
+  }
 });
 
 test("settings use a coalesced memory and KV snapshot cache", () => {
@@ -145,8 +211,8 @@ test("a KV outage falls straight through to D1 without a second KV attempt", asy
 test("large traffic reports are split before entering the queue", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /const billable = billableTraffic\(payload\)/);
-  assert.match(source, /offset \+= 1000/);
-  assert.match(source, /billable\.slice\(offset, offset \+ 1000\)/);
+  assert.match(source, /offset \+= 250/);
+  assert.match(source, /billable\.slice\(offset, offset \+ 250\)/);
   assert.match(source, /else if \(events\.length > 1\)/);
   assert.match(source, /TRAFFIC_EVENTS\.sendBatch\(events\)/);
 });
@@ -163,10 +229,11 @@ test("admin changes and migrations can invalidate the server settings cache imme
 test("websocket device state follows the official per-IP contract", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /next\[userId\] = Object\.fromEntries/);
-  assert.match(source, /output\[String\(user\.id\)\] = \[\.\.\.ips\]/);
+  assert.match(source, /deviceSnapshot\(Number\(input\.timestamp \|\| now\(\)\)/);
   assert.match(source, /await clearNodeDevices\(this\.env, Number\(node\.id\)\)/);
   assert.match(source, /node:ws:target:\$\{nodeId\}`[\s\S]*expirationTtl: 86400/);
   assert.match(source, /UPDATE v2_user SET online_count = \?/);
+  assert.doesNotMatch(source, /event === "pong"[\s\S]{0,400}optionalKvPut/);
   assert.match(source, /Internal sync token is not configured/);
   assert.match(source, /event === "report\.devices"[\s\S]*socket\.send\(wsMessage\("sync\.devices"/);
 });

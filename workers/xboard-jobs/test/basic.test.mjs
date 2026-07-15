@@ -40,7 +40,7 @@ test("traffic statistics persist the official server_rate field", () => {
   assert.match(source, /server_rate, record_type/);
   assert.match(source, /server_rate = excluded\.server_rate/);
   assert.match(source, /v2_stat_server\(server_id, server_type, u, d, record_type,[\s\S]*VALUES \(\?, \?, \?, \?, 'd'/);
-  assert.match(source, /UPDATE v2_stat_server SET record_type = 'd'/);
+  assert.doesNotMatch(source, /UPDATE v2_stat_server SET record_type = 'd' WHERE/);
   assert.match(source, /SET u = u \+ \?, d = d \+ \?, t = \?, updated_at = \?/);
 });
 
@@ -62,18 +62,19 @@ test("traffic events use event-level idempotency and conditional exceeded checks
   const source = fs.readFileSync("src/index.ts", "utf8");
   const wrangler = fs.readFileSync("wrangler.toml", "utf8");
   assert.doesNotMatch(source, /event\.event_id}:user:/);
-  assert.match(source, /async function claimTrafficEvents/);
-  assert.match(source, /aggregateTrafficEvents\(claimed\.map/);
-  assert.match(source, /UPDATE v2_job_logs SET status = 'done'/);
+  assert.match(source, /async function trafficCandidates/);
+  assert.match(source, /aggregateTrafficEvents\(candidates\)/);
+  assert.match(source, /VALUES \(\?, 'traffic', 'done', '', NULL, \?, \?\)/);
   assert.match(source, /INSERT INTO v2_traffic_pending_check/);
   assert.match(source, /u \+ d >= transfer_enable/);
-  assert.match(source, /ON CONFLICT\(user_id\) DO UPDATE/);
-  assert.match(source, /pendingResultIndexes\.some/);
+  assert.match(source, /ON CONFLICT\(user_id\) DO NOTHING/);
+  assert.doesNotMatch(source, /traffic:pending_check/);
   assert.match(source, /trafficMessages = batch\.messages\.filter/);
+  assert.match(source, /offset < trafficMessages\.length; offset \+= 25/);
   assert.match(wrangler, /dead_letter_queue = "traffic-events-dlq"/);
   assert.match(wrangler, /dead_letter_queue = "mail-events-dlq"/);
   assert.match(wrangler, /max_retries = 5/);
-  assert.match(wrangler, /queue = "traffic-events"[\s\S]*?max_batch_size = 10/);
+  assert.match(wrangler, /queue = "traffic-events"[\s\S]*?max_batch_size = 100/);
   assert.match(wrangler, /queue = "traffic-events"[\s\S]*?max_batch_timeout = 5/);
 });
 
@@ -88,6 +89,31 @@ test("traffic batches aggregate users and servers while preserving rate semantic
   assert.deepEqual(aggregate.servers.get("1:vless"), { serverId: 1, serverType: "vless", u: 14, d: 11 });
   assert.deepEqual(aggregate.userStats.get("7:1:vless"), { userId: 7, serverId: 1, serverType: "vless", u: 32, d: 28, rate: 3 });
   assert.equal(aggregate.transferUsed, 63);
+});
+
+test("traffic candidate selection skips completed and active duplicate deliveries", async () => {
+  const current = Math.floor(Date.now() / 1000);
+  const env = {
+    XBOARD_DB: {
+      prepare() {
+        return {
+          bind() { return this; },
+          async all() {
+            return { success: true, results: [
+              { event_id: "done", status: "done", updated_at: current },
+              { event_id: "active", status: "processing:owner", updated_at: current },
+              { event_id: "failed", status: "failed", updated_at: current - 10 }
+            ] };
+          }
+        };
+      }
+    }
+  };
+  const result = await __test.trafficCandidates(env, [
+    { event_id: "new" }, { event_id: "done" }, { event_id: "active" }, { event_id: "failed" }, { event_id: "new" }
+  ]);
+  assert.deepEqual(result.candidates.map(event => event.event_id), ["new", "failed"]);
+  assert.deepEqual(result.staleEventIds, ["failed"]);
 });
 
 function jobLogDb() {

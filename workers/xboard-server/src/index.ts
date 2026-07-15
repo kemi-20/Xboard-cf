@@ -88,12 +88,16 @@ async function reportStatus(env: Env, kind: "machine" | "node", id: number, stat
 async function getNode(env: Env, identifier: unknown, type?: string | null): Promise<Row | null> {
   if (identifier === null || identifier === undefined || identifier === "") return null;
   const normalized = normalizeNodeType(type);
-  if (normalized) {
-    return await env.XBOARD_DB.prepare("SELECT * FROM v2_server WHERE (CAST(code AS TEXT) = ? OR id = ?) AND type = ? ORDER BY CASE WHEN CAST(code AS TEXT) = ? THEN 0 ELSE 1 END LIMIT 1")
-      .bind(String(identifier), Number(identifier), normalized, String(identifier)).first<Row>();
-  }
-  return await env.XBOARD_DB.prepare("SELECT * FROM v2_server WHERE CAST(code AS TEXT) = ? OR id = ? ORDER BY CASE WHEN CAST(code AS TEXT) = ? THEN 0 ELSE 1 END LIMIT 1")
-    .bind(String(identifier), Number(identifier), String(identifier)).first<Row>();
+  const code = String(identifier);
+  const byCode = normalized
+    ? await env.XBOARD_DB.prepare("SELECT * FROM v2_server WHERE code = ? AND type = ? LIMIT 1").bind(code, normalized).first<Row>()
+    : await env.XBOARD_DB.prepare("SELECT * FROM v2_server WHERE code = ? LIMIT 1").bind(code).first<Row>();
+  if (byCode) return byCode;
+  const id = Number(identifier);
+  if (!Number.isInteger(id) || id <= 0) return null;
+  return normalized
+    ? await env.XBOARD_DB.prepare("SELECT * FROM v2_server WHERE id = ? AND type = ? LIMIT 1").bind(id, normalized).first<Row>()
+    : await env.XBOARD_DB.prepare("SELECT * FROM v2_server WHERE id = ? LIMIT 1").bind(id).first<Row>();
 }
 
 async function getMachine(env: Env, id: unknown, token: unknown): Promise<Row | null> {
@@ -227,39 +231,29 @@ function currentRate(node: Row) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-async function enqueueTraffic(env: Env, node: Row, raw: unknown) {
+async function enqueueTraffic(env: Env, node: Row, raw: unknown, reportRuntime = true) {
   const payload = parseTraffic(raw);
   if (!payload.length) return;
   const ts = now();
   const rate = currentRate(node);
   const billable = billableTraffic(payload);
   const events = [];
-  for (let offset = 0; offset < billable.length; offset += 1000) {
+  for (let offset = 0; offset < billable.length; offset += 250) {
     events.push({
       body: {
         event_id: crypto.randomUUID(), type: "traffic", server_id: Number(node.id),
-        server_type: String(node.type), rate, payload: billable.slice(offset, offset + 1000), created_at: ts
+        server_type: String(node.type), rate, payload: billable.slice(offset, offset + 250), created_at: ts
       }
     });
   }
   if (events.length === 1) await env.TRAFFIC_EVENTS.send(events[0].body);
   else if (events.length > 1) await env.TRAFFIC_EVENTS.sendBatch(events);
-  await reportStatus(env, "node", Number(node.id), {
-    machine_id: Number(node.machine_id || 0) || null,
-    last_push_at: ts,
-    online: payload.length
-  });
-}
-
-async function updateUserDeviceIndex(env: Env, nodeId: number, previous: Row, next: Row) {
-  const userIds = new Set([...Object.keys(previous), ...Object.keys(next)]);
-  for (const userId of userIds) {
-    const key = `user:devices:${userId}`;
-    const aggregate = parseJson<Row>(await optionalKvGet(env, key), {});
-    if (next[userId] && typeof next[userId] === "object") aggregate[String(nodeId)] = next[userId];
-    else delete aggregate[String(nodeId)];
-    if (Object.keys(aggregate).length) await optionalKvPut(env, key, JSON.stringify(aggregate), { expirationTtl: 600 });
-    else await optionalKvDelete(env, key);
+  if (reportRuntime) {
+    await reportStatus(env, "node", Number(node.id), {
+      machine_id: Number(node.machine_id || 0) || null,
+      last_push_at: ts,
+      online: payload.length
+    });
   }
 }
 
@@ -273,8 +267,6 @@ function normalizeDeviceIp(value: unknown) {
 
 async function processAlive(env: Env, nodeId: number, data: unknown) {
   if (!data || typeof data !== "object") return false;
-  const key = `node:devices:${nodeId}`;
-  const previous = parseJson<Row>(await optionalKvGet(env, key), {});
   const next: Row = {};
   const timestamp = now();
   for (const [userId, ips] of Object.entries(data as Row)) {
@@ -282,37 +274,30 @@ async function processAlive(env: Env, nodeId: number, data: unknown) {
       next[userId] = Object.fromEntries(Array.from(new Set(ips.map(normalizeDeviceIp).filter(Boolean))).map(ip => [ip, timestamp]));
     }
   }
-  await updateUserDeviceIndex(env, nodeId, previous, next);
-  await optionalKvPut(env, key, JSON.stringify(next), { expirationTtl: 300 });
-  const affected = new Set([...Object.keys(previous), ...Object.keys(next)]);
-  const statements = [];
-  for (const userId of affected) {
-    const nodes = parseJson<Row>(await optionalKvGet(env, `user:devices:${userId}`), {});
-    const ips = new Set<string>();
-    for (const value of Object.values(nodes)) {
-      if (Array.isArray(value)) for (const ip of value) ips.add(normalizeDeviceIp(ip));
-      else if (value && typeof value === "object") for (const [ip, seenAt] of Object.entries(value)) if (Number(seenAt) >= timestamp - 300) ips.add(normalizeDeviceIp(ip));
-    }
-    statements.push(env.XBOARD_DB.prepare("UPDATE v2_user SET online_count = ?, last_online_at = ? WHERE id = ?").bind(ips.size, ips.size ? timestamp : null, Number(userId)));
-  }
+  const response = await statusHub(env).fetch("https://status-hub.internal/devices/report", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ node_id: nodeId, devices: next, timestamp })
+  });
+  if (!response.ok) return false;
+  const result = await response.json() as { data?: { counts?: Record<string, number> } };
+  const statements = Object.entries(result.data?.counts || {}).map(([userId, count]) =>
+    env.XBOARD_DB.prepare(`UPDATE v2_user SET online_count = ?, last_online_at = ?
+      WHERE id = ? AND (COALESCE(online_count, 0) != ? OR (? > 0 AND COALESCE(last_online_at, 0) < ?) OR (? = 0 AND last_online_at IS NOT NULL))`)
+      .bind(count, count ? timestamp : null, Number(userId), count, count, timestamp - 240, count)
+  );
   if (statements.length) await env.XBOARD_DB.batch(statements);
   return true;
 }
 
 async function aggregateDevices(env: Env, users: Row[]) {
-  const output: Row = {};
-  const cutoff = now() - 300;
-  for (const user of users) {
-    if (Number(user.device_limit || 0) <= 0) continue;
-    const nodes = parseJson<Row>(await optionalKvGet(env, `user:devices:${user.id}`), {});
-    const ips = new Set<string>();
-    for (const value of Object.values(nodes)) {
-      if (Array.isArray(value)) for (const ip of value) ips.add(normalizeDeviceIp(ip));
-      else if (value && typeof value === "object") for (const [ip, seenAt] of Object.entries(value)) if (Number(seenAt) >= cutoff) ips.add(normalizeDeviceIp(ip));
-    }
-    if (ips.size > 0) output[String(user.id)] = [...ips];
-  }
-  return output;
+  const userIds = users.filter(user => Number(user.device_limit || 0) > 0).map(user => Number(user.id)).filter(Boolean);
+  if (!userIds.length) return {};
+  const response = await statusHub(env).fetch("https://status-hub.internal/devices/list", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ user_ids: userIds, timestamp: now() })
+  });
+  if (!response.ok) return {};
+  const result = await response.json() as { data?: { users?: Row } };
+  return result.data?.users || {};
 }
 
 async function aggregateDeviceCounts(env: Env, users: Row[]) {
@@ -321,25 +306,23 @@ async function aggregateDeviceCounts(env: Env, users: Row[]) {
 }
 
 async function clearNodeDevices(env: Env, nodeId: number) {
-  const key = `node:devices:${nodeId}`;
-  const previous = parseJson<Row>(await optionalKvGet(env, key), {});
-  if (Object.keys(previous).length) await updateUserDeviceIndex(env, nodeId, previous, {});
-  await optionalKvDelete(env, key);
-  if (Object.keys(previous).length) {
-    const timestamp = now();
-    const statements = [];
-    for (const userId of Object.keys(previous)) {
-      const devices = await aggregateDevices(env, [{ id: Number(userId), device_limit: 1 }]);
-      statements.push(env.XBOARD_DB.prepare("UPDATE v2_user SET online_count = ?, last_online_at = ? WHERE id = ?").bind(Array.isArray(devices[userId]) ? devices[userId].length : 0, Array.isArray(devices[userId]) && devices[userId].length ? timestamp : null, Number(userId)));
-    }
-    if (statements.length) await env.XBOARD_DB.batch(statements);
-  }
+  const timestamp = now();
+  const response = await statusHub(env).fetch("https://status-hub.internal/devices/clear", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ node_id: nodeId, timestamp })
+  });
+  if (!response.ok) return;
+  const result = await response.json() as { data?: { counts?: Record<string, number> } };
+  const statements = Object.entries(result.data?.counts || {}).map(([userId, count]) =>
+    env.XBOARD_DB.prepare("UPDATE v2_user SET online_count = ?, last_online_at = ? WHERE id = ? AND (COALESCE(online_count, 0) != ? OR (? = 0 AND last_online_at IS NOT NULL))")
+      .bind(count, count ? timestamp : null, Number(userId), count, count)
+  );
+  if (statements.length) await env.XBOARD_DB.batch(statements);
 }
 
-async function processStatus(env: Env, node: Row, status: unknown) {
-  if (!status || typeof status !== "object" || Array.isArray(status)) return;
+function statusState(status: unknown) {
+  if (!status || typeof status !== "object" || Array.isArray(status)) return null;
   const value = status as Row;
-  const load = {
+  return {
     cpu: Number(value.cpu || 0),
     mem: { total: Number(value.mem?.total || 0), used: Number(value.mem?.used || 0) },
     swap: { total: Number(value.swap?.total || 0), used: Number(value.swap?.used || 0) },
@@ -347,11 +330,10 @@ async function processStatus(env: Env, node: Row, status: unknown) {
     updated_at: now(),
     kernel_status: value.kernel_status ?? null
   } as Row;
-  await reportStatus(env, "node", Number(node.id), { machine_id: Number(node.machine_id || 0) || null, load_status: load });
 }
 
-async function processMetrics(env: Env, node: Row, metrics: unknown) {
-  if (!metrics || typeof metrics !== "object" || Array.isArray(metrics)) return;
+function metricsState(metrics: unknown) {
+  if (!metrics || typeof metrics !== "object" || Array.isArray(metrics)) return null;
   const timestamp = now();
   const raw = metrics as Row;
   const numberFields = ["uptime", "goroutines", "active_connections", "total_connections", "total_users", "active_users", "inbound_speed", "outbound_speed"];
@@ -360,10 +342,17 @@ async function processMetrics(env: Env, node: Row, metrics: unknown) {
   for (const field of ["cpu_per_core", "load", "speed_limiter", "gc", "api", "ws", "limits"]) {
     value[field] = raw[field] && typeof raw[field] === "object" ? raw[field] : [];
   }
-  await reportStatus(env, "node", Number(node.id), {
-    machine_id: Number(node.machine_id || 0) || null,
-    metrics: value
-  });
+  return value;
+}
+
+async function processStatus(env: Env, node: Row, status: unknown) {
+  const load = statusState(status);
+  if (load) await reportStatus(env, "node", Number(node.id), { machine_id: Number(node.machine_id || 0) || null, load_status: load });
+}
+
+async function processMetrics(env: Env, node: Row, metrics: unknown) {
+  const value = metricsState(metrics);
+  if (value) await reportStatus(env, "node", Number(node.id), { machine_id: Number(node.machine_id || 0) || null, metrics: value });
 }
 
 function validateStatus(input: Row, optional = false): Response | null {
@@ -597,20 +586,94 @@ export function appendMachineHistory(history: Row[], point: Row, recordedAt: num
 
 export class StatusHub {
   private state: DurableObjectState;
+  private status = new Map<string, Row>();
+  private loadedStatus = new Set<string>();
+  private persistedStatusAt = new Map<string, number>();
+  private snapshotLoaded = false;
+  private histories = new Map<number, Row[]>();
+  private loadedHistories = new Set<number>();
+  private devices = new Map<number, Row>();
+  private devicesLoaded = false;
+  private persistedDevicesAt = new Map<number, number>();
 
   constructor(state: DurableObjectState) {
     this.state = state;
   }
 
+  private async loadStatus(key: string) {
+    if (!this.loadedStatus.has(key)) {
+      const value = await this.state.storage.get<Row>(key) || {};
+      this.status.set(key, value);
+      this.persistedStatusAt.set(key, Number(value.updated_at || 0));
+      this.loadedStatus.add(key);
+    }
+    return this.status.get(key) || {};
+  }
+
   private async snapshot() {
-    const [machines, nodes] = await Promise.all([
-      this.state.storage.list<Row>({ prefix: "machine:" }),
-      this.state.storage.list<Row>({ prefix: "node:" })
-    ]);
+    if (!this.snapshotLoaded) {
+      const [machines, nodes] = await Promise.all([
+        this.state.storage.list<Row>({ prefix: "machine:" }),
+        this.state.storage.list<Row>({ prefix: "node:" })
+      ]);
+      for (const [key, value] of [...machines, ...nodes]) {
+        if (!this.loadedStatus.has(key)) this.status.set(key, value);
+        this.loadedStatus.add(key);
+        if (!this.persistedStatusAt.has(key)) this.persistedStatusAt.set(key, Number(value.updated_at || 0));
+      }
+      this.snapshotLoaded = true;
+    }
     return {
-      machines: Object.fromEntries([...machines].map(([key, value]) => [key.slice("machine:".length), value])),
-      nodes: Object.fromEntries([...nodes].map(([key, value]) => [key.slice("node:".length), value]))
+      machines: Object.fromEntries([...this.status].filter(([key]) => key.startsWith("machine:")).map(([key, value]) => [key.slice("machine:".length), value])),
+      nodes: Object.fromEntries([...this.status].filter(([key]) => key.startsWith("node:")).map(([key, value]) => [key.slice("node:".length), value]))
     };
+  }
+
+  private async loadHistory(machineId: number) {
+    if (!this.loadedHistories.has(machineId)) {
+      this.histories.set(machineId, await this.state.storage.get<Row[]>(`history:${machineId}`) || []);
+      this.loadedHistories.add(machineId);
+    }
+    return this.histories.get(machineId) || [];
+  }
+
+  private async loadDevices() {
+    if (this.devicesLoaded) return;
+    const rows = await this.state.storage.list<Row>({ prefix: "devices:" });
+    for (const [key, value] of rows) {
+      const nodeId = Number(key.slice("devices:".length));
+      if (!nodeId) continue;
+      this.devices.set(nodeId, value);
+      const seen = Math.max(0, ...Object.values(value).flatMap(user => user && typeof user === "object" ? Object.values(user as Row).map(Number) : [0]));
+      this.persistedDevicesAt.set(nodeId, seen);
+    }
+    this.devicesLoaded = true;
+  }
+
+  private deviceIps(value: unknown) {
+    return value && typeof value === "object" ? Object.keys(value as Row).sort() : [];
+  }
+
+  private sameDeviceMembers(previous: Row, next: Row) {
+    const userIds = new Set([...Object.keys(previous), ...Object.keys(next)]);
+    for (const userId of userIds) {
+      if (this.deviceIps(previous[userId]).join("\n") !== this.deviceIps(next[userId]).join("\n")) return false;
+    }
+    return true;
+  }
+
+  private deviceSnapshot(timestamp: number, selected?: Set<string>) {
+    const users: Record<string, string[]> = {};
+    for (const state of this.devices.values()) {
+      for (const [userId, entries] of Object.entries(state)) {
+        if (selected && !selected.has(userId)) continue;
+        if (!entries || typeof entries !== "object") continue;
+        const current = new Set(users[userId] || []);
+        for (const [ip, seenAt] of Object.entries(entries as Row)) if (Number(seenAt) >= timestamp - 300) current.add(ip);
+        if (current.size) users[userId] = [...current];
+      }
+    }
+    return users;
   }
 
   private historyPoint(load: Row, recordedAt: number) {
@@ -634,18 +697,65 @@ export class StatusHub {
       const id = Number(input.id || 0);
       if (!kind || !id || !input.state || typeof input.state !== "object") return json({ message: "Invalid status report" }, 422);
       const key = `${kind}:${id}`;
-      const previous = await this.state.storage.get<Row>(key) || {};
+      const previous = await this.loadStatus(key);
       const updatedAt = now();
       const next = { ...previous, ...input.state, id, updated_at: updatedAt };
-      const writes: Record<string, unknown> = { [key]: next };
+      this.status.set(key, next);
+      const critical = input.state.connected !== undefined || input.state.disconnected_at !== undefined;
+      if (critical || updatedAt - Number(this.persistedStatusAt.get(key) || 0) >= 60) {
+        await this.state.storage.put(key, next);
+        this.persistedStatusAt.set(key, updatedAt);
+      }
       if (kind === "machine" && input.history && input.state.load_status && typeof input.state.load_status === "object") {
         const historyKey = `history:${id}`;
         const point = this.historyPoint(input.state.load_status as Row, updatedAt);
-        const history = await this.state.storage.get<Row[]>(historyKey) || [];
-        writes[historyKey] = appendMachineHistory(history, point, updatedAt);
+        const history = await this.loadHistory(id);
+        const lastRecordedAt = Number(history.at(-1)?.recorded_at || 0);
+        if (!lastRecordedAt || updatedAt - lastRecordedAt >= 300) {
+          const nextHistory = appendMachineHistory(history, point, updatedAt);
+          this.histories.set(id, nextHistory);
+          await this.state.storage.put(historyKey, nextHistory);
+        }
       }
-      await this.state.storage.put(writes);
       return json({ data: true });
+    }
+    if (url.pathname === "/devices/report" && request.method === "POST") {
+      const input = await request.json() as { node_id?: number; devices?: Row; timestamp?: number };
+      const nodeId = Number(input.node_id || 0);
+      const timestamp = Number(input.timestamp || now());
+      if (!nodeId || !input.devices || typeof input.devices !== "object") return json({ message: "Invalid device report" }, 422);
+      await this.loadDevices();
+      const previous = this.devices.get(nodeId) || {};
+      const next = input.devices;
+      const affected = new Set([...Object.keys(previous), ...Object.keys(next)]);
+      const changed = !this.sameDeviceMembers(previous, next);
+      this.devices.set(nodeId, next);
+      const refreshDue = timestamp - Number(this.persistedDevicesAt.get(nodeId) || 0) >= 240;
+      if (changed || refreshDue) {
+        await this.state.storage.put(`devices:${nodeId}`, next);
+        this.persistedDevicesAt.set(nodeId, timestamp);
+      }
+      const users = changed || refreshDue ? this.deviceSnapshot(timestamp, affected) : {};
+      return json({ data: { changed, counts: changed || refreshDue ? Object.fromEntries([...affected].map(userId => [userId, users[userId]?.length || 0])) : {} } });
+    }
+    if (url.pathname === "/devices/list" && request.method === "POST") {
+      const input = await request.json() as { user_ids?: number[]; timestamp?: number };
+      await this.loadDevices();
+      const selected = new Set((input.user_ids || []).map(String));
+      return json({ data: { users: this.deviceSnapshot(Number(input.timestamp || now()), selected.size ? selected : undefined) } });
+    }
+    if (url.pathname === "/devices/clear" && request.method === "POST") {
+      const input = await request.json() as { node_id?: number; timestamp?: number };
+      const nodeId = Number(input.node_id || 0);
+      if (!nodeId) return json({ message: "Invalid node" }, 422);
+      await this.loadDevices();
+      const previous = this.devices.get(nodeId) || {};
+      const affected = new Set(Object.keys(previous));
+      this.devices.delete(nodeId);
+      this.persistedDevicesAt.delete(nodeId);
+      await this.state.storage.delete(`devices:${nodeId}`);
+      const users = this.deviceSnapshot(Number(input.timestamp || now()), affected);
+      return json({ data: { counts: Object.fromEntries([...affected].map(userId => [userId, users[userId]?.length || 0])) } });
     }
     if (url.pathname === "/snapshot" && request.method === "GET") return json({ data: await this.snapshot() });
     if (url.pathname === "/history" && request.method === "GET") {
@@ -653,7 +763,7 @@ export class StatusHub {
       const limit = Math.min(1440, Math.max(10, Number(url.searchParams.get("limit") || 60)));
       const rangeHours = Number(url.searchParams.get("range_hours") || 0);
       const cutoff = rangeHours > 0 ? now() - Math.min(24, Math.max(1, rangeHours)) * 3600 : 0;
-      const history = (await this.state.storage.get<Row[]>(`history:${machineId}`) || [])
+      const history = (await this.loadHistory(machineId))
         .filter(item => !cutoff || Number(item.recorded_at || 0) >= cutoff)
         .slice(-limit);
       return json({ data: history });
@@ -663,12 +773,20 @@ export class StatusHub {
       const id = Number(input.id || 0);
       if (input.kind === "machine" && id) {
         await Promise.all([this.state.storage.delete(`machine:${id}`), this.state.storage.delete(`history:${id}`)]);
-      } else if (input.kind === "node" && id) await this.state.storage.delete(`node:${id}`);
+        this.status.delete(`machine:${id}`); this.loadedStatus.delete(`machine:${id}`); this.persistedStatusAt.delete(`machine:${id}`);
+        this.histories.delete(id); this.loadedHistories.delete(id);
+      } else if (input.kind === "node" && id) {
+        await this.state.storage.delete(`node:${id}`);
+        this.status.delete(`node:${id}`); this.loadedStatus.delete(`node:${id}`); this.persistedStatusAt.delete(`node:${id}`);
+      }
       return json({ data: true });
     }
     if (url.pathname === "/reset" && request.method === "POST") {
       const entries = await this.state.storage.list({});
       for (const key of entries.keys()) await this.state.storage.delete(key);
+      this.status.clear(); this.loadedStatus.clear(); this.persistedStatusAt.clear();
+      this.histories.clear(); this.loadedHistories.clear();
+      this.devices.clear(); this.persistedDevicesAt.clear(); this.devicesLoaded = true; this.snapshotLoaded = true;
       return json({ data: true, cleared: entries.size });
     }
     return json({ service: "StatusHub" });
@@ -679,6 +797,7 @@ export class NodeHub {
   private localSockets = new Set<WebSocket>();
   private state: DurableObjectState;
   private env: Env;
+  private lastPresenceRefreshAt = 0;
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
     this.env = env;
@@ -736,9 +855,7 @@ export class NodeHub {
               await this.env.XBOARD_KV.delete(`node:ws:target:${removedId}`);
             }
             await this.env.XBOARD_KV.delete(`node:ws:alive:${removedId}`);
-            const previous = parseJson<Row>(await this.env.XBOARD_KV.get(`node:devices:${removedId}`), {});
-            await updateUserDeviceIndex(this.env, removedId, previous, {});
-            await this.env.XBOARD_KV.delete(`node:devices:${removedId}`);
+            await clearNodeDevices(this.env, removedId);
           }
           for (const nodeId of nodeIds) {
             await this.env.XBOARD_KV.put(`node:ws:target:${nodeId}`, `machine:${identity.machine_id}`, { expirationTtl: 86400 });
@@ -806,11 +923,6 @@ export class NodeHub {
     const data = input.data && typeof input.data === "object" ? input.data as Row : {};
     const nodeIds: number[] = Array.isArray(identity.node_ids) ? identity.node_ids.map(Number) : [];
     if (event === "pong") {
-      for (const nodeId of nodeIds) {
-        const target = identity.mode === "machine" ? `machine:${identity.machine_id}` : `node:${nodeId}`;
-        await optionalKvPut(this.env, `node:ws:alive:${nodeId}`, "1", { expirationTtl: 86400 });
-        await optionalKvPut(this.env, `node:ws:target:${nodeId}`, target, { expirationTtl: 86400 });
-      }
       return;
     }
     const nodeId = identity.mode === "machine" ? Number(data.node_id) : Number(identity.node_id);
@@ -818,11 +930,14 @@ export class NodeHub {
     const node = await getNode(this.env, nodeId);
     if (!node) return;
     if (event === "node.status") {
-      await touchNode(this.env, node);
       const status = data.status ?? (data.mem && data.disk ? data : null);
       const metrics = data.metrics ?? data;
-      if (status) await processStatus(this.env, node, status);
-      await processMetrics(this.env, node, metrics);
+      const runtime: Row = { machine_id: Number(node.machine_id || 0) || null, last_check_at: now() };
+      const load = statusState(status);
+      const metricValues = metricsState(metrics);
+      if (load) runtime.load_status = load;
+      if (metricValues) runtime.metrics = metricValues;
+      await reportStatus(this.env, "node", Number(node.id), runtime);
     }
     if (event === "report.devices") {
       await processAlive(this.env, nodeId, data.devices ?? data);
@@ -852,6 +967,19 @@ export class NodeHub {
   async alarm() {
     const sockets = this.sockets();
     for (const socket of sockets) socket.send(JSON.stringify({ event: "ping" }));
+    const timestamp = now();
+    if (sockets.length && timestamp - this.lastPresenceRefreshAt >= 21600) {
+      for (const socket of sockets) {
+        const identity = this.attachment(socket);
+        const nodeIds: number[] = Array.isArray(identity.node_ids) ? identity.node_ids.map(Number) : [];
+        for (const nodeId of nodeIds) {
+          const target = identity.mode === "machine" ? `machine:${identity.machine_id}` : `node:${nodeId}`;
+          await optionalKvPut(this.env, `node:ws:alive:${nodeId}`, "1", { expirationTtl: 86400 });
+          await optionalKvPut(this.env, `node:ws:target:${nodeId}`, target, { expirationTtl: 86400 });
+        }
+      }
+      this.lastPresenceRefreshAt = timestamp;
+    }
     if (sockets.length) await this.state.storage.setAlarm(Date.now() + 55000);
   }
 }
@@ -909,15 +1037,16 @@ routes.set("POST /api/v2/server/report", async (_request, env, input) => {
   const auth = await authenticateV2(env, input);
   if (auth instanceof Response) return auth;
   const node = auth.node!;
-  await touchNode(env, node);
-  if (input.traffic && typeof input.traffic === "object") await enqueueTraffic(env, node, input.traffic);
+  if (input.traffic && typeof input.traffic === "object") await enqueueTraffic(env, node, input.traffic, false);
   if (input.alive && typeof input.alive === "object") await processAlive(env, Number(node.id), input.alive);
-  if (input.online && typeof input.online === "object") await reportStatus(env, "node", Number(node.id), {
-    machine_id: Number(node.machine_id || 0) || null,
-    connections: input.online
-  });
-  if (input.status && typeof input.status === "object") await processStatus(env, node, input.status);
-  if (input.metrics && typeof input.metrics === "object") await processMetrics(env, node, input.metrics);
+  const runtime: Row = { machine_id: Number(node.machine_id || 0) || null, last_check_at: now() };
+  if (input.traffic && typeof input.traffic === "object") runtime.last_push_at = runtime.last_check_at;
+  if (input.online && typeof input.online === "object") runtime.connections = input.online;
+  const load = statusState(input.status);
+  const metricValues = metricsState(input.metrics);
+  if (load) runtime.load_status = load;
+  if (metricValues) runtime.metrics = metricValues;
+  await reportStatus(env, "node", Number(node.id), runtime);
   return json({ data: true });
 });
 

@@ -146,10 +146,13 @@ test("admin UI and API follow the saved secure path", () => {
 
 test("dashboard queue statistics honor the official time windows", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /cachedData\("queue-stats", 60/);
+  assert.match(source, /globalThis as any\)\.caches\?\.default/);
   assert.match(source, /status = 'failed' AND COALESCE\(updated_at, created_at\) >= \?/);
   assert.match(source, /SELECT COUNT\(\*\) AS count FROM failed_jobs WHERE failed_at >= \?/);
   assert.match(source, /current - 10080 \* 60/);
-  assert.match(source, /WHERE created_at >= \?/);
+  assert.match(source, /status = 'done' AND updated_at >= \?/);
+  assert.match(source, /status = 'failed' AND updated_at >= \?/);
   assert.match(source, /current - 60 \* 60/);
   assert.doesNotMatch(source, /SELECT status, COUNT\(\*\) AS count FROM v2_job_logs GROUP BY status/);
   assert.match(source, /FROM failed_jobs WHERE failed_at >= \?/);
@@ -427,6 +430,27 @@ test("dashboard statistics follow the upstream order and server traffic contract
   for (const field of ["todayIncome", "currentMonthIncome", "lastMonthIncome", "currentMonthCommissionPayout", "onlineNodes", "todayTraffic", "monthTraffic", "totalTraffic"]) {
     assert.match(stats, new RegExp(field));
   }
+});
+
+test("traffic rankings use one period aggregation and a short non-KV cache", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const rank = source.slice(source.indexOf("async function trafficRank"), source.indexOf("async function planById"));
+  assert.match(rank, /cachedData\(`traffic-rank:/);
+  assert.match(rank, /WITH traffic AS/);
+  assert.match(rank, /SUM\(CASE WHEN record_at >= \?/);
+  assert.doesNotMatch(rank, /SELECT SUM\(previous\.u \+ previous\.d\)/);
+  assert.doesNotMatch(rank, /XBOARD_KV/);
+});
+
+test("storage optimization removes write-heavy unused traffic indexes", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const schema = fs.readFileSync("../../schema/d1.sql", "utf8");
+  for (const name of ["idx_v2_stat_user_u", "idx_v2_stat_user_d", "idx_v2_stat_user_record", "idx_v2_stat_server_upload", "idx_v2_stat_server_download", "idx_v2_stat_server_record"]) {
+    assert.match(source, new RegExp(`"DROP INDEX IF EXISTS ${name}"`));
+    assert.doesNotMatch(schema, new RegExp(`CREATE INDEX IF NOT EXISTS ${name}(?:\\s+ON|;)`));
+  }
+  assert.match(source, /idx_v2_stat_server_record_server ON v2_stat_server\(record_at, server_id, server_type\)/);
+  assert.match(schema, /idx_v2_stat_server_record_server ON v2_stat_server\(record_at, server_id, server_type\)/);
 });
 
 test("revenue overview reads the migrated daily statistics table", () => {

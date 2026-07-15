@@ -63,6 +63,11 @@ async function optionalKvPut(env: Env, key: string, value: string, expirationTtl
   try { await env.XBOARD_KV.put(key, value, expirationTtl ? { expirationTtl } : undefined); } catch {}
 }
 
+async function updateScheduleHeartbeat(env: Env, ts: number) {
+  const previous = Number(await optionalKvGet(env, "schedule:last_check_at") || 0);
+  if (!previous || ts - previous >= 300) await optionalKvPut(env, "schedule:last_check_at", String(ts), 900);
+}
+
 async function setting(env: Env, name: string, fallback = "") {
   const values = await loadSettings(env.XBOARD_DB, env.XBOARD_KV);
   return values[name] ?? fallback;
@@ -176,8 +181,9 @@ async function resetTraffic(env: Env, ts: number) {
 
 async function statistics(env: Env, ts: number, day: number) {
   const recordDay = day - 86400;
-  const last = await optionalKvGet(env, "schedule:last_run:xboard:statistics");
-  if (last && dayStart(Number(last)) >= day) return;
+  const markerId = `schedule:statistics:${recordDay}`;
+  const marker = await env.XBOARD_DB.prepare("SELECT status FROM v2_job_logs WHERE event_id = ?").bind(markerId).first<{ status: string }>();
+  if (marker?.status === "done") return;
   const users = await env.XBOARD_DB.prepare("SELECT COUNT(*) AS user_count FROM v2_user").first<any>();
   const traffic = await env.XBOARD_DB.prepare("SELECT COALESCE(SUM(u), 0) + COALESCE(SUM(d), 0) AS transfer_used FROM v2_stat_server WHERE created_at >= ? AND created_at < ?").bind(recordDay, day).first<any>();
   const orders = await env.XBOARD_DB.prepare("SELECT COUNT(*) AS order_count, COALESCE(SUM(total_amount), 0) AS order_total FROM v2_order WHERE created_at >= ? AND created_at < ?").bind(recordDay, day).first<any>();
@@ -194,7 +200,10 @@ async function statistics(env: Env, ts: number, day: number) {
     await env.XBOARD_DB.prepare("INSERT INTO v2_stat(record_at, record_type, user_count, order_count, order_total, paid_count, paid_total, commission_count, commission_total, register_count, invite_count, transfer_used, transfer_used_total, created_at, updated_at) VALUES (?, 'd', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
       .bind(recordDay, userCount, Number(orders?.order_count || 0), Number(orders?.order_total || 0), Number(paid?.paid_count || 0), Number(paid?.paid_total || 0), Number(commissions?.commission_count || 0), Number(commissions?.commission_total || 0), Number(registrations?.register_count || 0), Number(registrations?.invite_count || 0), transferUsed, transferUsed, ts, ts).run();
   }
-  await optionalKvPut(env, "schedule:last_run:xboard:statistics", String(ts));
+  await env.XBOARD_DB.prepare(`INSERT INTO v2_job_logs(event_id, type, status, payload, error, created_at, updated_at)
+    VALUES (?, 'schedule', 'done', '{}', NULL, ?, ?)
+    ON CONFLICT(event_id) DO UPDATE SET status = 'done', error = NULL, updated_at = excluded.updated_at`)
+    .bind(markerId, ts, ts).run();
 }
 
 async function cleanupOnlineStatus(env: Env, ts: number) {
@@ -311,8 +320,6 @@ async function checkOrders(env: Env, ts: number) {
 }
 
 async function checkTrafficExceeded(env: Env, ts: number) {
-  const signaled = Boolean(await optionalKvGet(env, "traffic:pending_check"));
-  if (!signaled && shanghaiParts(ts).minute % 5 !== 0) return;
   const token = await setting(env, "internal_sync_token", await setting(env, "server_token"));
   while (true) {
     const pending = await env.XBOARD_DB.prepare("SELECT u.id, u.banned, u.transfer_enable, u.u, u.d FROM v2_traffic_pending_check p JOIN v2_user u ON u.id = p.user_id ORDER BY p.updated_at ASC LIMIT 1000").all<any>();
@@ -330,7 +337,6 @@ async function checkTrafficExceeded(env: Env, ts: number) {
     }
     await env.XBOARD_DB.prepare(`DELETE FROM v2_traffic_pending_check WHERE user_id IN (${pendingIds.map(() => "?").join(",")})`).bind(...pendingIds).run();
   }
-  if (signaled) try { await env.XBOARD_KV.delete("traffic:pending_check"); } catch {}
 }
 
 async function resetLogs(env: Env, ts: number) {
@@ -380,30 +386,35 @@ function scheduledTasks(ts: number) {
 
 async function run(env: Env, task = "scheduled") {
   const ts = now();
-  await optionalKvPut(env, "schedule:last_check_at", String(ts), 3600);
+  await updateScheduleHeartbeat(env, ts);
   const day = dayStart(ts);
   const tasks = task === "all"
     ? ["check:order", "check:ticket", "check:commission", "check:traffic-exceeded", "reset:traffic", "cleanup:online-status", "reset:log", "xboard:statistics", "send:remindMail"]
     : task === "scheduled"
       ? scheduledTasks(ts)
       : [task];
-  for (const current of tasks) {
-    const claim = await acquireTaskLock(env, current, now());
-    if (!claim) continue;
-    try {
-      if (current === "check:order") await checkOrders(env, ts);
-      else if (current === "check:ticket") await checkTickets(env, ts);
-      else if (current === "check:commission") await checkCommission(env, ts);
-      else if (current === "check:traffic-exceeded") await checkTrafficExceeded(env, ts);
-      else if (current === "reset:traffic") await resetTraffic(env, ts);
-      else if (current === "cleanup:online-status") await cleanupOnlineStatus(env, ts);
-      else if (current === "reset:log") await resetLogs(env, ts);
-      else if (current === "xboard:statistics") await statistics(env, ts, day);
-      else if (current === "send:remindMail") await sendReminders(env, ts, day);
-      await optionalKvPut(env, `schedule:last_run:${current}`, String(ts));
-    } finally {
-      await releaseTaskLock(env, current, claim, now());
+  const scheduledClaim = task === "scheduled" ? await acquireTaskLock(env, "scheduled", ts) : null;
+  if (task === "scheduled" && !scheduledClaim) return;
+  try {
+    for (const current of tasks) {
+      const claim = task === "scheduled" ? null : await acquireTaskLock(env, current, now());
+      if (task !== "scheduled" && !claim) continue;
+      try {
+        if (current === "check:order") await checkOrders(env, ts);
+        else if (current === "check:ticket") await checkTickets(env, ts);
+        else if (current === "check:commission") await checkCommission(env, ts);
+        else if (current === "check:traffic-exceeded") await checkTrafficExceeded(env, ts);
+        else if (current === "reset:traffic") await resetTraffic(env, ts);
+        else if (current === "cleanup:online-status") await cleanupOnlineStatus(env, ts);
+        else if (current === "reset:log") await resetLogs(env, ts);
+        else if (current === "xboard:statistics") await statistics(env, ts, day);
+        else if (current === "send:remindMail") await sendReminders(env, ts, day);
+      } finally {
+        if (claim) await releaseTaskLock(env, current, claim, now());
+      }
     }
+  } finally {
+    if (scheduledClaim) await releaseTaskLock(env, "scheduled", scheduledClaim, now());
   }
 }
 
