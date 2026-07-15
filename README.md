@@ -1,6 +1,6 @@
 # XBoard CF
 
-XBoard CF 是基于 Cloudflare Workers、D1、KV、Queues、Durable Objects 和 Static Assets 重写的 XBoard。项目保留官方后台 WebUI、用户 API、订阅接口和节点协议，不需要部署 Laravel、PHP、MySQL 或 Redis。
+XBoard CF 是基于 Cloudflare Workers、D1、KV、Queues、Durable Objects 和 Static Assets 重写的 XBoard。项目保留官方后台 WebUI、用户 API、订阅接口、节点协议、礼品卡、订单分配、邮件和 Telegram 等非支付功能，不需要部署 Laravel、PHP、MySQL 或 Redis。
 
 > 当前仅暂缓需要真实收款、支付回调或资金提现的功能。余额、套餐、流量、邮件和其他非支付业务均使用真实数据处理。
 
@@ -18,6 +18,7 @@ XBoard CF 是基于 Cloudflare Workers、D1、KV、Queues、Durable Objects 和 
 - D1 持久化业务数据，KV 缓存临时状态
 - Queue 异步处理流量，Cron Worker 执行周期任务
 - 后台联合导入原版 SQLite3 与 Redis RDB，平滑切换到 D1 + KV
+- 导出原版兼容 SQLite3，并支持迁移失败后按快照一键还原
 - 后台全局搜索仅展示当前可用功能，并可直接打开数据迁移
 
 ## 后台入口
@@ -79,8 +80,10 @@ Worker 之间没有依赖仓库根目录的共享运行时代码，因此 Cloudf
 | KV | `xboard-kv` / `XBOARD_KV` | Session、验证码、限流、缓存和版本标记 |
 | Queue | `traffic-events` | 节点流量异步入库，由 `xboard-jobs` 消费 |
 | Queue | `mail-events` | 邮件任务，由 `xboard-jobs` 消费 |
+| Queue | `telegram-events` | Telegram 通知任务，由 `xboard-jobs` 消费 |
 | Queue | `traffic-events-dlq` | 流量任务连续失败 5 次后的死信队列 |
 | Queue | `mail-events-dlq` | 邮件任务连续失败 5 次后的死信队列 |
+| Queue | `telegram-events-dlq` | Telegram 任务连续失败 5 次后的死信队列 |
 | Durable Object | `NodeHub` / `NODE_HUB` | 节点和机器 WebSocket 连接、同步事件与休眠连接管理 |
 | Durable Object | `StatusHub` / `STATUS_HUB` | 全局节点与机器实时状态、设备状态及 24 小时负载采样 |
 | Static Assets | `ASSETS` | `xboard-edge` 托管后台 WebUI、语言包和静态文件 |
@@ -90,7 +93,41 @@ Worker 之间没有依赖仓库根目录的共享运行时代码，因此 Cloudf
 | Queue Producer | `MAIL_EVENTS` | `xboard-edge`、`xboard-cron` 写入 `mail-events` |
 | Cron Trigger | `* * * * *` | `xboard-cron` 每分钟调度周期检查、统计和清理任务 |
 
-五个 Worker 都绑定同一个 D1 和 KV。D1 是正式业务数据的唯一权威来源；KV 只保存可重新生成的短期数据。高频机器心跳不写入 D1，而是进入 `StatusHub`。设置读取使用 Worker 内存、KV 版本快照和 D1 三级缓存，其他 Worker 只加载各自需要的设置字段。
+五个 Worker 都绑定同一个 D1 和 KV。D1 是正式业务数据的唯一权威来源；KV 只保存可重新生成的短期数据。高频机器心跳不写入 D1，而是进入 `StatusHub`。设置读取使用 Worker 内存、KV 版本快照和 D1 三级缓存，各 Worker 只加载自身需要的设置字段。KV 不可用或超过额度时会直接跳过 KV 并回源 D1，不会因为缓存故障阻断登录、订阅、节点上报或定时任务。
+
+```mermaid
+flowchart LR
+  Browser["后台 / 用户前端"] --> Edge["xboard-edge"]
+  Client["订阅客户端"] --> Edge
+  Edge --> Subscription["xboard-subscription"]
+  Node["Xboard-Node"] --> Edge
+  Edge --> Server["xboard-server"]
+  Server --> NodeHub["NodeHub"]
+  Server --> StatusHub["StatusHub"]
+  Server --> TrafficQ["traffic-events"]
+  Edge --> MailQ["mail-events"]
+  Cron["xboard-cron"] --> MailQ
+  TrafficQ --> Jobs["xboard-jobs"]
+  MailQ --> Jobs
+  Edge --> D1["D1: xboard-db"]
+  Subscription --> D1
+  Server --> D1
+  Jobs --> D1
+  Cron --> D1
+  Edge -. cache .-> KV["KV: xboard-kv"]
+  Subscription -. cache .-> KV
+  Server -. cache .-> KV
+```
+
+### 存储与流量写入
+
+- **D1**：用户、套餐、权限组、节点配置、订单、余额、最终流量、统计和系统设置的权威数据。
+- **KV**：Session、验证码、限流、版本号和可重建缓存；不是 Redis 数据的逐键永久替代品。
+- **NodeHub**：维护节点或机器的 WebSocket 连接及配置、用户热同步。
+- **StatusHub**：保存高频在线状态、设备状态、机器心跳和滚动 24 小时负载采样，避免每次心跳写 D1。
+- **Queues**：把高频流量、邮件和 Telegram 任务与 HTTP 请求解耦；连续失败超过重试上限后进入对应 DLQ。
+
+流量事件先按稳定 `event_id` 原子认领，重复投递不会重复计费。同一 Queue batch 内会按用户和服务器聚合后再写 D1；只有确实可能超出流量的用户才写入 `v2_traffic_pending_check`，由 Cron 后续检查并删除已处理记录。这些机制用于降低 D1 的行读取和行写入量。
 
 ## 邮件服务
 
@@ -140,7 +177,7 @@ Maileroo 免费层通常为每月 3,000 封，Brevo 免费层通常为每天 300
 CLOUDFLARE_API_TOKEN
 ```
 
-然后打开 `Actions -> Bootstrap XBoard on Cloudflare -> Run workflow`。workflow 会自动识别 Token 所属账号，创建或复用 `xboard-db`、`xboard-kv`、`traffic-events`、`mail-events` 及对应的两个死信队列，把当前账号、D1 和 KV 的资源 ID 写入五个 Worker 的 `wrangler.toml`，使用 GitHub 自动提供的 `GITHUB_TOKEN` 提交回当前分支，再自动执行 D1 schema 与 seed，创建 Durable Objects、Cron Trigger、Static Assets 和 Service Bindings，并按依赖顺序创建或更新五个 Worker。它只配置了 `workflow_dispatch`，不会在每次 push 时运行。
+然后打开 `Actions -> Bootstrap XBoard on Cloudflare -> Run workflow`。workflow 会自动识别 Token 所属账号，创建或复用 `xboard-db`、`xboard-kv`、三个业务 Queue 及对应的三个死信队列，把当前账号、D1 和 KV 的资源 ID 写入五个 Worker 的 `wrangler.toml`，使用 GitHub 自动提供的 `GITHUB_TOKEN` 提交回当前分支，再自动执行 D1 schema 与 seed，创建 Durable Objects、Cron Trigger、Static Assets 和 Service Bindings，并按依赖顺序创建或更新五个 Worker。它只配置了 `workflow_dispatch`，不会在每次 push 时运行。
 
 资源 ID 不是 API Token 或数据库密码，必须随部署仓库保存，Cloudflare Workers Builds 后续检出代码时才能继续绑定同一套资源。workflow 只提交五个 `workers/xboard-*/wrangler.toml`，不会提交 `CLOUDFLARE_API_TOKEN`。如果仓库禁止 GitHub Actions 写入内容，或 `master` 分支保护规则禁止 workflow 直接推送，首次部署会在“Persist Cloudflare resource bindings”步骤明确失败；请允许该 workflow 写入仓库后重新手动运行。
 
@@ -212,6 +249,7 @@ framework/schedule 锁
 检查所有 Worker：
 
 ```bash
+npm install
 npm run typecheck
 npm test
 ```
@@ -227,6 +265,30 @@ npx wrangler deploy --dry-run --outdir ../../.tmp/xboard-edge-dry-run
 ```
 
 所有临时脚本、上游仓库和 dry-run 产物应放在 `.tmp/`，不得提交。
+
+## 兼容基线
+
+节点 HTTP、机器模式和 WebSocket 协议固定以以下提交为兼容基线：
+
+```text
+cedar2025/Xboard       8e4864b4c7f6240e3ef08ecd7b59447e5d9dd363
+cedar2025/Xboard-Node  0a29338e1f102a462363ce3527417029f89bab28
+```
+
+Cloudflare 内部可以使用 D1、KV、Queues 和 Durable Objects 替代 Laravel、SQLite/Redis Queue 等组件，但节点可观察到的路由、认证、字段、状态码、ETag、304 和 WebSocket 事件应保持兼容。项目测试覆盖后台主要响应结构、订阅格式、节点协议、Queue 幂等、缓存降级和 Cron 行为；正式升级前仍建议使用实际域名、真实节点和常用订阅客户端做一次端到端检查。
+
+## 更新与排错
+
+正常更新只需 push 到已连接的生产分支。Cloudflare Workers Builds 会分别在五个根目录执行测试和部署；无需再次运行首次部署 Action。
+
+遇到部署或运行问题时优先检查：
+
+1. 五个 Worker 最近一次 Build 是否成功，根目录是否各自正确。
+2. `xboard-edge` 的 `XBOARD_SERVER`、`XBOARD_SUBSCRIPTION` 和 `ASSETS` 绑定是否存在。
+3. `xboard-server` 的 `NODE_HUB`、`STATUS_HUB` 和 `TRAFFIC_EVENTS` 是否存在。
+4. `xboard-jobs` 是否绑定三个业务 Queue 及其 DLQ。
+5. D1 和 KV ID 是否仍与首次部署 Action 写入的 `wrangler.toml` 一致。
+6. 修改系统设置后短暂等待缓存版本传播；KV 故障时系统应自动回源 D1。
 
 ## 暂未启用的功能
 

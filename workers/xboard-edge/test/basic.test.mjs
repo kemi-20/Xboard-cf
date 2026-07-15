@@ -313,6 +313,8 @@ test("bootstrap persists generated Cloudflare bindings for Workers Builds", () =
   assert.match(workflow, /git commit -m "Configure Cloudflare resource bindings"/);
   assert.match(workflow, /git push origin "HEAD:\$\{GITHUB_REF_NAME\}"/);
   assert.match(bootstrap, /patchWrangler\(worker, account\.id, database\.uuid \|\| database\.id, kv\.id\)/);
+  assert.match(bootstrap, /"telegram-events"/);
+  assert.match(bootstrap, /"telegram-events-dlq"/);
 });
 
 test("admin can fetch a fresh subscription URL for the copy action", () => {
