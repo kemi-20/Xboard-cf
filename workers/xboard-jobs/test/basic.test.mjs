@@ -61,3 +61,82 @@ test("traffic events use event-level idempotency and conditional exceeded checks
   assert.match(wrangler, /max_retries = 5/);
   assert.match(wrangler, /queue = "traffic-events"[\s\S]*?max_batch_size = 1/);
 });
+
+function jobLogDb() {
+  const rows = new Map();
+  return {
+    rows,
+    prepare(sql) {
+      let values = [];
+      return {
+        bind(...next) { values = next; return this; },
+        async run() {
+          if (sql.startsWith("INSERT INTO v2_job_logs")) {
+            const [eventId, type, status, payload, createdAt, updatedAt, staleAt] = values;
+            const current = rows.get(eventId);
+            if (!current || current.status === "failed" || (current.status.startsWith("processing:") && current.updated_at < staleAt)) {
+              rows.set(eventId, { event_id: eventId, type, status, payload, created_at: current?.created_at || createdAt, updated_at: updatedAt });
+              return { success: true, meta: { changes: 1 } };
+            }
+            return { success: true, meta: { changes: 0 } };
+          }
+          if (sql.includes("SET status = 'done'")) {
+            const [updatedAt, eventId, claim] = values;
+            const current = rows.get(eventId);
+            if (current?.status !== claim) return { success: true, meta: { changes: 0 } };
+            rows.set(eventId, { ...current, status: "done", updated_at: updatedAt });
+            return { success: true, meta: { changes: 1 } };
+          }
+          if (sql.includes("SET status = 'failed'")) {
+            const [, updatedAt, eventId, claim] = values;
+            const current = rows.get(eventId);
+            if (current?.status !== claim) return { success: true, meta: { changes: 0 } };
+            rows.set(eventId, { ...current, status: "failed", updated_at: updatedAt });
+            return { success: true, meta: { changes: 1 } };
+          }
+          throw new Error(`Unexpected SQL: ${sql}`);
+        }
+      };
+    },
+    async batch(statements) { return Promise.all(statements.map(statement => statement.run())); }
+  };
+}
+
+test("concurrent duplicate queue deliveries have exactly one claimant", async () => {
+  const db = jobLogDb();
+  const env = { XBOARD_DB: db };
+  const claims = await Promise.all(Array.from({ length: 20 }, () => __test.claimEvent(env, "traffic:duplicate", "traffic", {})));
+  assert.equal(claims.filter(Boolean).length, 1);
+  await __test.completeClaim(env, "traffic:duplicate", claims.find(Boolean), []);
+  assert.equal(db.rows.get("traffic:duplicate").status, "done");
+  assert.equal(await __test.claimEvent(env, "traffic:duplicate", "traffic", {}), null);
+});
+
+test("settings read D1 when KV fails after the memory cache is warm", async () => {
+  const { settings } = await import(`../src/db.ts?kv-outage=${Date.now()}`);
+  const originalNow = Date.now;
+  let clock = 1_000_000;
+  Date.now = () => clock;
+  let d1Reads = 0;
+  let versionReads = 0;
+  const db = { prepare() { return { bind() { return this; }, async all() { d1Reads++; return { success: true, results: [{ name: "app_name", value: "fresh-d1" }] }; } }; } };
+  const kv = {
+    async get(key) {
+      if (key === "settings_version") {
+        versionReads++;
+        if (versionReads > 1) throw new Error("KV unavailable");
+        return "v1";
+      }
+      return JSON.stringify({ app_name: "stale-kv" });
+    },
+    async put() {}
+  };
+  try {
+    assert.equal((await settings(db, kv)).app_name, "stale-kv");
+    clock += 31_000;
+    assert.equal((await settings(db, kv)).app_name, "fresh-d1");
+    assert.equal(d1Reads, 1);
+  } finally {
+    Date.now = originalNow;
+  }
+});

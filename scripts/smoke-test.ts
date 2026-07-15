@@ -36,7 +36,7 @@ const adminEmail = process.env.XBOARD_ADMIN_EMAIL;
 const adminPassword = process.env.XBOARD_ADMIN_PASSWORD;
 if (adminEmail || adminPassword) {
   if (!adminEmail || !adminPassword) throw new Error("Set both XBOARD_ADMIN_EMAIL and XBOARD_ADMIN_PASSWORD");
-  const login = await expectResponse("admin login", "/api/v2/admin/passport/auth/login", {
+  const login = await expectResponse("admin login", `/api/v2/${adminPath}/passport/auth/login`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ email: adminEmail, password: adminPassword })
@@ -44,7 +44,7 @@ if (adminEmail || adminPassword) {
   const loginData = JSON.parse(login.text);
   const authorization = String(loginData?.data?.auth_data || "");
   if (!authorization.startsWith("Bearer ")) throw new Error("admin login did not return auth_data");
-  const config = await expectResponse("admin config", "/api/v2/admin/config/fetch", { headers: { authorization } });
+  const config = await expectResponse("admin config", `/api/v2/${adminPath}/config/fetch`, { headers: { authorization } });
   const configData = JSON.parse(config.text);
   if (!configData?.data?.site || !configData?.data?.server) throw new Error("admin config response is incomplete");
 }

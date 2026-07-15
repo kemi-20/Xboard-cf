@@ -32,14 +32,15 @@ export async function settings(db: D1Database, kv?: KVNamespace) {
     settingsPromise = (async () => {
       let version = settingsCache?.version || "0";
       let availableKv = kv;
+      let kvVersionFailed = false;
       if (availableKv) {
         try { version = await availableKv.get("settings_version") || "0"; }
         catch {
           availableKv = undefined;
-          if (settingsCache && settingsCache.expiresAt > Date.now()) return settingsCache.value;
+          kvVersionFailed = true;
         }
       }
-      if (settingsCache && settingsCache.expiresAt > Date.now() && settingsCache.version === version) {
+      if (!kvVersionFailed && settingsCache && settingsCache.expiresAt > Date.now() && settingsCache.version === version) {
         settingsCache.versionCheckedAt = Date.now();
         return settingsCache.value;
       }

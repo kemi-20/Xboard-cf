@@ -62,32 +62,63 @@ async function resolveMailContent(env: Env, payload: any) {
   return { ...payload, subject, text: text || undefined, html };
 }
 
-async function alreadyDone(env: Env, eventId: string) {
-  const existing = await env.XBOARD_DB.prepare("SELECT status FROM v2_job_logs WHERE event_id = ?").bind(eventId).first<{ status: string }>();
-  return existing?.status === "done";
-}
-
 async function recordFailure(env: Env, event: any, error: unknown) {
   const ts = now();
-  await env.XBOARD_DB.prepare("INSERT INTO v2_job_logs(event_id, type, status, payload, error, created_at, updated_at) VALUES (?, ?, 'failed', ?, ?, ?, ?) ON CONFLICT(event_id) DO UPDATE SET status = 'failed', error = excluded.error, updated_at = excluded.updated_at")
+  await env.XBOARD_DB.prepare(`INSERT INTO v2_job_logs(event_id, type, status, payload, error, created_at, updated_at)
+    VALUES (?, ?, 'failed', ?, ?, ?, ?)
+    ON CONFLICT(event_id) DO UPDATE SET status = 'failed', error = excluded.error, updated_at = excluded.updated_at
+    WHERE v2_job_logs.status NOT LIKE 'done%' AND v2_job_logs.status NOT LIKE 'processing:%'`)
     .bind(event.event_id, event.type || "unknown", JSON.stringify(event), String((error as any)?.message || error), ts, ts).run();
 }
 
-async function runOnce(env: Env, eventId: string, type: string, payload: unknown, statements: D1PreparedStatement[]) {
-  const existing = await env.XBOARD_DB.prepare("SELECT status FROM v2_job_logs WHERE event_id = ?").bind(eventId).first<{ status: string }>();
-  if (existing?.status === "done") return null;
+async function claimEvent(env: Env, eventId: string, type: string, payload: unknown) {
   const ts = now();
+  const claim = `processing:${crypto.randomUUID()}`;
+  const result = await env.XBOARD_DB.prepare(`INSERT INTO v2_job_logs(event_id, type, status, payload, error, created_at, updated_at)
+    VALUES (?, ?, ?, ?, NULL, ?, ?)
+    ON CONFLICT(event_id) DO UPDATE SET type = excluded.type, status = excluded.status, payload = excluded.payload,
+      error = NULL, updated_at = excluded.updated_at
+    WHERE v2_job_logs.status = 'failed'
+      OR (v2_job_logs.status LIKE 'processing:%' AND v2_job_logs.updated_at < ?)`)
+    .bind(eventId, type, claim, JSON.stringify(payload), ts, ts, ts - 120).run();
+  return Number((result.meta as any)?.changes || 0) === 1 ? claim : null;
+}
+
+async function failClaim(env: Env, eventId: string, claim: string, error: unknown) {
+  await env.XBOARD_DB.prepare("UPDATE v2_job_logs SET status = 'failed', error = ?, updated_at = ? WHERE event_id = ? AND status = ?")
+    .bind(String((error as any)?.message || error), now(), eventId, claim).run();
+}
+
+async function completeClaim(env: Env, eventId: string, claim: string, statements: D1PreparedStatement[]) {
+  const results = await env.XBOARD_DB.batch([
+    ...statements,
+    env.XBOARD_DB.prepare("UPDATE v2_job_logs SET status = 'done', error = NULL, updated_at = ? WHERE event_id = ? AND status = ?")
+      .bind(now(), eventId, claim)
+  ]);
+  if (Number((results.at(-1)?.meta as any)?.changes || 0) !== 1) throw new Error(`Queue event claim was lost: ${eventId}`);
+  return results;
+}
+
+async function runOnce(env: Env, eventId: string, type: string, payload: unknown, statements: D1PreparedStatement[]) {
+  const claim = await claimEvent(env, eventId, type, payload);
+  if (!claim) return null;
   try {
-    return await env.XBOARD_DB.batch([
-      env.XBOARD_DB.prepare("INSERT INTO v2_job_logs(event_id, type, status, payload, created_at, updated_at) VALUES (?, ?, 'done', ?, ?, ?) ON CONFLICT(event_id) DO UPDATE SET type = excluded.type, status = 'done', payload = excluded.payload, updated_at = excluded.updated_at")
-        .bind(eventId, type, JSON.stringify(payload), ts, ts),
-      ...statements
-    ]);
+    return await completeClaim(env, eventId, claim, statements);
   } catch (error: any) {
-    const completed = await env.XBOARD_DB.prepare("SELECT status FROM v2_job_logs WHERE event_id = ?").bind(eventId).first<{ status: string }>();
-    if (completed?.status === "done") return null;
-    await env.XBOARD_DB.prepare("INSERT INTO v2_job_logs(event_id, type, status, payload, error, created_at, updated_at) VALUES (?, ?, 'failed', ?, ?, ?, ?) ON CONFLICT(event_id) DO UPDATE SET status = 'failed', error = excluded.error, updated_at = excluded.updated_at")
-      .bind(eventId, type, JSON.stringify(payload), String(error?.message || error), ts, now()).run();
+    await failClaim(env, eventId, claim, error);
+    throw error;
+  }
+}
+
+async function signalTrafficPending(env: Env, eventId: string, ts: number) {
+  const signalEventId = `traffic-signal:${eventId}`;
+  const claim = await claimEvent(env, signalEventId, "traffic_signal", { event_id: eventId, created_at: ts });
+  if (!claim) return;
+  try {
+    await env.XBOARD_KV.put("traffic:pending_check", String(ts), { expirationTtl: 3600 });
+    await completeClaim(env, signalEventId, claim, []);
+  } catch (error) {
+    await failClaim(env, signalEventId, claim, error);
     throw error;
   }
 }
@@ -125,7 +156,7 @@ async function traffic(env: Env, event: any) {
   const pendingResultIndexes: number[] = [];
   for (const [uid, value] of users) {
     statements.push(env.XBOARD_DB.prepare("UPDATE v2_user SET u = u + ?, d = d + ?, t = ?, updated_at = ? WHERE id = ?").bind(value.u, value.d, ts, ts, uid));
-    pendingResultIndexes.push(statements.length + 1);
+    pendingResultIndexes.push(statements.length);
     statements.push(env.XBOARD_DB.prepare(`INSERT INTO v2_traffic_pending_check(user_id, updated_at)
       SELECT id, ? FROM v2_user WHERE id = ? AND banned = 0 AND transfer_enable > 0 AND u + d >= transfer_enable
       ON CONFLICT(user_id) DO UPDATE SET updated_at = excluded.updated_at`).bind(ts, uid));
@@ -144,14 +175,22 @@ async function traffic(env: Env, event: any) {
       .bind(recordAt, userU + userD, ts, ts));
   }
   const results = await runOnce(env, event.event_id, "traffic", event, statements);
-  const hasPending = results && pendingResultIndexes.some(index => Number((results[index]?.meta as any)?.changes || 0) > 0);
+  let hasPending = results && pendingResultIndexes.some(index => Number((results[index]?.meta as any)?.changes || 0) > 0);
+  if (!results && users.size) {
+    const ids = [...users.keys()];
+    const row = await env.XBOARD_DB.prepare(`SELECT COUNT(*) AS total FROM v2_traffic_pending_check WHERE user_id IN (${ids.map(() => "?").join(",")})`)
+      .bind(...ids).first<{ total: number }>();
+    hasPending = Number(row?.total || 0) > 0;
+  }
   if (hasPending) {
-    try { await env.XBOARD_KV.put("traffic:pending_check", String(ts), { expirationTtl: 3600 }); } catch {}
+    await signalTrafficPending(env, event.event_id, ts);
   }
 }
 
 async function mail(env: Env, event: any) {
-  if (await alreadyDone(env, event.event_id)) return;
+  const claim = await claimEvent(env, event.event_id, "mail", event);
+  if (!claim) return;
+  try {
   const payload = await resolveMailContent(env, event.payload || {});
   const provider = String(await setting(env, "email_driver")).toLowerCase() === "brevo" ? "brevo" : "maileroo";
   const apiKey = (provider === "brevo" ? env.BREVO_API_KEY : env.MAILEROO_API_KEY) || await setting(env, "email_password");
@@ -192,13 +231,20 @@ async function mail(env: Env, event: any) {
     providerId = String(result?.messageId || result?.data?.reference_id || result?.reference_id || "");
   } catch {}
   const ts = now();
-  await runOnce(env, event.event_id, "mail", { ...event, provider, provider_id: providerId }, recipients.map(email =>
+  await completeClaim(env, event.event_id, claim, recipients.map(email =>
     env.XBOARD_DB.prepare("INSERT INTO v2_mail_log(email, subject, template_name, error, created_at, updated_at) VALUES (?, ?, ?, NULL, ?, ?)")
       .bind(email, String(payload.subject), String(payload.template_name || "notify"), ts, ts)
   ));
+  } catch (error) {
+    await failClaim(env, event.event_id, claim, error);
+    throw error;
+  }
 }
 
 async function telegram(env: Env, event: any) {
+  const claim = await claimEvent(env, event.event_id, "telegram", event);
+  if (!claim) return;
+  try {
   const payload = event.payload || {};
   const botToken = env.TELEGRAM_BOT_TOKEN || await setting(env, "telegram_bot_token");
   const chatId = payload.chat_id || payload.chatId || await setting(env, "telegram_discuss_id");
@@ -211,7 +257,11 @@ async function telegram(env: Env, event: any) {
     body: JSON.stringify({ chat_id: chatId, text, parse_mode: parseMode, disable_web_page_preview: payload.disable_web_page_preview })
   });
   if (!response.ok) throw new Error(`Telegram ${response.status}: ${(await response.text()).slice(0, 500)}`);
-  await runOnce(env, event.event_id, "telegram", event, []);
+  await completeClaim(env, event.event_id, claim, []);
+  } catch (error) {
+    await failClaim(env, event.event_id, claim, error);
+    throw error;
+  }
 }
 
 async function stat(env: Env, event: any) {
@@ -235,7 +285,7 @@ async function handle(env: Env, event: any) {
   else throw new Error(`Unsupported queue event type: ${String(event.type || "unknown")}`);
 }
 
-export const __test = { dayStart, render };
+export const __test = { dayStart, render, claimEvent, completeClaim, failClaim, traffic };
 
 export default {
   async fetch() { return ok({ service: "xboard-jobs", time: now() }); },
@@ -245,7 +295,8 @@ export default {
         await handle(env, message.body);
         message.ack();
       } catch (error) {
-        await recordFailure(env, message.body, error);
+        try { await recordFailure(env, message.body, error); }
+        catch (logError) { console.error("Failed to record queue error", { error, logError }); }
         message.retry();
       }
     }

@@ -10,6 +10,7 @@ dist/
 .env.*
 !.env.example
 bugs.md
+bugs_*.md
 .agnets/
 README_FOR_AGNET.md
 AGENT_TEST.md

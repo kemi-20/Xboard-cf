@@ -99,3 +99,78 @@ test("order and commission retries cannot credit balances twice", () => {
   assert.match(source, /WHERE id = \? AND \$\{orderGuard\}/);
   assert.match(source, /results\.at\(-1\).*changes/);
 });
+
+function scheduleLockDb() {
+  const rows = new Map();
+  return {
+    rows,
+    prepare(sql) {
+      let values = [];
+      return {
+        bind(...next) { values = next; return this; },
+        async run() {
+          if (sql.startsWith("INSERT INTO v2_job_logs")) {
+            const [eventId, status, createdAt, updatedAt, staleAt] = values;
+            const current = rows.get(eventId);
+            if (!current || !current.status.startsWith("running:") || current.updated_at < staleAt) {
+              rows.set(eventId, { status, created_at: current?.created_at || createdAt, updated_at: updatedAt });
+              return { success: true, meta: { changes: 1 } };
+            }
+            return { success: true, meta: { changes: 0 } };
+          }
+          if (sql.includes("SET status = 'done'")) {
+            const [updatedAt, eventId, claim] = values;
+            const current = rows.get(eventId);
+            if (current?.status !== claim) return { success: true, meta: { changes: 0 } };
+            rows.set(eventId, { ...current, status: "done", updated_at: updatedAt });
+            return { success: true, meta: { changes: 1 } };
+          }
+          throw new Error(`Unexpected SQL: ${sql}`);
+        }
+      };
+    }
+  };
+}
+
+test("a stale cron owner cannot release its replacement's lock", async () => {
+  const db = scheduleLockDb();
+  const env = { XBOARD_DB: db };
+  const first = await __test.acquireTaskLock(env, "check:order", 1_000);
+  assert.ok(first);
+  const replacement = await __test.acquireTaskLock(env, "check:order", 1_601);
+  assert.ok(replacement);
+  assert.notEqual(replacement, first);
+  await __test.releaseTaskLock(env, "check:order", first, 1_602);
+  assert.equal(db.rows.get("schedule:lock:check:order").status, replacement);
+  await __test.releaseTaskLock(env, "check:order", replacement, 1_603);
+  assert.equal(db.rows.get("schedule:lock:check:order").status, "done");
+});
+
+test("settings read D1 when KV fails after the memory cache is warm", async () => {
+  const { settings } = await import(`../src/db.ts?kv-outage=${Date.now()}`);
+  const originalNow = Date.now;
+  let clock = 1_000_000;
+  Date.now = () => clock;
+  let d1Reads = 0;
+  let versionReads = 0;
+  const db = { prepare() { return { bind() { return this; }, async all() { d1Reads++; return { success: true, results: [{ name: "app_name", value: "fresh-d1" }] }; } }; } };
+  const kv = {
+    async get(key) {
+      if (key === "settings_version") {
+        versionReads++;
+        if (versionReads > 1) throw new Error("KV unavailable");
+        return "v1";
+      }
+      return JSON.stringify({ app_name: "stale-kv" });
+    },
+    async put() {}
+  };
+  try {
+    assert.equal((await settings(db, kv)).app_name, "stale-kv");
+    clock += 31_000;
+    assert.equal((await settings(db, kv)).app_name, "fresh-d1");
+    assert.equal(d1Reads, 1);
+  } finally {
+    Date.now = originalNow;
+  }
+});

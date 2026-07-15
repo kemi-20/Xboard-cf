@@ -20,6 +20,11 @@ test("saved subscription paths are enforced instead of accepting arbitrary alias
   assert.equal(__test.matchesConfiguredSubscribePath("/s/token", ""), true);
 });
 
+test("subscription version keys degrade cleanly when KV is unavailable", async () => {
+  const kv = { async get() { throw new Error("KV unavailable"); } };
+  assert.equal(await __test.optionalKvVersion(kv, "settings_version"), "0");
+});
+
 test("subscription output reads saved settings and templates", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /await loadSettings\(env\.XBOARD_DB, env\.XBOARD_KV\)/);

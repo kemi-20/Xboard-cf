@@ -1048,7 +1048,12 @@ function matchesConfiguredSubscribePath(pathname: string, configuredPath: unknow
   return token.length > 0 && !token.includes("/");
 }
 
-export const __test = { clientOf, clientDetails, versionAtLeast, filterByClientCompatibility, regexValue, protocolPrefix, traffic, decorateServers, general, generalUri, yamlProfile, clashProxy, singboxOutbound, singboxProfile, singboxCoreVersion, adaptSingboxConfig, shadowsocksProfile, textTemplateProfile, proxyLine, shadowrocketLine, quantumultXLine, loonLine, serverPassword, randomizedPort, replaceByPattern, subscriptionUrl, output, responseHeaders, matchesConfiguredSubscribePath };
+async function optionalKvVersion(kv: KVNamespace, key: string) {
+  try { return await kv.get(key) || "0"; }
+  catch { return "0"; }
+}
+
+export const __test = { clientOf, clientDetails, versionAtLeast, filterByClientCompatibility, regexValue, protocolPrefix, traffic, decorateServers, general, generalUri, yamlProfile, clashProxy, singboxOutbound, singboxProfile, singboxCoreVersion, adaptSingboxConfig, shadowsocksProfile, textTemplateProfile, proxyLine, shadowrocketLine, quantumultXLine, loonLine, serverPassword, randomizedPort, replaceByPattern, subscriptionUrl, output, responseHeaders, matchesConfiguredSubscribePath, optionalKvVersion };
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -1064,10 +1069,12 @@ export default {
     if (!token) return fail("Token required", 400);
     const user = await env.XBOARD_DB.prepare("SELECT id FROM v2_user WHERE token = ?").bind(token).first<any>();
     if (!user) return new Response("Forbidden", { status: 403 });
-    const settingsVersion = await env.XBOARD_KV.get("settings_version") || "0";
-    const serversVersion = await env.XBOARD_KV.get("servers_version") || "0";
-    const userVersion = await env.XBOARD_KV.get(`user_version:${user.id}`) || "0";
-    const templatesVersion = await env.XBOARD_KV.get("templates_version") || "0";
+    const [settingsVersion, serversVersion, userVersion, templatesVersion] = await Promise.all([
+      optionalKvVersion(env.XBOARD_KV, "settings_version"),
+      optionalKvVersion(env.XBOARD_KV, "servers_version"),
+      optionalKvVersion(env.XBOARD_KV, `user_version:${user.id}`),
+      optionalKvVersion(env.XBOARD_KV, "templates_version")
+    ]);
     const client = clientOf(request);
     const variant = b64url(`${url.searchParams.get("types") || "all"}|${url.searchParams.get("filter") || ""}|${url.hostname}`);
     const cacheKey = `subscribe:v3:${token}:${client}:${variant}:${settingsVersion}:${serversVersion}:${templatesVersion}:${userVersion}`;

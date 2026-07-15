@@ -301,45 +301,27 @@ async function checkOrders(env: Env, ts: number) {
   }
 }
 
-async function checkTrafficExceeded(env: Env) {
-  if (!await optionalKvGet(env, "traffic:pending_check")) return;
-  try { await env.XBOARD_KV.delete("traffic:pending_check"); } catch {}
+async function checkTrafficExceeded(env: Env, ts: number) {
+  const signaled = Boolean(await optionalKvGet(env, "traffic:pending_check"));
+  if (!signaled && shanghaiParts(ts).minute % 5 !== 0) return;
   const token = await setting(env, "internal_sync_token", await setting(env, "server_token"));
-  try {
-    while (true) {
-      const pending = await env.XBOARD_DB.prepare("SELECT u.id, u.banned, u.transfer_enable, u.u, u.d FROM v2_traffic_pending_check p JOIN v2_user u ON u.id = p.user_id ORDER BY p.updated_at ASC LIMIT 1000").all<any>();
-      const rows = pending.results || [];
-      if (!rows.length) break;
-      const pendingIds = rows.map(row => Number(row.id));
-      const ids = rows.filter(row => !Number(row.banned) && Number(row.transfer_enable) > 0 && Number(row.u || 0) + Number(row.d || 0) >= Number(row.transfer_enable)).map(row => Number(row.id));
-      if (ids.length) {
-        try {
-          await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/sync", {
-            method: "POST",
-            headers: { "content-type": "application/json", "x-xboard-internal-token": token },
-            body: JSON.stringify({ scope: "users", user_ids: ids })
-          });
-        } catch {}
-      }
-      await env.XBOARD_DB.prepare(`DELETE FROM v2_traffic_pending_check WHERE user_id IN (${pendingIds.map(() => "?").join(",")})`).bind(...pendingIds).run();
+  while (true) {
+    const pending = await env.XBOARD_DB.prepare("SELECT u.id, u.banned, u.transfer_enable, u.u, u.d FROM v2_traffic_pending_check p JOIN v2_user u ON u.id = p.user_id ORDER BY p.updated_at ASC LIMIT 1000").all<any>();
+    const rows = pending.results || [];
+    if (!rows.length) break;
+    const pendingIds = rows.map(row => Number(row.id));
+    const ids = rows.filter(row => !Number(row.banned) && Number(row.transfer_enable) > 0 && Number(row.u || 0) + Number(row.d || 0) >= Number(row.transfer_enable)).map(row => Number(row.id));
+    if (ids.length) {
+      const response = await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/sync", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-xboard-internal-token": token },
+        body: JSON.stringify({ scope: "users", user_ids: ids })
+      });
+      if (!response.ok) throw new Error(`Traffic exceeded sync failed: HTTP ${response.status}`);
     }
-  } catch {
-    let cursor = 0;
-    while (true) {
-      const users = await env.XBOARD_DB.prepare("SELECT id FROM v2_user WHERE id > ? AND banned = 0 AND transfer_enable > 0 AND u + d >= transfer_enable ORDER BY id ASC LIMIT 1000").bind(cursor).all<{ id: number }>();
-      const ids = (users.results || []).map(user => Number(user.id));
-      if (!ids.length) break;
-      try {
-        await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/sync", {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-xboard-internal-token": token },
-          body: JSON.stringify({ scope: "users", user_ids: ids })
-        });
-      } catch {}
-      cursor = ids[ids.length - 1];
-      if (ids.length < 1000) break;
-    }
+    await env.XBOARD_DB.prepare(`DELETE FROM v2_traffic_pending_check WHERE user_id IN (${pendingIds.map(() => "?").join(",")})`).bind(...pendingIds).run();
   }
+  if (signaled) try { await env.XBOARD_KV.delete("traffic:pending_check"); } catch {}
 }
 
 async function resetLogs(env: Env, ts: number) {
@@ -354,16 +336,17 @@ async function resetLogs(env: Env, ts: number) {
 
 async function acquireTaskLock(env: Env, task: string, ts: number) {
   const eventId = `schedule:lock:${task}`;
+  const claim = `running:${crypto.randomUUID()}`;
   const result = await env.XBOARD_DB.prepare(`INSERT INTO v2_job_logs(event_id, type, status, payload, created_at, updated_at)
-    VALUES (?, 'schedule', 'running', '{}', ?, ?)
-    ON CONFLICT(event_id) DO UPDATE SET status = 'running', updated_at = excluded.updated_at
-    WHERE v2_job_logs.status != 'running' OR v2_job_logs.updated_at < ?`).bind(eventId, ts, ts, ts - 600).run();
-  return Number((result.meta as any)?.changes || 0) === 1;
+    VALUES (?, 'schedule', ?, '{}', ?, ?)
+    ON CONFLICT(event_id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at
+    WHERE v2_job_logs.status NOT LIKE 'running:%' OR v2_job_logs.updated_at < ?`).bind(eventId, claim, ts, ts, ts - 600).run();
+  return Number((result.meta as any)?.changes || 0) === 1 ? claim : null;
 }
 
-async function releaseTaskLock(env: Env, task: string, ts: number) {
-  await env.XBOARD_DB.prepare("UPDATE v2_job_logs SET status = 'done', updated_at = ? WHERE event_id = ? AND status = 'running'")
-    .bind(ts, `schedule:lock:${task}`).run();
+async function releaseTaskLock(env: Env, task: string, claim: string, ts: number) {
+  await env.XBOARD_DB.prepare("UPDATE v2_job_logs SET status = 'done', updated_at = ? WHERE event_id = ? AND status = ?")
+    .bind(ts, `schedule:lock:${task}`, claim).run();
 }
 
 async function run(env: Env, task = "scheduled") {
@@ -381,12 +364,13 @@ async function run(env: Env, task = "scheduled") {
           ...(time.hour === 11 && time.minute === 30 ? ["send:remindMail"] : [])]
       : [task];
   for (const current of tasks) {
-    if (!await acquireTaskLock(env, current, ts)) continue;
+    const claim = await acquireTaskLock(env, current, ts);
+    if (!claim) continue;
     try {
       if (current === "check:order") await checkOrders(env, ts);
       else if (current === "check:ticket") await checkTickets(env, ts);
       else if (current === "check:commission") await checkCommission(env, ts);
-      else if (current === "check:traffic-exceeded") await checkTrafficExceeded(env);
+      else if (current === "check:traffic-exceeded") await checkTrafficExceeded(env, ts);
       else if (current === "reset:traffic") await resetTraffic(env, ts);
       else if (current === "cleanup:online-status") await cleanupOnlineStatus(env, ts);
       else if (current === "reset:log") await resetLogs(env, ts);
@@ -394,12 +378,12 @@ async function run(env: Env, task = "scheduled") {
       else if (current === "send:remindMail") await sendReminders(env, ts, day);
       await optionalKvPut(env, `schedule:last_run:${current}`, String(ts));
     } finally {
-      await releaseTaskLock(env, current, now());
+      await releaseTaskLock(env, current, claim, now());
     }
   }
 }
 
-export const __test = { dayStart, nextResetAt, addOrderMonths };
+export const __test = { dayStart, nextResetAt, addOrderMonths, acquireTaskLock, releaseTaskLock, checkTrafficExceeded };
 
 export default {
   async fetch(request: Request) {
