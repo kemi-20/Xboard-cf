@@ -6,6 +6,9 @@ account_id = "CLOUDFLARE_ACCOUNT_ID"
 [cache]
 enabled = true
 
+[vars]
+CLOUDFLARE_ACCOUNT_ID = "CLOUDFLARE_ACCOUNT_ID"
+
 [[d1_databases]]
 binding = "XBOARD_DB"
 database_name = "xboard-db"
@@ -23,10 +26,6 @@ run_worker_first = ["/", "/health", "/admin", "/admin/*", "/api/*", "/ws"]
 [[services]]
 binding = "XBOARD_SERVER"
 service = "xboard-server"
-
-[[services]]
-binding = "XBOARD_ANALYTICS"
-service = "xboard-analytics"
 
 [[services]]
 binding = "XBOARD_JOBS"

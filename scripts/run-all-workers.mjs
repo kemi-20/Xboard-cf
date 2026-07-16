@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 const cmd = process.argv[2] || "typecheck";
 const extraArgs = process.argv.slice(3);
-const workers = ["xboard-edge", "xboard-server", "xboard-jobs", "xboard-analytics"];
+const workers = ["xboard-edge", "xboard-server", "xboard-jobs"];
 function npmRun(args, cwd) {
   const command = ["npm", ...args].join(" ");
   const result = spawnSync(command, { cwd, stdio: "inherit", shell: true });

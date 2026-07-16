@@ -321,6 +321,10 @@ test("bootstrap persists generated Cloudflare bindings for Workers Builds", () =
   assert.match(workflow, /git add workers\/\*\/wrangler\.toml/);
   assert.match(workflow, /git commit -m "Configure Cloudflare resource bindings"/);
   assert.match(workflow, /git push origin "HEAD:\$\{GITHUB_REF_NAME\}"/);
+  assert.match(workflow, /working-directory: workers\/xboard-edge[\s\S]*wrangler secret put ANALYTICS_API_TOKEN/);
+  assert.doesNotMatch(workflow, /workers\/xboard-analytics/);
+  assert.match(bootstrap, /\["xboard-edge", "xboard-server", "xboard-jobs"\]/);
+  assert.match(bootstrap, /CLOUDFLARE_ACCOUNT_ID = "\$\{accountId\}"/);
   assert.match(bootstrap, /body: JSON\.stringify\(\{ name, primary_location_hint: "apac" \}\)/);
   assert.match(bootstrap, /read_replication: \{ mode: "auto" \}/);
   assert.match(bootstrap, /if \(existing\) return \{ database: existing, created: false \}/);
@@ -913,9 +917,12 @@ test("audited admin and user mutations reject stale or partial operations", () =
 
 test("statistics and mail templates preserve the upstream contracts", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
+  const analytics = fs.readFileSync("src/analytics.ts", "utf8");
   assert.match(source, /route\.endsWith\("YesterdayRank"\) \? dayStart\(\) - 86400 : 0/);
   assert.match(source, /server_name: row\.server_name, server_id: Number\(row\.server_id\), server_type: row\.server_type/);
-  assert.match(source, /payload\.meta\?\.cache === "stale" \|\| payload\.meta\?\.cache === "stale-cache-api"/);
+  assert.match(source, /import \{ analyticsData \} from "\.\/analytics\.ts"/);
+  assert.match(analytics, /catch \{[\s\S]*return null;/);
+  assert.doesNotMatch(source, /XBOARD_ANALYTICS/);
   assert.match(source, /SELECT s\.id, COALESCE\(parent\.name, s\.name\) AS name[\s\S]*LEFT JOIN v2_server parent ON parent\.id = s\.parent_id/);
   assert.match(source, /type === "server_traffic_rank"/);
   assert.match(source, /type === "invite_rank"/);

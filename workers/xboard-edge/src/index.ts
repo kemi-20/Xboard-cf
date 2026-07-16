@@ -7,6 +7,7 @@ import { handleAdminGiftCard, handleUserGiftCard } from "./gift-card";
 import { authorizeMigration, handleAdminMigration } from "./migration";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { handleSubscriptionRequest } from "./subscription/index.ts";
+import { analyticsData } from "./analytics.ts";
 
 export interface Env {
   XBOARD_DB: D1Database;
@@ -14,9 +15,10 @@ export interface Env {
   XBOARD_KV: KVNamespace;
   ASSETS: Fetcher;
   XBOARD_SERVER: Fetcher;
-  XBOARD_ANALYTICS: Fetcher;
   XBOARD_JOBS: Fetcher;
   NOTIFICATION_EVENTS: Queue;
+  CLOUDFLARE_ACCOUNT_ID?: string;
+  ANALYTICS_API_TOKEN?: string;
   PUBLIC_READ_DB?: D1Database;
   SETTINGS_MEMORY_SCOPE?: string;
 }
@@ -70,20 +72,6 @@ async function analyticsCutover(env: Env) {
 async function analyticsRangeAvailable(env: Env, start: number, end: number) {
   const coverage = await analyticsCutover(env);
   return start >= coverage.live || (coverage.backfillStart > 0 && start >= coverage.backfillStart && end <= coverage.backfillEnd);
-}
-
-async function analyticsData<T>(env: Env, path: string, input: Record<string, unknown>): Promise<T | null> {
-  try {
-    const response = await env.XBOARD_ANALYTICS.fetch(`https://xboard-analytics.internal${path}`, {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input)
-    });
-    if (!response.ok) return null;
-    const payload = await response.json() as { data?: T; meta?: { cache?: string } };
-    if (payload.meta?.cache === "stale" || payload.meta?.cache === "stale-cache-api") return null;
-    return payload.data ?? null;
-  } catch {
-    return null;
-  }
 }
 
 async function materializeCurrentTraffic(env: Env) {

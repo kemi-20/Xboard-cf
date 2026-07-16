@@ -69,12 +69,13 @@ async function patchWrangler(worker, accountId, databaseId, kvId) {
   toml = toml.replace(/^account_id\s*=\s*"[^"]*"/m, `account_id = "${accountId}"`);
   toml = toml.replace(/^database_id\s*=\s*"[^"]*"/m, `database_id = "${databaseId}"`);
   toml = toml.replace(/^id\s*=\s*"[^"]*"/m, `id = "${kvId}"`);
-  if (worker === "xboard-edge" || worker === "xboard-analytics") {
+  if (worker === "xboard-edge") {
     if (/^\[cache\]\s*$/m.test(toml)) {
       toml = toml.replace(/^(\[cache\]\s*\r?\n)(?:enabled\s*=\s*(?:true|false)\s*\r?\n)?/m, "$1enabled = true\n");
     } else {
       toml = toml.replace(/^(account_id\s*=\s*"[^"]*"\s*\r?\n)/m, "$1\n[cache]\nenabled = true\n");
     }
+    toml = toml.replace(/^CLOUDFLARE_ACCOUNT_ID\s*=\s*"[^"]*"/m, `CLOUDFLARE_ACCOUNT_ID = "${accountId}"`);
   }
   await writeFile(path, toml);
 }
@@ -92,7 +93,7 @@ const queueNames = [
 ];
 for (const queueName of queueNames) await ensureQueue(account.id, queueName);
 
-for (const worker of ["xboard-edge", "xboard-server", "xboard-jobs", "xboard-analytics"]) {
+for (const worker of ["xboard-edge", "xboard-server", "xboard-jobs"]) {
   await patchWrangler(worker, account.id, databaseId, kv.id);
 }
 
