@@ -905,6 +905,8 @@ test("statistics and mail templates preserve the upstream contracts", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /route\.endsWith\("YesterdayRank"\) \? dayStart\(\) - 86400 : 0/);
   assert.match(source, /server_name: row\.server_name, server_id: Number\(row\.server_id\), server_type: row\.server_type/);
+  assert.match(source, /payload\.meta\?\.cache === "stale" \|\| payload\.meta\?\.cache === "stale-cache-api"/);
+  assert.match(source, /SELECT s\.id, COALESCE\(parent\.name, s\.name\) AS name[\s\S]*LEFT JOIN v2_server parent ON parent\.id = s\.parent_id/);
   assert.match(source, /type === "server_traffic_rank"/);
   assert.match(source, /type === "invite_rank"/);
   assert.match(source, /Number\(row\.paid_total \|\| 0\) \/ 100/);

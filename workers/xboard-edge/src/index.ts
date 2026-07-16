@@ -78,7 +78,8 @@ async function analyticsData<T>(env: Env, path: string, input: Record<string, un
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input)
     });
     if (!response.ok) return null;
-    const payload = await response.json() as { data?: T };
+    const payload = await response.json() as { data?: T; meta?: { cache?: string } };
+    if (payload.meta?.cache === "stale" || payload.meta?.cache === "stale-cache-api") return null;
     return payload.data ?? null;
   } catch {
     return null;
@@ -3550,8 +3551,10 @@ async function adminApi(request: Request, env: Env, path: string) {
     if (await analyticsRangeAvailable(env, start, end)) {
       const aeRows = await analyticsData<Record<string, any>[]>(env, "/internal/traffic/server-rank", { start, end, limit: 100 });
       if (aeRows?.length) {
-        const ids = aeRows.map(row => Number(row.server_id)).filter(Boolean);
-        const names = ids.length ? await env.XBOARD_DB.prepare(`SELECT id, name FROM v2_server WHERE id IN (${ids.map(() => "?").join(",")})`).bind(...ids).all<{ id: number; name: string }>() : { results: [] as { id: number; name: string }[] };
+        const ids = [...new Set(aeRows.map(row => Number(row.server_id)).filter(Boolean))];
+        const names = ids.length ? await env.XBOARD_DB.prepare(`SELECT s.id, COALESCE(parent.name, s.name) AS name
+          FROM v2_server s LEFT JOIN v2_server parent ON parent.id = s.parent_id
+          WHERE s.id IN (${ids.map(() => "?").join(",")})`).bind(...ids).all<{ id: number; name: string }>() : { results: [] as { id: number; name: string }[] };
         const byId = new Map((names.results || []).map(row => [Number(row.id), row.name]));
         return ok(aeRows.map(row => ({ server_name: byId.get(Number(row.server_id)) || `Node ${row.server_id}`, server_id: Number(row.server_id), server_type: row.server_type, u: Number(row.u || 0), d: Number(row.d || 0), total: Number(row.total || 0) })));
       }

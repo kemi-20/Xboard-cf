@@ -57,6 +57,7 @@ export class TrafficStatsHub {
   private state: DurableObjectState;
   private env: TrafficStatsEnv;
   private dayPromises = new Map<number, Promise<void>>();
+  private flushChain: Promise<void> = Promise.resolve();
 
   constructor(state: DurableObjectState, env: TrafficStatsEnv) {
     this.state = state;
@@ -130,6 +131,12 @@ export class TrafficStatsHub {
   }
 
   private async flushBuckets(force = false) {
+    const run = this.flushChain.then(() => this.flushBucketsNow(force));
+    this.flushChain = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  private async flushBucketsNow(force = false) {
     const cutoff = force ? Number.MAX_SAFE_INTEGER : Math.floor(now() / FIVE_MINUTES) * FIVE_MINUTES;
     const buckets = await this.state.storage.list<BucketState>({ prefix: "bucket:" });
     let flushed = 0;

@@ -58,6 +58,8 @@ test("traffic statistics use one-row Outbox batches and a global durable aggrega
   assert.match(hub, /bucket:/);
   assert.match(hub, /now\(\) - last >= 3600/);
   assert.match(hub, /input\.force === true/);
+  assert.match(hub, /private flushChain: Promise<void> = Promise\.resolve\(\)/);
+  assert.match(hub, /const run = this\.flushChain\.then\(\(\) => this\.flushBucketsNow\(force\)\)/);
   assert.match(wrangler, /name = "TRAFFIC_STATS_HUB"/);
   assert.match(wrangler, /dataset = "xboard_user_traffic"/);
   assert.match(source, /async function backfillTrafficAnalytics/);
@@ -95,6 +97,38 @@ test("TrafficStatsHub deduplicates a retried batch and updates only involved use
   assert.equal(values.get("daily:total:1000"), 30);
   assert.equal([...values.keys()].filter(key => key.startsWith("daily:user:1000:")).length, 1);
   assert.equal(points.length, 0);
+});
+
+test("TrafficStatsHub does not emit the same bucket during concurrent flush requests", async () => {
+  const values = new Map([["bucket:300", {
+    users: { "1:2:vless": { userId: 1, serverId: 2, serverType: "vless", u: 10, d: 20, rate: 1, events: 1 } },
+    servers: { "2:vless": { serverId: 2, serverType: "vless", u: 10, d: 20, events: 1 } }
+  }]]);
+  let listCalls = 0;
+  const storage = {
+    async get(key) { return values.get(key); },
+    async put(key, value) { values.set(key, value); },
+    async delete(key) { return values.delete(key); },
+    async list(options = {}) {
+      const snapshot = new Map([...values].filter(([key]) => !options.prefix || key.startsWith(options.prefix)));
+      listCalls++;
+      if (listCalls === 1) await new Promise(resolve => setTimeout(resolve, 20));
+      return snapshot;
+    },
+    async setAlarm() {}
+  };
+  const points = [];
+  const hub = new TrafficStatsHub({ storage }, {
+    XBOARD_DB: {},
+    USER_TRAFFIC_ANALYTICS: { writeDataPoint: point => points.push(point) },
+    SERVER_TRAFFIC_ANALYTICS: { writeDataPoint: point => points.push(point) }
+  });
+  await Promise.all([
+    hub.fetch(new Request("https://hub/flush", { method: "POST" })),
+    hub.fetch(new Request("https://hub/flush", { method: "POST" }))
+  ]);
+  assert.equal(points.length, 2);
+  assert.equal(values.has("bucket:300"), false);
 });
 
 test("mail templates override fallbacks and provider credentials stay protocol-specific", () => {
