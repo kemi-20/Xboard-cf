@@ -462,12 +462,21 @@ test("storage optimization removes write-heavy unused traffic indexes", () => {
   assert.match(schema, /idx_v2_job_logs_failed_time ON v2_job_logs\(updated_at, created_at\) WHERE status = 'failed'/);
 });
 
-test("edge database requests use a first-primary D1 session", () => {
+test("edge database requests default to primary and only audited guest reads use an unconstrained session", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   const db = fs.readFileSync("src/db.ts", "utf8");
   assert.match(db, /db\.withSession\("first-primary"\)/);
+  assert.match(db, /db\.withSession\("first-unconstrained"\)/);
   assert.match(source, /XBOARD_DB: primaryDatabase\(env\.XBOARD_DB\)/);
-  assert.doesNotMatch(source, /withSession\("first-unconstrained"\)/);
+  assert.match(source, /PUBLIC_READ_DB: unconstrainedDatabase\(env\.XBOARD_DB\)/);
+  const guest = source.slice(source.indexOf("async function guestApi"), source.indexOf("async function clientUser"));
+  assert.match(guest, /request\.method === "GET" && path === "\/api\/v1\/guest\/plan\/fetch"/);
+  assert.match(guest, /request\.method === "GET" && path === "\/api\/v1\/guest\/comm\/config"/);
+  assert.equal((guest.match(/const readEnv = env\.PUBLIC_READ_DB/g) || []).length, 1);
+  assert.equal((guest.match(/const readDb = env\.PUBLIC_READ_DB/g) || []).length, 1);
+  assert.match(guest, /SETTINGS_MEMORY_SCOPE: "public"/);
+  assert.match(db, /settingsCaches = new Map/);
+  assert.match(db, /settingsPromises = new Map/);
 });
 
 test("revenue overview reads the migrated daily statistics table", () => {

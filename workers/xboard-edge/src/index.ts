@@ -1,13 +1,23 @@
 import type { D1Database, D1PreparedStatement, ExecutionContext, Fetcher, KVNamespace, Queue } from "./types";
 import { body, fail, json, now, ok, randomString, token, uuid } from "./compat";
 import { createSession, currentUser, hashPassword, sessionTokenDigest, verifyPassword } from "./auth";
-import { invalidateSettingsCache, list, primaryDatabase, rows, settings } from "./db";
+import { invalidateSettingsCache, list, primaryDatabase, rows, settings, unconstrainedDatabase } from "./db";
 import { bump } from "./kv";
 import { handleAdminGiftCard, handleUserGiftCard } from "./gift-card";
 import { authorizeMigration, handleAdminMigration } from "./migration";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
-export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; ASSETS: Fetcher; XBOARD_SERVER: Fetcher; XBOARD_SUBSCRIPTION: Fetcher; MAIL_EVENTS: Queue; TELEGRAM_EVENTS: Queue; }
+export interface Env {
+  XBOARD_DB: D1Database;
+  XBOARD_KV: KVNamespace;
+  ASSETS: Fetcher;
+  XBOARD_SERVER: Fetcher;
+  XBOARD_SUBSCRIPTION: Fetcher;
+  MAIL_EVENTS: Queue;
+  TELEGRAM_EVENTS: Queue;
+  PUBLIC_READ_DB?: D1Database;
+  SETTINGS_MEMORY_SCOPE?: string;
+}
 
 const responseDataCache = new Map<string, { value: unknown; expiresAt: number }>();
 let storageOptimizationReady = false;
@@ -1013,10 +1023,12 @@ async function guestApi(request: Request, env: Env, path: string) {
     return ok(true);
   }
   if (request.method === "GET" && path === "/api/v1/guest/plan/fetch") {
-    return ok((await publicPlanRows(request, env)).filter(row => Number(row.show) === 1 && Number(row.sell) === 1));
+    const readEnv = env.PUBLIC_READ_DB ? { ...env, XBOARD_DB: env.PUBLIC_READ_DB, SETTINGS_MEMORY_SCOPE: "public" } : env;
+    return ok((await publicPlanRows(request, readEnv)).filter(row => Number(row.show) === 1 && Number(row.sell) === 1));
   }
   if (request.method === "GET" && path === "/api/v1/guest/comm/config") {
-    const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
+    const readDb = env.PUBLIC_READ_DB || env.XBOARD_DB;
+    const all = await settings(readDb, env.XBOARD_KV, env.PUBLIC_READ_DB ? "public" : "primary");
     return ok({
       tos_url: pickSetting(all, "tos_url", ""),
       is_email_verify: Number(Boolean(pickSetting(all, "email_verify", 0))),
@@ -1550,7 +1562,7 @@ function requestLanguage(request: Request) {
 }
 
 async function publicPlanRows(request: Request, env: Env) {
-  const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
+  const all = await settings(env.XBOARD_DB, env.XBOARD_KV, env.SETTINGS_MEMORY_SCOPE || "primary");
   const language = requestLanguage(request);
   const text = {
     en: { unlimited: "No Limit", soldOut: "Sold out", reset: ["First Day of Month", "Monthly", "Never", "First Day of Year", "Yearly"] },
@@ -4619,7 +4631,11 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const apiRequest = new URL(request.url).pathname.startsWith("/api/");
     if (apiRequest && request.method === "OPTIONS") return corsResponse(new Response(null, { status: 204 }));
-    const sessionEnv = { ...env, XBOARD_DB: primaryDatabase(env.XBOARD_DB) };
+    const sessionEnv = {
+      ...env,
+      XBOARD_DB: primaryDatabase(env.XBOARD_DB),
+      PUBLIC_READ_DB: unconstrainedDatabase(env.XBOARD_DB)
+    };
     const response = await edgeFetch(request, sessionEnv, ctx);
     return apiRequest ? corsResponse(response) : response;
   }

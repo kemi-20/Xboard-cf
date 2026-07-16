@@ -2,16 +2,21 @@ import type { D1Database, KVNamespace } from "./types";
 export function primaryDatabase(db: D1Database) {
   return db.withSession("first-primary");
 }
+
+export function unconstrainedDatabase(db: D1Database) {
+  return db.withSession("first-unconstrained");
+}
 const SETTINGS_CACHE_TTL_MS = 300_000;
 const SETTINGS_VERSION_CHECK_MS = 30_000;
 const SETTINGS_SNAPSHOT_TTL_SECONDS = 86_400;
 const SETTINGS_CACHE_SCOPE = "edge";
-let settingsCache: { value: Record<string, unknown>; version: string; expiresAt: number; versionCheckedAt: number } | null = null;
-let settingsPromise: Promise<Record<string, unknown>> | null = null;
+type SettingsCache = { value: Record<string, unknown>; version: string; expiresAt: number; versionCheckedAt: number };
+const settingsCaches = new Map<string, SettingsCache>();
+const settingsPromises = new Map<string, Promise<Record<string, unknown>>>();
 
 export function invalidateSettingsCache() {
-  settingsCache = null;
-  settingsPromise = null;
+  settingsCaches.clear();
+  settingsPromises.clear();
 }
 export function parseSettingValue(value: unknown) {
   if (value === null || value === undefined) return value;
@@ -43,9 +48,11 @@ export async function rows(db: D1Database, table: string, limit = 500) {
   }
   return result.results || [];
 }
-export async function settings(db: D1Database, kv?: KVNamespace) {
+export async function settings(db: D1Database, kv?: KVNamespace, memoryScope = "primary") {
   const current = Date.now();
+  let settingsCache = settingsCaches.get(memoryScope) || null;
   if (settingsCache && settingsCache.expiresAt > current && (!kv || current - settingsCache.versionCheckedAt < SETTINGS_VERSION_CHECK_MS)) return settingsCache.value;
+  let settingsPromise = settingsPromises.get(memoryScope);
   if (!settingsPromise) {
     settingsPromise = (async () => {
       let version = settingsCache?.version || "0";
@@ -69,6 +76,7 @@ export async function settings(db: D1Database, kv?: KVNamespace) {
           if (snapshot) {
             const value = JSON.parse(snapshot) as Record<string, unknown>;
             settingsCache = { value, version, expiresAt: Date.now() + SETTINGS_CACHE_TTL_MS, versionCheckedAt: Date.now() };
+            settingsCaches.set(memoryScope, settingsCache);
             return value;
           }
         } catch {}
@@ -76,12 +84,14 @@ export async function settings(db: D1Database, kv?: KVNamespace) {
       const rows = await db.prepare("SELECT name, value FROM v2_settings").all<{ name: string; value: string }>();
       const value = Object.fromEntries((rows.results || []).map(r => [r.name, parseSettingValue(r.value)]));
       settingsCache = { value, version, expiresAt: Date.now() + SETTINGS_CACHE_TTL_MS, versionCheckedAt: Date.now() };
+      settingsCaches.set(memoryScope, settingsCache);
       if (availableKv) {
         try { await availableKv.put(snapshotKey, JSON.stringify(value), { expirationTtl: SETTINGS_SNAPSHOT_TTL_SECONDS }); } catch {}
       }
       return value;
     })()
-      .finally(() => { settingsPromise = null; });
+      .finally(() => { settingsPromises.delete(memoryScope); });
+    settingsPromises.set(memoryScope, settingsPromise);
   }
   return settingsPromise;
 }
