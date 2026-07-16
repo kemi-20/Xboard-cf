@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { OFFICIAL_HTTP_ROUTES, OFFICIAL_WS_EVENTS } from "../src/contracts.ts";
-import { appendMachineHistory, REGISTERED_HTTP_ROUTES, StatusHub } from "../src/index.ts";
+import { appendMachineHistory, normalizeOnlineCounts, REGISTERED_HTTP_ROUTES, StatusHub } from "../src/index.ts";
 import { invalidateSettingsCache, settings } from "../src/db.ts";
 
 test("xboard-server has an entrypoint", () => {
@@ -292,8 +292,10 @@ test("websocket device state follows the official per-IP contract", () => {
 test("HTTP reports retain per-user online connections and clear empty snapshots", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /input\.online && typeof input\.online === "object"/);
-  assert.match(source, /runtime\.connections = input\.online/);
-  assert.match(source, /runtime\.connections_at = now\(\)/);
+  assert.match(source, /runtime\.connections = onlineCounts/);
+  assert.match(source, /await refreshOnlineUsers\(env, onlineCounts, reportedAt\)/);
+  assert.match(source, /COALESCE\(last_online_at, 0\) < \?/);
+  assert.deepEqual(normalizeOnlineCounts({ "1": 2, "2": "3", "3": 0, bad: 4, "-1": 5 }), { "1": 2, "2": 3 });
 });
 
 test("HTTP and websocket database work use request-scoped first-primary sessions", () => {

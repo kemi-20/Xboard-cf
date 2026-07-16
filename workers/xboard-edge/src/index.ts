@@ -1749,13 +1749,20 @@ async function liveDeviceSnapshot(env: Env): Promise<Record<string, string[]> | 
   } catch { /* Connection reports below can still provide a live fallback. */ }
   const runtime = await statusSnapshot(env);
   const cutoff = now() - 900;
+  const connectionCounts: Record<string, number> = {};
   for (const node of Object.values(runtime.nodes || {})) {
     const connectionsAt = Number(node.connections_at || node.updated_at || 0);
     if (connectionsAt < cutoff || !node.connections || typeof node.connections !== "object" || Array.isArray(node.connections)) continue;
     available = true;
     for (const [userId, count] of Object.entries(node.connections)) {
-      if (Number(count || 0) > 0 && !value[userId]?.length) value[userId] = ["__active_connection__"];
+      const online = Math.max(0, Math.trunc(Number(count || 0)));
+      if (online > 0) connectionCounts[userId] = Number(connectionCounts[userId] || 0) + online;
     }
+  }
+  for (const [userId, count] of Object.entries(connectionCounts)) {
+    const current = value[userId] || [];
+    const missing = Math.max(0, count - current.length);
+    if (missing) value[userId] = [...current, ...Array.from({ length: missing }, (_, index) => `__active_connection__:${index}`)];
   }
   if (!available) return null;
   liveDeviceSnapshotCache = { value, expiresAt: Date.now() + 10_000 };

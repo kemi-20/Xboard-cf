@@ -282,6 +282,27 @@ async function processAlive(env: Env, nodeId: number, data: unknown, replaceNode
   return true;
 }
 
+export function normalizeOnlineCounts(data: unknown) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return {};
+  const counts: Record<string, number> = {};
+  for (const [userId, count] of Object.entries(data as Row)) {
+    const value = Math.trunc(Number(count));
+    if (/^\d+$/.test(userId) && Number(userId) > 0 && Number.isFinite(value) && value > 0) counts[userId] = value;
+  }
+  return counts;
+}
+
+async function refreshOnlineUsers(env: Env, counts: Record<string, number>, timestamp: number) {
+  const statements = Object.entries(counts).map(([userId, count]) =>
+    env.XBOARD_DB.prepare(`UPDATE v2_user
+      SET online_count = CASE WHEN COALESCE(online_count, 0) > ? THEN online_count ELSE ? END,
+          last_online_at = ?
+      WHERE id = ? AND (COALESCE(online_count, 0) < ? OR COALESCE(last_online_at, 0) < ?)`)
+      .bind(count, count, timestamp, Number(userId), count, timestamp - 480)
+  );
+  if (statements.length) await env.XBOARD_DB.batch(statements);
+}
+
 async function aggregateDevices(env: Env, users: Row[], limitedOnly = false) {
   const userIds = users.filter(user => !limitedOnly || Number(user.device_limit || 0) > 0).map(user => Number(user.id)).filter(Boolean);
   if (!userIds.length) return {};
@@ -1083,9 +1104,12 @@ routes.set("POST /api/v2/server/report", async (_request, env, input) => {
     runtime.last_push_at = now();
     runtime.online = trafficCount;
   }
+  const onlineCounts = normalizeOnlineCounts(input.online);
   if (input.online && typeof input.online === "object" && !Array.isArray(input.online)) {
-    runtime.connections = input.online;
-    runtime.connections_at = now();
+    const reportedAt = now();
+    runtime.connections = onlineCounts;
+    runtime.connections_at = reportedAt;
+    await refreshOnlineUsers(env, onlineCounts, reportedAt);
   }
   const load = nonEmptyArrayLike(input.status) ? statusState(input.status) : null;
   const metricValues = nonEmptyArrayLike(input.metrics) ? metricsState(input.metrics) : null;

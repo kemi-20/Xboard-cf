@@ -1070,6 +1070,8 @@ test("GLM compatibility audit fixes preserve upstream mutations and envelopes", 
 test("admin online state prefers StatusHub with a D1 fallback", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /statusHubRequest\(env, "devices\/list"/);
+  assert.match(source, /connectionCounts\[userId\].*\+ online/);
+  assert.match(source, /count - current\.length/);
   assert.match(source, /liveDevices === null \? Number\(row\.online_count \|\| 0\)/);
   assert.match(source, /last_online_at: liveDevices\?\.\[String\(row\.id\)\]\?\.length \? now\(\) : row\.last_online_at/);
   assert.match(source, /onlineUsers: liveOnline\?\.users \?\?/);
