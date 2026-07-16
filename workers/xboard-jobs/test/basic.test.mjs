@@ -60,6 +60,9 @@ test("traffic statistics use one-row Outbox batches and a global durable aggrega
   assert.match(hub, /input\.force === true/);
   assert.match(wrangler, /name = "TRAFFIC_STATS_HUB"/);
   assert.match(wrangler, /dataset = "xboard_user_traffic"/);
+  assert.match(source, /async function backfillTrafficAnalytics/);
+  assert.match(source, /"d1_backfill"/);
+  assert.match(source, /boundedLimit = Math\.min\(20/);
   const first = await __test.stableBatchId(["b", "a"]);
   const second = await __test.stableBatchId(["a", "b"]);
   assert.equal(first, second);

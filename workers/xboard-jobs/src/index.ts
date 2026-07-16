@@ -94,6 +94,66 @@ async function materializeTraffic(env: Env, recordAt?: number, force = false) {
   return response.json();
 }
 
+async function saveSetting(env: Env, name: string, value: string) {
+  const ts = now();
+  await env.XBOARD_DB.prepare(`INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES (?, ?, ?, ?)
+    ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`)
+    .bind(name, value, ts, ts).run();
+}
+
+async function backfillTrafficAnalytics(env: Env, dataset: "user" | "server", limit: number) {
+  await ensureTrafficDedupSchema(env);
+  const boundedLimit = Math.min(20, Math.max(1, Math.trunc(limit || 20)));
+  const cutoverRow = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = 'analytics_cutover_at'").first<{ value: string }>();
+  const cutoff = dayStart(Number(cutoverRow?.value || now()));
+  const cursorName = `analytics_backfill_${dataset}_cursor`;
+  const completedRow = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = ?").bind(`analytics_backfill_${dataset}_completed_at`).first<{ value: string }>();
+  if (completedRow?.value) return { dataset, migrated: 0, cursor: 0, cutoff, done: true };
+  const cursorRow = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = ?").bind(cursorName).first<{ value: string }>();
+  const cursor = Number(cursorRow?.value || 0);
+  const table = dataset === "user" ? "v2_stat_user" : "v2_stat_server";
+  const rows = await env.XBOARD_DB.prepare(`SELECT * FROM ${table} WHERE id > ? AND record_at < ? AND COALESCE(record_type, 'd') = 'd' ORDER BY id ASC LIMIT ?`)
+    .bind(cursor, cutoff, boundedLimit).all<Record<string, any>>();
+  let nextCursor = cursor;
+  for (const row of rows.results || []) {
+    const recordAt = Number(row.record_at || 0);
+    const recordDay = new Date(recordAt * 1000).toISOString().slice(0, 10);
+    const serverType = String(row.server_type || "unknown");
+    const serverId = Number(row.server_id || 0);
+    if (dataset === "user") {
+      env.USER_TRAFFIC_ANALYTICS.writeDataPoint({
+        indexes: [`user:${Number(row.user_id || 0)}`],
+        blobs: [serverType, String(serverId), recordDay, "d1_backfill", "1"],
+        doubles: [Number(row.u || 0), Number(row.d || 0), Number(row.server_rate ?? row.rate ?? 1), 1, recordAt]
+      });
+    } else {
+      env.SERVER_TRAFFIC_ANALYTICS.writeDataPoint({
+        indexes: [`server:${serverType}:${serverId}`],
+        blobs: [serverType, String(serverId), recordDay, "1"],
+        doubles: [Number(row.u || 0), Number(row.d || 0), 1, recordAt]
+      });
+    }
+    nextCursor = Number(row.id);
+  }
+  if (nextCursor !== cursor) await saveSetting(env, cursorName, String(nextCursor));
+  const done = (rows.results || []).length < boundedLimit;
+  if (done) {
+    await saveSetting(env, `analytics_backfill_${dataset}_completed_at`, String(now()));
+    const other = dataset === "user" ? "server" : "user";
+    const otherDone = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = ?").bind(`analytics_backfill_${other}_completed_at`).first<{ value: string }>();
+    if (otherDone?.value) {
+      const range = await env.XBOARD_DB.prepare(`SELECT MIN(record_at) AS oldest FROM (
+        SELECT record_at FROM v2_stat_user WHERE record_at < ?
+        UNION ALL SELECT record_at FROM v2_stat_server WHERE record_at < ?
+      )`).bind(cutoff, cutoff).first<{ oldest: number }>();
+      await saveSetting(env, "analytics_backfill_start", String(Number(range?.oldest || cutoff)));
+      await saveSetting(env, "analytics_backfill_end", String(cutoff));
+      await saveSetting(env, "analytics_backfill_completed_at", String(now()));
+    }
+  }
+  return { dataset, migrated: (rows.results || []).length, cursor: nextCursor, cutoff, done };
+}
+
 function dayStart(ts = now()) {
   return Math.floor((ts + SHANGHAI_OFFSET) / 86400) * 86400 - SHANGHAI_OFFSET;
 }
@@ -495,6 +555,11 @@ export default {
       await env.XBOARD_DB.prepare("DELETE FROM v2_traffic_stats_outbox").run();
       const response = await trafficStatsStub(env).fetch("https://traffic-stats.internal/reset", { method: "POST" });
       return new Response(response.body, response);
+    }
+    if (request.method === "POST" && path === "/internal/analytics/backfill") {
+      const url = new URL(request.url);
+      const dataset = url.searchParams.get("dataset") === "server" ? "server" : "user";
+      return ok(await backfillTrafficAnalytics(env, dataset, Number(url.searchParams.get("limit") || 20)));
     }
     return ok({ service: "xboard-jobs", time: now() });
   },

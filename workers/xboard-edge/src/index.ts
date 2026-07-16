@@ -23,7 +23,7 @@ export interface Env {
 
 const responseDataCache = new Map<string, { value: unknown; expiresAt: number }>();
 let storageOptimizationReady = false;
-let analyticsCutoverCache: { value: number; expiresAt: number } | null = null;
+let analyticsCutoverCache: { live: number; backfillStart: number; backfillEnd: number; expiresAt: number } | null = null;
 let trafficMaterializedAt = 0;
 
 async function cachedData<T>(key: string, ttlSeconds: number, loader: () => Promise<T>): Promise<T> {
@@ -55,11 +55,21 @@ async function cachedData<T>(key: string, ttlSeconds: number, loader: () => Prom
 }
 
 async function analyticsCutover(env: Env) {
-  if (analyticsCutoverCache && analyticsCutoverCache.expiresAt > Date.now()) return analyticsCutoverCache.value;
-  const row = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = 'analytics_cutover_at'").first<{ value: string }>();
-  const value = Number(row?.value || Number.MAX_SAFE_INTEGER);
-  analyticsCutoverCache = { value, expiresAt: Date.now() + 300_000 };
-  return value;
+  if (analyticsCutoverCache && analyticsCutoverCache.expiresAt > Date.now()) return analyticsCutoverCache;
+  const rows = await env.XBOARD_DB.prepare("SELECT name, value FROM v2_settings WHERE name IN ('analytics_cutover_at','analytics_backfill_start','analytics_backfill_end')").all<{ name: string; value: string }>();
+  const values = Object.fromEntries((rows.results || []).map(row => [row.name, Number(row.value || 0)]));
+  analyticsCutoverCache = {
+    live: Number(values.analytics_cutover_at || Number.MAX_SAFE_INTEGER),
+    backfillStart: Number(values.analytics_backfill_start || 0),
+    backfillEnd: Number(values.analytics_backfill_end || 0),
+    expiresAt: Date.now() + 300_000
+  };
+  return analyticsCutoverCache;
+}
+
+async function analyticsRangeAvailable(env: Env, start: number, end: number) {
+  const coverage = await analyticsCutover(env);
+  return start >= coverage.live || (coverage.backfillStart > 0 && start >= coverage.backfillStart && end <= coverage.backfillEnd);
 }
 
 async function analyticsData<T>(env: Env, path: string, input: Record<string, unknown>): Promise<T | null> {
@@ -235,6 +245,7 @@ const adminRouteMethods: Record<string, string[]> = {
   "/payment/fetch": ["GET"], "/payment/getPaymentMethods": ["GET"], "/payment/getPaymentForm": ["POST"], "/payment/save": ["POST"], "/payment/drop": ["POST"], "/payment/show": ["POST"], "/payment/sort": ["POST"],
   "/system/getSystemStatus": ["GET"], "/system/getQueueStats": ["GET"], "/system/getQueueWorkload": ["GET"], "/system/getQueueMasters": ["GET"],
   "/system/getHorizonFailedJobs": ["GET"], "/system/getAuditLog": ["GET", "POST"],
+  "/system/backfillAnalytics": ["POST"],
   "/theme/getThemes": ["GET"], "/theme/upload": ["POST"], "/theme/delete": ["POST"], "/theme/saveThemeConfig": ["POST"], "/theme/getThemeConfig": ["POST"],
   "/plugin/types": ["GET"], "/plugin/getPlugins": ["GET"], "/plugin/upload": ["POST"], "/plugin/delete": ["POST"], "/plugin/install": ["POST"],
   "/plugin/uninstall": ["POST"], "/plugin/enable": ["POST"], "/plugin/disable": ["POST"], "/plugin/config": ["GET", "POST"], "/plugin/upgrade": ["POST"],
@@ -1401,7 +1412,7 @@ async function trafficRank(env: Env, url: URL) {
   const calculateChange = (value: number, previousValue: number) => previousValue > 0
     ? Math.round(((value - previousValue) / previousValue) * 1000) / 10
     : 0;
-  if (start >= await analyticsCutover(env)) {
+  if (await analyticsRangeAvailable(env, previousStart, end)) {
     const route = type === "node" ? "/internal/traffic/server-rank" : "/internal/traffic/rank";
     const rows = await analyticsData<Record<string, any>[]>(env, route, { start, end, previous_start: previousStart, limit: 10 });
     if (rows?.length) {
@@ -3329,6 +3340,23 @@ async function adminApi(request: Request, env: Env, path: string) {
   }
   if (!admin) return fail("未授权", 401, 401);
   const response = await (async () => {
+  if (request.method === "POST" && route === "/system/backfillAnalytics") {
+    const callJobs = async (dataset: "user" | "server") => {
+      const response = await env.XBOARD_JOBS.fetch(`https://xboard-jobs.internal/internal/analytics/backfill?dataset=${dataset}&limit=20`, { method: "POST" });
+      if (!response.ok) throw new Error(`Traffic analytics backfill failed (${response.status})`);
+      const payload = await response.json() as { data?: Record<string, unknown> };
+      return payload.data || {};
+    };
+    const user = await callJobs("user");
+    const server = await callJobs("server");
+    const runtimeResponse = await statusHubRequest(env, "history/backfill", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ limit: 20 })
+    });
+    if (!runtimeResponse.ok) throw new Error(`Runtime analytics backfill failed (${runtimeResponse.status})`);
+    const runtimePayload = await runtimeResponse.json() as { data?: Record<string, unknown> };
+    analyticsCutoverCache = null;
+    return ok({ user, server, runtime: runtimePayload.data || {} });
+  }
   const migrationResponse = await handleAdminMigration(request.clone(), env, route, Number((admin as any).id || 0));
   if (migrationResponse) return migrationResponse;
   const giftCardResponse = await handleAdminGiftCard(request.clone(), env.XBOARD_DB, route, Number((admin as any).id || 0));
@@ -3453,7 +3481,7 @@ async function adminApi(request: Request, env: Env, path: string) {
   if (request.method === "GET" && (route === "/stat/getServerLastRank" || route === "/stat/getServerYesterdayRank")) {
     const start = route.endsWith("YesterdayRank") ? dayStart() - 86400 : 0;
     const end = route.endsWith("YesterdayRank") ? dayStart() : dayStart() + 172800;
-    if (start >= await analyticsCutover(env)) {
+    if (await analyticsRangeAvailable(env, start, end)) {
       const aeRows = await analyticsData<Record<string, any>[]>(env, "/internal/traffic/server-rank", { start, end, limit: 100 });
       if (aeRows?.length) {
         const ids = aeRows.map(row => Number(row.server_id)).filter(Boolean);
@@ -3495,7 +3523,7 @@ async function adminApi(request: Request, env: Env, path: string) {
     const start = Number(url.searchParams.get("start_time") || 0);
     const end = Number(url.searchParams.get("end_time") || now());
     if (type === "server_traffic_rank") {
-      if (start >= await analyticsCutover(env)) {
+      if (await analyticsRangeAvailable(env, start, end)) {
         const aeRows = await analyticsData<Record<string, any>[]>(env, "/internal/traffic/server-rank", { start, end, limit });
         if (aeRows?.length) return ok(aeRows);
       }
@@ -3509,7 +3537,7 @@ async function adminApi(request: Request, env: Env, path: string) {
       return ok(result.results || []);
     }
     if (type !== "user_consumption_rank") return fail("统计类型无效", 422, 422);
-    if (start >= await analyticsCutover(env)) {
+    if (await analyticsRangeAvailable(env, start, end)) {
       const aeRows = await analyticsData<Record<string, any>[]>(env, "/internal/traffic/rank", { start, end, limit });
       if (aeRows?.length) {
         const ids = aeRows.map(row => Number(row.user_id)).filter(Boolean);

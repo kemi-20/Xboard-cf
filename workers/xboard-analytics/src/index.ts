@@ -42,7 +42,7 @@ function queryFor(kind: QueryKind, input: JsonRow) {
     const filter = entityId ? ` AND index1 = '${index}'` : "";
     return `SELECT intDiv(toUInt32(${timeField}), ${interval}) * ${interval} AS bucket, SUM(double1) AS u, SUM(double2) AS d FROM ${dataset} WHERE ${timeField} >= ${start} AND ${timeField} < ${end}${filter} GROUP BY bucket ORDER BY bucket ASC`;
   }
-  if (kind === "runtime-load") return `SELECT double9 AS recorded_at, double1 AS cpu, double10 AS mem_total, double2 AS mem_used, double11 AS disk_total, double3 AS disk_used, double4 AS net_in_speed, double5 AS net_out_speed, double6 AS connections, double7 AS online_users, double8 AS latency FROM ${DATASETS.runtime} WHERE index1 = 'machine:${entityId}' AND blob1 = 'load' AND double9 >= ${start} AND double9 < ${end} ORDER BY recorded_at DESC LIMIT ${Math.min(1000, limit)}`;
+  if (kind === "runtime-load") return `SELECT double9 AS recorded_at, max(double1) AS cpu, max(double10) AS mem_total, max(double2) AS mem_used, max(double11) AS disk_total, max(double3) AS disk_used, max(double4) AS net_in_speed, max(double5) AS net_out_speed, max(double6) AS connections, max(double7) AS online_users, max(double8) AS latency FROM ${DATASETS.runtime} WHERE index1 = 'machine:${entityId}' AND blob1 = 'load' AND double9 >= ${start} AND double9 < ${end} GROUP BY recorded_at ORDER BY recorded_at DESC LIMIT ${Math.min(1000, limit)}`;
   return `SELECT index1 AS entity, blob1 AS metric_type, double6 AS connections, double7 AS online_users, double8 AS latency, double9 AS recorded_at FROM ${DATASETS.runtime} WHERE double9 >= ${start} AND double9 < ${end} ORDER BY recorded_at DESC LIMIT ${limit}`;
 }
 

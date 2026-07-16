@@ -402,6 +402,8 @@ test("machine load history matches the upstream chart contract", () => {
   assert.match(source, /for \(const row of aeRows \|\| \[\]\)/);
   assert.match(source, /\.sort\(\(left, right\) => Number\(left\.recorded_at \|\| 0\) - Number\(right\.recorded_at \|\| 0\)\)/);
   assert.match(source, /return adminMachineHistory\(env, new URL\(request\.url\)\)/);
+  assert.match(source, /"\/system\/backfillAnalytics": \["POST"\]/);
+  assert.match(source, /history\/backfill/);
 });
 
 test("login sessions fall back to D1 when KV writes fail", () => {

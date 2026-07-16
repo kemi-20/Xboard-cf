@@ -86,7 +86,7 @@ Worker 之间没有依赖仓库根目录的共享运行时代码，因此 Cloudf
 | Queue | `mail-events-dlq` | 邮件任务连续失败 5 次后的死信队列 |
 | Queue | `telegram-events-dlq` | Telegram 任务连续失败 5 次后的死信队列 |
 | Durable Object | `NodeHub` / `NODE_HUB` | 节点和机器 WebSocket 连接、同步事件与休眠连接管理 |
-| Durable Object | `StatusHub` / `STATUS_HUB` | 全局节点与机器实时状态、设备状态及 24 小时负载采样 |
+| Durable Object | `StatusHub` / `STATUS_HUB` | 全局节点与机器实时状态及设备状态；不再重复持久化负载趋势 |
 | Durable Object | `TrafficStatsHub` / `TRAFFIC_STATS_HUB` | 全局流量批次去重、16 分片日聚合、五分钟 AE 桶和绝对值物化 |
 | Analytics Engine | `xboard_user_traffic` / `USER_TRAFFIC_ANALYTICS` | 用户流量趋势和排行 |
 | Analytics Engine | `xboard_server_traffic` / `SERVER_TRAFFIC_ANALYTICS` | 服务器流量趋势和排行 |
@@ -94,7 +94,7 @@ Worker 之间没有依赖仓库根目录的共享运行时代码，因此 Cloudf
 | Static Assets | `ASSETS` | `xboard-edge` 托管后台 WebUI、语言包和静态文件 |
 | Service Binding | `XBOARD_SERVER` | `xboard-edge`、`xboard-cron` 调用 `xboard-server` |
 | Service Binding | `XBOARD_SUBSCRIPTION` | `xboard-edge` 转发订阅请求到 `xboard-subscription` |
-| Service Binding | `XBOARD_ANALYTICS` | `xboard-edge` 查询 `xboard-analytics`，失败时回退 D1 或 StatusHub |
+| Service Binding | `XBOARD_ANALYTICS` | `xboard-edge` 查询 `xboard-analytics`；流量分析失败时回退 D1 |
 | Service Binding | `XBOARD_JOBS` | `xboard-edge`、`xboard-cron` 补投 Outbox、物化和重置统计状态 |
 | Queue Producer | `TRAFFIC_EVENTS` | `xboard-server` 写入 `traffic-events` |
 | Queue Producer | `MAIL_EVENTS` | `xboard-edge`、`xboard-cron` 写入 `mail-events` |
@@ -141,12 +141,12 @@ flowchart TB
 
   subgraph Realtime["实时状态与连接协调"]
     NodeHub["NodeHub Durable Object<br/>按 node:{id} / machine:{id} 分片<br/>WebSocket Hibernation / sync.*"]
-    StatusHub["StatusHub Durable Object<br/>单个 global 实例<br/>节点与机器状态 / 设备 / 24h 负载历史"]
+    StatusHub["StatusHub Durable Object<br/>单个 global 实例<br/>节点与机器实时状态 / 设备"]
     TrafficStatsHub["TrafficStatsHub Durable Object<br/>单个 global 实例<br/>批次去重 / 16 分片日聚合 / 五分钟桶"]
   end
 
   Server <-->|"连接与配置热同步"| NodeHub
-  Server <-->|"心跳 / Metrics / 历史查询"| StatusHub
+  Server <-->|"心跳 / Metrics / 设备状态"| StatusHub
   Jobs -->|"Outbox 聚合批次"| TrafficStatsHub
 
   subgraph Queues["异步任务与失败隔离"]
@@ -239,9 +239,9 @@ flowchart TB
 - **Worker isolate 内存缓存**：每个 Worker 实例独立保存设置热缓存并合并并发回源请求；`xboard-edge` 还用它作为 Queue 统计和流量排行的第一级短缓存。实例回收后缓存自然消失，不能保存权威数据。
 - **Cloudflare Cache API**：保存后台 Queue 统计 60 秒、流量排行 30 秒等可重新计算的短时结果，跨请求复用但不增加 KV 写入；未命中或过期时直接重新查询 D1。
 - **NodeHub**：维护节点或机器的 WebSocket 连接及配置、用户热同步。
-- **StatusHub**：保存高频在线状态、设备状态、机器心跳和滚动 24 小时负载采样；运行状态最多每 60 秒持久化一次，设备成员最多每 240 秒持久化一次，负载历史每 300 秒采样一次。
+- **StatusHub**：保存高频在线状态、设备状态和机器心跳；运行状态最多每 60 秒持久化一次，设备成员最多每 240 秒持久化一次。机器负载每 300 秒直接写入 Analytics Engine，不再在 DO 中重复保存趋势数组。
 - **TrafficStatsHub**：单个全局 DO 按 `batch_id` 去重，将用户日状态按 `user_id % 16` 分片，服务器日状态单独聚合；关闭的五分钟桶写入 Analytics Engine，每小时把绝对累计值覆盖回原版 `v2_stat*` 表。
-- **Analytics Engine**：保存趋势、排行和运行指标，不参与余额、限额或用户累计流量判断。查询失败、Token 缺失、超时或请求范围早于 `analytics_cutover_at` 时自动使用 D1/StatusHub，不向前端暴露 AE 错误。
+- **Analytics Engine**：保存趋势、排行和运行指标，不参与余额、限额或用户累计流量判断。流量历史回填范围和 `analytics_cutover_at` 之后的数据优先从 AE 查询，失败时回退 D1；机器负载趋势以 `xboard_runtime` 为持久来源。
 - **Queues**：把高频流量、邮件和 Telegram 任务与 HTTP 请求解耦；连续失败超过重试上限后进入对应 DLQ。
 
 流量事件使用稳定 `event_id` 去重，用户与服务器权威累计、事件幂等、待检查用户和一行 Outbox 在同一个 D1 原子批次内提交。`batch_id` 由排序后的已接受事件 ID 生成，Queue 和 Outbox 重试都不会重复计费或重复聚合。Cloudflare Queue 最多聚合 100 条消息，Jobs Worker 内部按 25 条子批次处理；节点上报按最多 250 个用户拆分事件。同一子批次只产生一行 Outbox，DO 确认后删除；失败则由每分钟 Cron 补投。只有已经达到流量阈值、真正需要复查的用户才写入 `v2_traffic_pending_check`。
@@ -361,9 +361,9 @@ framework/schedule 锁
 
 第 2 步“数据预检”会明确列出无法自动切换的外部服务配置。原版 SMTP/邮件驱动设置、任何邮件服务商凭据、所有插件、插件配置和支付渠道都不会导入或导出；迁移完成后必须在新后台选择 Maileroo 或 Brevo，并手动填写 API Key、发件人邮箱和发件人名称。Telegram 机器人由 Worker 内置实现，不依赖原版插件。所有旧主题和主题配置也会忽略，迁移后固定使用内置 `Xboard` 默认主题。邮件模板、订单等可审计业务历史仍会保留，但真实支付能力不会因此启用。
 
-默认“完整迁入”是真正的全量替换：完成迁移前备份后，先删除 D1 中现有的用户、登录凭据、套餐、权限组、节点、机器、设置、订单、统计、礼品卡及其他业务记录并重置自增序列，再严格按照原版主键导入所选 SQLite 数据。源库不存在或被明确排除的业务数据不会从旧 D1 保留，默认 `admin@admin.com` 也只会在源库本身包含该用户时存在；旧运行日志、待检查任务和负载历史会在成功切换时删除。迁移控制记录和回滚快照在流程结束前会保留，用于中断恢复和审计。“合并”只补充 D1 不存在的数据，主键冲突时保留当前记录，因此结果不保证与源库完全相同。迁移过程中即使原版设置覆盖了后台路径和访问令牌，迁移任务也会使用一次性迁移凭据继续执行；任务完成后该凭据立即失效。
+默认“完整迁入”是真正的全量替换：完成迁移前备份后，先删除 D1 中现有的用户、登录凭据、套餐、权限组、节点、机器、设置、订单、统计、礼品卡及其他业务记录并重置自增序列，再严格按照原版主键导入所选 SQLite 数据。源库不存在或被明确排除的业务数据不会从旧 D1 保留，默认 `admin@admin.com` 也只会在源库本身包含该用户时存在；旧运行日志、待检查任务和旧负载历史会在成功切换时删除，新的机器负载由节点重新上报到 Analytics Engine。迁移控制记录和回滚快照在流程结束前会保留，用于中断恢复和审计。“合并”只补充 D1 不存在的数据，主键冲突时保留当前记录，因此结果不保证与源库完全相同。迁移过程中即使原版设置覆盖了后台路径和访问令牌，迁移任务也会使用一次性迁移凭据继续执行；任务完成后该凭据立即失效。
 
-点击开始迁移后，浏览器默认会先把当前 D1 数据导出为原版兼容的 `xboard-pre-migration-*.db`，下载完成并校验快照行数后才会清理或写入目标数据。迁移源区域提供“跳过完整迁移前备份”选项；启用后仍会强制备份 `v2_user` 和 `personal_access_tokens`，并优先迁移这两张表，但其他业务表不会建立回滚快照，失败时不能一键完整还原。预检仍会显示 `v2_log` 和 `v2_server_machine_load_history` 的源库行数并标记 `(skip)`，但它们不计入迁移进度，也不参与备份、导入或导出；迁移完成后旧运行状态会被清空，节点后续上报会在 `StatusHub` 中重新建立实时状态和 24 小时负载历史。迁移页面还提供“导出当前数据”按钮，可随时生成标准 SQLite3 `xboard-export-*.db`；导出的邮件凭据为空，插件、插件配置和支付配置不导出。
+点击开始迁移后，浏览器默认会先把当前 D1 数据导出为原版兼容的 `xboard-pre-migration-*.db`，下载完成并校验快照行数后才会清理或写入目标数据。迁移源区域提供“跳过完整迁移前备份”选项；启用后仍会强制备份 `v2_user` 和 `personal_access_tokens`，并优先迁移这两张表，但其他业务表不会建立回滚快照，失败时不能一键完整还原。预检仍会显示 `v2_log` 和 `v2_server_machine_load_history` 的源库行数并标记 `(skip)`，但它们不计入迁移进度，也不参与备份、导入或导出；迁移完成后旧运行状态会被清空，节点后续上报会在 `StatusHub` 中重建实时状态，并把五分钟负载采样写入 Analytics Engine。迁移页面还提供“导出当前数据”按钮，可随时生成标准 SQLite3 `xboard-export-*.db`；导出的邮件凭据为空，插件、插件配置和支付配置不导出。
 
 任一批次失败时迁移会立即中止，进度和详细错误以红色显示。只要迁移前快照已经完成，页面会显示“一键还原”，用于清理本次失败写入并恢复迁移前的 D1 数据和本次修改过的 KV 键。
 

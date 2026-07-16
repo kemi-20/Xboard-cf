@@ -17,6 +17,7 @@ test("analytics ranking values normalize to original numeric fields", () => {
 
 test("runtime load selects the latest samples and returns chart order", () => {
   const query = __test.queryFor("runtime-load", { entity_id: 3, start: 100, end: 1000, limit: 60 });
+  assert.match(query, /GROUP BY recorded_at/);
   assert.match(query, /ORDER BY recorded_at DESC LIMIT 60$/);
   assert.deepEqual(__test.normalize("runtime-load", [
     { recorded_at: "900", cpu: "20" },
