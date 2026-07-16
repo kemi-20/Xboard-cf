@@ -393,6 +393,10 @@ CREATE TABLE IF NOT EXISTS v2_traffic_pending_check (
   user_id INTEGER PRIMARY KEY,
   updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS v2_traffic_dedup (
+  event_id TEXT PRIMARY KEY,
+  created_at INTEGER NOT NULL
+) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_v2_job_logs_failed_time ON v2_job_logs(updated_at, created_at) WHERE status = 'failed';
 
 CREATE TABLE IF NOT EXISTS v2_order (

@@ -408,7 +408,7 @@ test("login sessions fall back to D1 when KV writes fail", () => {
 test("bootstrap remains available when the KV daily write limit is exhausted", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /system_bootstrap_edge_version/);
-  assert.match(source, /await optionalKvPut\(env, "bootstrap:edge:v19"/);
+  assert.match(source, /await optionalKvPut\(env, "bootstrap:edge:v20"/);
   assert.doesNotMatch(source, /await env\.XBOARD_KV\.put\("bootstrap:edge:v12"/);
 });
 
@@ -503,7 +503,7 @@ test("complete migration deletes old business data before strict replacement", (
   const source = fs.readFileSync("src/migration.ts", "utf8");
   const page = fs.readFileSync("public/migration/panel.html", "utf8");
   const app = fs.readFileSync("public/migration/app.js", "utf8");
-  assert.match(source, /COMPLETE_RESET_TABLES = \["v2_log", "v2_server_machine_load_history", "v2_job_logs", "v2_traffic_pending_check"\]/);
+  assert.match(source, /COMPLETE_RESET_TABLES = \["v2_log", "v2_server_machine_load_history", "v2_job_logs", "v2_traffic_pending_check", "v2_traffic_dedup"\]/);
   assert.match(source, /DELETE FROM sqlite_sequence WHERE name IN/);
   assert.match(source, /COMPLETE_RESET_TABLES\.map\(\(\) => "\?"\)/);
   assert.match(source, /rollback_progress = \?[\s\S]*DELETE FROM sqlite_sequence WHERE name IN/);

@@ -377,7 +377,8 @@ async function resetLogs(env: Env, ts: number) {
     env.XBOARD_DB.prepare("DELETE FROM v2_stat_server WHERE record_at < ?").bind(monthThreshold(2)),
     env.XBOARD_DB.prepare("DELETE FROM v2_admin_audit_log WHERE created_at < ?").bind(monthThreshold(3)),
     env.XBOARD_DB.prepare("DELETE FROM failed_jobs WHERE failed_at < ?").bind(ts - 7 * 86400),
-    env.XBOARD_DB.prepare("DELETE FROM v2_job_logs WHERE COALESCE(updated_at, created_at) < ?").bind(ts - 7 * 86400)
+    env.XBOARD_DB.prepare("DELETE FROM v2_job_logs WHERE COALESCE(updated_at, created_at) < ?").bind(ts - 7 * 86400),
+    env.XBOARD_DB.prepare("DELETE FROM v2_traffic_dedup WHERE created_at < ?").bind(ts - 7 * 86400)
   ]);
 }
 

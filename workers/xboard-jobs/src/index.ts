@@ -5,6 +5,23 @@ import { settings as loadSettings } from "./db.ts";
 export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; MAILEROO_API_KEY?: string; BREVO_API_KEY?: string; TELEGRAM_BOT_TOKEN?: string; }
 
 const SHANGHAI_OFFSET = 8 * 3600;
+let trafficDedupSchemaReady = false;
+let trafficDedupSchemaPromise: Promise<void> | null = null;
+
+async function ensureTrafficDedupSchema(env: Env) {
+  if (trafficDedupSchemaReady) return;
+  if (!trafficDedupSchemaPromise) {
+    trafficDedupSchemaPromise = env.XBOARD_DB.prepare(`CREATE TABLE IF NOT EXISTS v2_traffic_dedup (
+      event_id TEXT PRIMARY KEY,
+      created_at INTEGER NOT NULL
+    ) WITHOUT ROWID`).run().then(() => {
+      trafficDedupSchemaReady = true;
+    }).finally(() => {
+      trafficDedupSchemaPromise = null;
+    });
+  }
+  await trafficDedupSchemaPromise;
+}
 
 function dayStart(ts = now()) {
   return Math.floor((ts + SHANGHAI_OFFSET) / 86400) * 86400 - SHANGHAI_OFFSET;
@@ -114,13 +131,22 @@ async function runOnce(env: Env, eventId: string, type: string, payload: unknown
 async function trafficCandidates(env: Env, events: any[]) {
   const unique = [...new Map(events.filter(event => event?.event_id).map(event => [String(event.event_id), event])).values()];
   if (!unique.length) return { candidates: [] as any[], staleEventIds: [] as string[] };
+  await ensureTrafficDedupSchema(env);
   const ids = unique.map(event => String(event.event_id));
-  const existing = await env.XBOARD_DB.prepare(`SELECT event_id, status, updated_at FROM v2_job_logs WHERE event_id IN (${ids.map(() => "?").join(",")})`)
-    .bind(...ids).all<{ event_id: string; status: string; updated_at: number }>();
+  const completed = await env.XBOARD_DB.prepare(`SELECT event_id FROM v2_traffic_dedup WHERE event_id IN (${ids.map(() => "?").join(",")})`)
+    .bind(...ids).all<{ event_id: string }>();
+  const completedIds = new Set((completed.results || []).map(row => String(row.event_id)));
+  const legacyIds = ids.filter(id => !completedIds.has(id));
+  const existing = legacyIds.length
+    ? await env.XBOARD_DB.prepare(`SELECT event_id, status, updated_at FROM v2_job_logs WHERE event_id IN (${legacyIds.map(() => "?").join(",")})`)
+      .bind(...legacyIds).all<{ event_id: string; status: string; updated_at: number }>()
+    : { results: [] as { event_id: string; status: string; updated_at: number }[] };
   const rows = new Map((existing.results || []).map(row => [String(row.event_id), row]));
   const staleEventIds: string[] = [];
   const candidates = unique.filter(event => {
-    const row = rows.get(String(event.event_id));
+    const eventId = String(event.event_id);
+    if (completedIds.has(eventId)) return false;
+    const row = rows.get(eventId);
     if (!row) return true;
     if (row.status === "done") return false;
     if (String(row.status || "").startsWith("processing:") && Number(row.updated_at || 0) >= now() - 120) return false;
@@ -226,9 +252,8 @@ async function trafficBatch(env: Env, events: any[]) {
       .bind(recordAt, aggregate.transferUsed, ts, ts));
   }
   for (const event of candidates) {
-    statements.push(env.XBOARD_DB.prepare(`INSERT INTO v2_job_logs(event_id, type, status, payload, error, created_at, updated_at)
-      VALUES (?, 'traffic', 'done', '', NULL, ?, ?)`)
-      .bind(String(event.event_id), ts, ts));
+    statements.push(env.XBOARD_DB.prepare("INSERT INTO v2_traffic_dedup(event_id, created_at) VALUES (?, ?)")
+      .bind(String(event.event_id), ts));
   }
   try {
     await env.XBOARD_DB.batch(statements);
@@ -362,7 +387,7 @@ async function handle(env: Env, event: any) {
   else throw new Error(`Unsupported queue event type: ${String(event.type || "unknown")}`);
 }
 
-export const __test = { dayStart, render, claimEvent, completeClaim, failClaim, aggregateTrafficEvents, trafficEventGroups, traffic, trafficBatch, trafficCandidates };
+export const __test = { dayStart, render, claimEvent, completeClaim, failClaim, ensureTrafficDedupSchema, aggregateTrafficEvents, trafficEventGroups, traffic, trafficBatch, trafficCandidates };
 
 export default {
   async fetch() { return ok({ service: "xboard-jobs", time: now() }); },

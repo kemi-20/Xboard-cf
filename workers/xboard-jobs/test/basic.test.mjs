@@ -64,7 +64,11 @@ test("traffic events use event-level idempotency and conditional exceeded checks
   assert.doesNotMatch(source, /event\.event_id}:user:/);
   assert.match(source, /async function trafficCandidates/);
   assert.match(source, /aggregateTrafficEvents\(candidates\)/);
-  assert.match(source, /VALUES \(\?, 'traffic', 'done', '', NULL, \?, \?\)/);
+  assert.match(source, /INSERT INTO v2_traffic_dedup\(event_id, created_at\) VALUES \(\?, \?\)/);
+  assert.doesNotMatch(source, /INSERT OR IGNORE INTO v2_traffic_dedup/);
+  assert.match(source, /CREATE TABLE IF NOT EXISTS v2_traffic_dedup/);
+  assert.match(source, /WITHOUT ROWID/);
+  assert.doesNotMatch(source, /VALUES \(\?, 'traffic', 'done', '', NULL, \?, \?\)/);
   assert.match(source, /INSERT INTO v2_traffic_pending_check/);
   assert.match(source, /u \+ d >= transfer_enable/);
   assert.match(source, /ON CONFLICT\(user_id\) DO NOTHING/);
@@ -103,10 +107,14 @@ test("traffic candidate selection skips completed and active duplicate deliverie
   const current = Math.floor(Date.now() / 1000);
   const env = {
     XBOARD_DB: {
-      prepare() {
+      prepare(sql) {
         return {
           bind() { return this; },
+          async run() { return { success: true, meta: { changes: 0 } }; },
           async all() {
+            if (sql.includes("FROM v2_traffic_dedup")) {
+              return { success: true, results: [{ event_id: "dedup" }] };
+            }
             return { success: true, results: [
               { event_id: "done", status: "done", updated_at: current },
               { event_id: "active", status: "processing:owner", updated_at: current },
@@ -118,7 +126,7 @@ test("traffic candidate selection skips completed and active duplicate deliverie
     }
   };
   const result = await __test.trafficCandidates(env, [
-    { event_id: "new" }, { event_id: "done" }, { event_id: "active" }, { event_id: "failed" }, { event_id: "new" }
+    { event_id: "new" }, { event_id: "dedup" }, { event_id: "done" }, { event_id: "active" }, { event_id: "failed" }, { event_id: "new" }
   ]);
   assert.deepEqual(result.candidates.map(event => event.event_id), ["new", "failed"]);
   assert.deepEqual(result.staleEventIds, ["failed"]);

@@ -90,6 +90,7 @@ test("cron implements the official order, ticket, commission and traffic checks"
   assert.match(source, /DELETE FROM v2_traffic_pending_check WHERE user_id IN \([\s\S]*LIMIT 1000/);
   assert.match(source, /DELETE FROM failed_jobs WHERE failed_at < \?/);
   assert.match(source, /DELETE FROM v2_job_logs WHERE COALESCE\(updated_at, created_at\) < \?/);
+  assert.match(source, /DELETE FROM v2_traffic_dedup WHERE created_at < \?/);
   assert.match(source, /ts - 7 \* 86400/);
 });
 
