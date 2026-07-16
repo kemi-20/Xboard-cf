@@ -202,8 +202,13 @@ test("audited compatibility fixes match upstream order, ticket and statistics be
 test("server validation keeps public and backend ports independent", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /for \(const field of \["type", "name", "host", "port", "server_port", "rate"\]\)/);
-  assert.match(source, /const port = Number\(input\.port\)/);
+  assert.match(source, /function normalizePublicPort\(value: unknown\)/);
+  assert.match(source, /\^\\d\+\\\.0\+\$/);
+  assert.match(source, /const port = normalizePublicPort\(input\.port\)/);
+  assert.match(source, /port: normalizePublicPort\(server\.port\)/);
   assert.match(source, /const serverPort = Number\(input\.server_port\)/);
+  assert.doesNotMatch(source, /\[input\.port, input\.server_port, input\.rate\]\.every/);
+  assert.match(source, /\[input\.server_port, input\.rate\]\.every/);
   assert.doesNotMatch(source, /server\.name = `\$\{server\.name \|\| "Node"\} Copy`/);
 });
 

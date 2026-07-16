@@ -1731,6 +1731,11 @@ async function optionalKvPutTtl(env: Env, key: string, value: string, expiration
   try { await env.XBOARD_KV.put(key, value, { expirationTtl }); } catch { /* Verification mail can still be queued when KV is temporarily unavailable. */ }
 }
 
+function normalizePublicPort(value: unknown) {
+  const port = String(value ?? "").trim();
+  return /^\d+\.0+$/.test(port) ? port.slice(0, port.indexOf(".")) : port;
+}
+
 async function adminServerRows(env: Env): Promise<Record<string, any>[]> {
   const [serverResult, machineResult, live] = await Promise.all([
     env.XBOARD_DB.prepare("SELECT * FROM v2_server ORDER BY sort ASC, id ASC LIMIT 1000").all<Record<string, any>>(),
@@ -1761,6 +1766,7 @@ async function adminServerRows(env: Env): Promise<Record<string, any>[]> {
     }
     out.push({
       ...server,
+      port: normalizePublicPort(server.port),
       show: Boolean(Number(server.show ?? 1)),
       enabled: Boolean(Number(server.enabled ?? 1)),
       rate_time_enable: Boolean(Number(server.rate_time_enable || 0)),
@@ -1920,7 +1926,9 @@ function phpUrlEncode(value: string) {
 function normalizeServerInput(input: Record<string, any>) {
   const protocolSettings = parseJsonObject(input.protocol_settings);
   const serverType = String(input.type || input.server_type || protocolSettings.type || "shadowsocks");
-  const port = Number(input.port);
+  // The public port may be an upstream-compatible dynamic range such as
+  // "20000-30000". Keep its textual representation instead of coercing it.
+  const port = normalizePublicPort(input.port);
   const serverPort = Number(input.server_port);
   return {
     type: serverType,
@@ -1980,7 +1988,7 @@ async function saveServer(request: Request, env: Env) {
   for (const field of ["type", "name", "host", "port", "server_port", "rate"]) {
     if (isNilLike(input[field])) return fail(`${field} 字段不能为空`, 422, 422);
   }
-  if (![input.port, input.server_port, input.rate].every(value => Number.isFinite(Number(value)))) return fail("端口和倍率必须是数字", 422, 422);
+  if (![input.server_port, input.rate].every(value => Number.isFinite(Number(value)))) return fail("服务端口和倍率必须是数字", 422, 422);
   const validation = validateServerInput(input);
   if (validation) return validation;
   const data = normalizeServerInput(input);
