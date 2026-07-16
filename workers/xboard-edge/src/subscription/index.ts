@@ -4,7 +4,7 @@ import { fail, now } from "./compat.ts";
 import { cached } from "./kv.ts";
 import { replicaDatabase, settings as loadSettings } from "./db.ts";
 
-export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; }
+export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; SUBSCRIPTION_DB?: D1Database; }
 
 type Client = "plain" | "shadowrocket" | "shadowsocks" | "clash" | "clashmeta" | "stash" | "surge" | "surfboard" | "singbox" | "quantumultx" | "loon";
 type Config = Record<string, any>;
@@ -1170,7 +1170,7 @@ async function optionalKvVersion(kv: KVNamespace, key: string) {
 export const __test = { clientOf, clientDetails, versionAtLeast, filterByClientCompatibility, regexValue, protocolPrefix, traffic, nextResetAt, decorateServers, general, generalUri, yamlProfile, clashProxy, singboxOutbound, singboxProfile, singboxCoreVersion, adaptSingboxConfig, shadowsocksProfile, textTemplateProfile, proxyLine, shadowrocketLine, quantumultXLine, loonLine, serverPassword, randomizedPort, replaceByPattern, subscriptionUrl, output, responseHeaders, matchesConfiguredSubscribePath, optionalKvVersion };
 
 export async function handleSubscriptionRequest(request: Request, env: Env): Promise<Response> {
-    env = { ...env, XBOARD_DB: replicaDatabase(env.XBOARD_DB) };
+    env = { ...env, XBOARD_DB: replicaDatabase(env.SUBSCRIPTION_DB || env.XBOARD_DB) };
     const url = new URL(request.url);
     if (url.pathname !== "/api/v1/client/subscribe") {
       const configured = await loadSettings(env.XBOARD_DB, env.XBOARD_KV);

@@ -275,6 +275,7 @@ test("official subscription paths are handled inside xboard-edge", () => {
   assert.match(source, /async function currentSubscribePath/);
   assert.match(source, /isSubscriptionPath\(url\.pathname, await currentSubscribePath\(env\)\)/);
   assert.match(source, /return handleSubscriptionRequest\(request, env\)/);
+  assert.match(source, /SUBSCRIPTION_DB: env\.XBOARD_DB/);
   assert.doesNotMatch(source, /url\.pathname\.startsWith\("\/sub\/"\)/);
   assert.doesNotMatch(wrangler, /XBOARD_SUBSCRIPTION|xboard-subscription/);
 });

@@ -10,6 +10,7 @@ import { handleSubscriptionRequest } from "./subscription/index.ts";
 
 export interface Env {
   XBOARD_DB: D1Database;
+  SUBSCRIPTION_DB?: D1Database;
   XBOARD_KV: KVNamespace;
   ASSETS: Fetcher;
   XBOARD_SERVER: Fetcher;
@@ -4850,7 +4851,8 @@ export default {
     const sessionEnv = {
       ...env,
       XBOARD_DB: primaryDatabase(env.XBOARD_DB),
-      PUBLIC_READ_DB: unconstrainedDatabase(env.XBOARD_DB)
+      PUBLIC_READ_DB: unconstrainedDatabase(env.XBOARD_DB),
+      SUBSCRIPTION_DB: env.XBOARD_DB
     };
     const response = await edgeFetch(request, sessionEnv, ctx);
     return apiRequest ? corsResponse(response) : response;

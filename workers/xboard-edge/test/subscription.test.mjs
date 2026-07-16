@@ -729,7 +729,7 @@ test("subscription validation and generation use a first-unconstrained D1 sessio
   const source = fs.readFileSync("src/subscription/index.ts", "utf8");
   const db = fs.readFileSync("src/subscription/db.ts", "utf8");
   assert.match(db, /db\.withSession\("first-unconstrained"\)/);
-  assert.match(source, /XBOARD_DB: replicaDatabase\(env\.XBOARD_DB\)/);
+  assert.match(source, /XBOARD_DB: replicaDatabase\(env\.SUBSCRIPTION_DB \|\| env\.XBOARD_DB\)/);
   assert.doesNotMatch(db, /db\.withSession\("first-primary"\)/);
 });
 
