@@ -427,7 +427,7 @@ function clashProxy(user: any, server: any, client: Client = "clashmeta") {
   else if (server.type === "vless") {
     const tlsMode = Number(ps.tls || 0);
     const tlsSettings = tlsMode === 2 ? ps.reality_settings : tlsMode === 1 ? ps.tls_settings : undefined;
-    Object.assign(base, { uuid: user.uuid, alterId: client === "stash" ? undefined : 0, cipher: client === "stash" ? undefined : "auto", flow: client === "stash" && tlsMode !== 2 ? undefined : ps.flow, encryption: client === "stash" ? undefined : ps.encryption?.enabled ? ps.encryption?.encryption || "none" : "none", tls: client === "clashmeta" ? tlsMode > 0 : tlsMode > 0 ? true : undefined, "skip-cert-verify": tlsMode > 0 ? Boolean(tlsSettings?.allow_insecure) : undefined, servername: tlsSettings?.server_name });
+    Object.assign(base, { uuid: user.uuid, alterId: client === "stash" ? undefined : 0, cipher: client === "stash" ? undefined : "auto", flow: client === "stash" && tlsMode !== 2 ? undefined : ps.flow, encryption: client === "stash" ? undefined : ps.encryption?.enabled ? ps.encryption?.encryption || "none" : "none", tls: client === "clashmeta" ? tlsMode > 0 : tlsMode > 0 ? true : undefined, "skip-cert-verify": tlsMode > 0 ? Boolean(tlsSettings?.allow_insecure) : undefined, servername: tlsSettings?.server_name, sni: client === "stash" && tlsMode === 2 ? tlsSettings?.server_name : undefined });
     if (tlsMode === 2) base["reality-opts"] = { "public-key": ps.reality_settings?.public_key, "short-id": ps.reality_settings?.short_id };
     if (client !== "clash" && fingerprint) base["client-fingerprint"] = fingerprint;
     const ns = ps.network_settings || {};

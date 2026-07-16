@@ -680,9 +680,9 @@ test("admin user relations, CSV units and smoke tests cover functional paths", (
 test("traffic history exposes the official server_rate field", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /server_rate: Number\(row\.server_rate \?\? 1\) \|\| 1/);
-  assert.match(source, /GROUP BY user_id, server_rate, record_type, record_at/);
+  assert.match(source, /SELECT \* FROM v2_stat_user WHERE user_id = \? ORDER BY record_at DESC/);
   assert.match(source, /GROUP BY user_id, server_rate, record_at ORDER BY record_at DESC/);
-  assert.match(source, /MIN\(id\) AS id/);
+  assert.doesNotMatch(source, /MIN\(id\) AS id, user_id, server_rate/);
   assert.match(source, /ALTER TABLE v2_stat_user ADD COLUMN server_rate/);
   assert.match(source, /UPDATE v2_stat_user SET server_rate = COALESCE\(rate, 1\)/);
 });
@@ -889,13 +889,41 @@ test("audited admin and user mutations reject stale or partial operations", () =
 
 test("statistics and mail templates preserve the upstream contracts", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
-  assert.match(source, /route\.endsWith\("YesterdayRank"\) \? dayStart\(\) - 86400 : dayStart\(\)/);
+  assert.match(source, /route\.endsWith\("YesterdayRank"\) \? dayStart\(\) - 86400 : 0/);
+  assert.match(source, /server_name: row\.server_name, server_id: Number\(row\.server_id\), server_type: row\.server_type/);
   assert.match(source, /type === "server_traffic_rank"/);
   assert.match(source, /type === "invite_rank"/);
   assert.match(source, /Number\(row\.paid_total \|\| 0\) \/ 100/);
   assert.match(source, /remindExpire:/);
   assert.match(source, /remindTraffic:/);
   assert.match(source, /missing = mailTemplateMeta\[name\]\.required_vars/);
+});
+
+test("RX compatibility fixes preserve upstream CRUD, plans, Telegram and filters", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const giftCards = fs.readFileSync("src/gift-card.ts", "utf8");
+  const wrangler = fs.readFileSync("wrangler.toml", "utf8");
+  assert.match(source, /const validServerTypes = new Set/);
+  assert.match(source, /type === "shadowsocks"\) return requiredString\("cipher"/);
+  assert.match(source, /online_count: Number\(row\.online_count \|\| 0\)/);
+  assert.match(source, /INSERT INTO v2_knowledge\(title,category,body,language,show/);
+  assert.match(source, /route === "\/server\/route\/drop"/);
+  assert.match(source, /DELETE FROM v2_server_route WHERE id = \?/);
+  assert.match(source, /boolNumber\(input\.show, 0\)/);
+  assert.match(source, /async function publicPlanRows/);
+  assert.match(source, /Number\(value\) \* 100/);
+  assert.match(source, /async function handleTelegramMessage/);
+  assert.match(source, /command === "\/getlatesturl"/);
+  assert.match(source, /telegramRequest\(botToken, "getMe"\)/);
+  assert.match(source, /async function queueTelegram/);
+  assert.match(wrangler, /binding = "TELEGRAM_EVENTS"[\s\S]*queue = "telegram-events"/);
+  assert.match(source, /l\.action = \?/);
+  assert.match(source, /l\.uri LIKE \? OR l\.request_data LIKE \?/);
+  assert.match(source, /l\.reset_type = \?/);
+  assert.match(source, /u\.email LIKE \?/);
+  assert.match(source, /const response = await \(async \(\) =>/);
+  assert.match(source, /await audit\(env,[\s\S]*return response/);
+  assert.match(giftCards, /UPDATE v2_gift_card_code SET status = 1/);
 });
 
 test("API responses use the same open CORS policy as upstream Laravel", () => {

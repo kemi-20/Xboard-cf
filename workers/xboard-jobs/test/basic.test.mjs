@@ -31,7 +31,8 @@ test("telegram and daily statistics preserve upstream success and record contrac
   assert.match(source, /result\?\.ok !== true/);
   assert.doesNotMatch(source, /SELECT id FROM v2_stat WHERE record_at = \? AND record_type = 'd'/);
   assert.match(source, /INSERT INTO v2_stat\(record_at, record_type,[\s\S]*ON CONFLICT\(record_at, record_type\) DO UPDATE/);
-  assert.match(source, /CASE WHEN \? IS NULL THEN v2_stat\.user_count ELSE excluded\.user_count END/);
+  assert.match(source, /const fields = \["user_count", "order_count", "transfer_used", "transfer_used_total"/);
+  assert.match(source, /fields\.map\(field => `\$\{field\} = CASE WHEN \? IS NULL THEN v2_stat\.\$\{field\} ELSE excluded\.\$\{field\} END`\)/);
   assert.match(wrangler, /queue = "telegram-events"[\s\S]*dead_letter_queue = "telegram-events-dlq"/);
 });
 
@@ -55,6 +56,8 @@ test("mail templates override fallbacks and provider credentials stay protocol-s
   assert.match(source, /remindExpire/);
   assert.match(source, /remindTraffic/);
   assert.match(source, /legacyAliases/);
+  assert.match(source, /const flatTemplateVars = Object\.fromEntries/);
+  assert.match(source, /payload\.template_value\?\.vars \|\| payload\.vars \|\| flatTemplateVars/);
   assert.match(source, /recipients\.map\(email/);
 });
 

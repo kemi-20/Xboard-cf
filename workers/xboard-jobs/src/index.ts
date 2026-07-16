@@ -66,7 +66,9 @@ async function resolveMailContent(env: Env, payload: any) {
   let row = await env.XBOARD_DB.prepare("SELECT subject, content FROM v2_mail_templates WHERE name = ?").bind(name).first<{ subject: string; content: string }>();
   if (!row && legacyAliases[name]) row = await env.XBOARD_DB.prepare("SELECT subject, content FROM v2_mail_templates WHERE name = ?").bind(legacyAliases[name]).first<{ subject: string; content: string }>();
   const template = row || defaults[name] || defaults.notify;
-  const vars = payload.template_value?.vars || payload.vars || {};
+  const templateValue = payload.template_value && typeof payload.template_value === "object" ? payload.template_value : {};
+  const flatTemplateVars = Object.fromEntries(Object.entries(templateValue).filter(([key]) => !["vars", "content_mode"].includes(key)));
+  const vars = payload.template_value?.vars || payload.vars || flatTemplateVars;
   const renderVars = row ? safeMailVars(vars, payload.template_value?.content_mode || payload.content_mode) : vars;
   const subjectTemplate = row ? template.subject : payload.subject || template.subject;
   const subject = render(String(subjectTemplate || ""), renderVars);
@@ -384,17 +386,14 @@ async function stat(env: Env, event: any) {
   const payload = event.payload || {};
   const recordAt = Number(payload.record_at || dayStart());
   const ts = now();
-  const userCount = payload.user_count ?? null;
-  const orderCount = payload.order_count ?? null;
-  const transferUsed = payload.transfer_used ?? null;
-  const statements = [env.XBOARD_DB.prepare(`INSERT INTO v2_stat(record_at, record_type, user_count, order_count, transfer_used, created_at, updated_at)
-    VALUES (?, 'd', COALESCE(?, 0), COALESCE(?, 0), COALESCE(?, 0), ?, ?)
+  const fields = ["user_count", "order_count", "transfer_used", "transfer_used_total", "register_count", "invite_count", "order_total", "paid_total", "paid_count", "commission_total", "commission_count"];
+  const values = fields.map(field => payload[field] ?? null);
+  const statements = [env.XBOARD_DB.prepare(`INSERT INTO v2_stat(record_at, record_type, ${fields.join(", ")}, created_at, updated_at)
+    VALUES (?, 'd', ${fields.map(() => "COALESCE(?, 0)").join(", ")}, ?, ?)
     ON CONFLICT(record_at, record_type) DO UPDATE SET
-      user_count = CASE WHEN ? IS NULL THEN v2_stat.user_count ELSE excluded.user_count END,
-      order_count = CASE WHEN ? IS NULL THEN v2_stat.order_count ELSE excluded.order_count END,
-      transfer_used = CASE WHEN ? IS NULL THEN v2_stat.transfer_used ELSE excluded.transfer_used END,
+      ${fields.map(field => `${field} = CASE WHEN ? IS NULL THEN v2_stat.${field} ELSE excluded.${field} END`).join(",\n      ")},
       updated_at = excluded.updated_at`)
-    .bind(recordAt, userCount, orderCount, transferUsed, ts, ts, userCount, orderCount, transferUsed)];
+    .bind(recordAt, ...values, ts, ts, ...values)];
   await runOnce(env, event.event_id, "stat", event, statements);
 }
 

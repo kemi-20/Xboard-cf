@@ -230,7 +230,7 @@ async function redeem(db: D1Database, card: AnyRow, user: AnyRow, request: Reque
   const plan = user.plan_id ? await db.prepare("SELECT sort FROM v2_plan WHERE id = ?").bind(user.plan_id).first<{ sort: number }>() : null;
   const nonce = randomString(32);
   const guard = "EXISTS (SELECT 1 FROM v2_gift_card_code WHERE id = ? AND redemption_nonce = ?)";
-  const statements = [db.prepare(`UPDATE v2_gift_card_code SET status = CASE WHEN usage_count + 1 >= max_usage THEN 1 ELSE 0 END,
+  const statements = [db.prepare(`UPDATE v2_gift_card_code SET status = 1,
     user_id = ?, used_at = ?, usage_count = usage_count + 1, actual_rewards = ?, redemption_nonce = ?, updated_at = ?
     WHERE id = ? AND status NOT IN (2, 3) AND usage_count < max_usage AND (expires_at IS NULL OR expires_at >= ?)`)
     .bind(user.id, ts, Number(card.template_type) === 3 ? encodeJson(rewards) : card.actual_rewards, nonce, ts, card.id, ts)];

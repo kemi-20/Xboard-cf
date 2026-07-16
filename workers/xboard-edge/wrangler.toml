@@ -28,3 +28,7 @@ service = "xboard-subscription"
 [[queues.producers]]
 binding = "MAIL_EVENTS"
 queue = "mail-events"
+
+[[queues.producers]]
+binding = "TELEGRAM_EVENTS"
+queue = "telegram-events"

@@ -94,6 +94,11 @@ test("inactive Reality settings never override the active standard TLS SNI", () 
   assert.equal(__test.clashProxy(user, realityTrojan, "clash").sni, "us2.example.com");
   assert.equal(__test.clashProxy(user, realityTrojan, "clash")["reality-opts"], undefined);
   assert.equal(__test.clashProxy(user, realityTrojan, "clashmeta").sni, "apple.com");
+
+  const realityVless = { ...server, protocol_settings: { ...server.protocol_settings, tls: 2 } };
+  const stash = __test.clashProxy(user, realityVless, "stash");
+  assert.equal(stash.servername, "apple.com");
+  assert.equal(stash.sni, "apple.com");
 });
 
 test("sing-box slash user agents retain their actual core version", () => {
