@@ -12,6 +12,7 @@ jobs:
     timeout-minutes: 30
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ANALYTICS_TOKEN: ${{ secrets.CLOUDFLARE_ANALYTICS_TOKEN }}
 
     steps:
       - name: Checkout
@@ -28,6 +29,7 @@ jobs:
             workers/xboard-server/package-lock.json
             workers/xboard-jobs/package-lock.json
             workers/xboard-cron/package-lock.json
+            workers/xboard-analytics/package-lock.json
 
       - name: Validate token
         shell: bash
@@ -58,7 +60,7 @@ jobs:
       - name: Install Worker dependencies
         shell: bash
         run: |
-          for worker in xboard-edge xboard-subscription xboard-server xboard-jobs xboard-cron; do
+          for worker in xboard-edge xboard-subscription xboard-server xboard-jobs xboard-cron xboard-analytics; do
             npm ci --prefix "workers/$worker"
           done
 
@@ -67,6 +69,21 @@ jobs:
         run: |
           npx wrangler d1 execute xboard-db --remote --file ../../schema/d1.sql
           npx wrangler d1 execute xboard-db --remote --file ../../schema/seed.sql
+
+      - name: Deploy xboard-analytics
+        working-directory: workers/xboard-analytics
+        run: npx wrangler deploy
+
+      - name: Configure Analytics Engine query token
+        if: env.CLOUDFLARE_ANALYTICS_TOKEN != ''
+        working-directory: workers/xboard-analytics
+        shell: bash
+        run: printf '%s' "$CLOUDFLARE_ANALYTICS_TOKEN" | npx wrangler secret put ANALYTICS_API_TOKEN
+
+      - name: Analytics Engine disabled notice
+        if: env.CLOUDFLARE_ANALYTICS_TOKEN == ''
+        shell: bash
+        run: echo "CLOUDFLARE_ANALYTICS_TOKEN is not configured; analytics queries will use the D1 fallback." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Deploy xboard-server
         working-directory: workers/xboard-server
@@ -102,7 +119,7 @@ jobs:
             echo
             echo "> Before running the connection steps, install/authorize the [Cloudflare Workers & Pages GitHub App](https://github.com/apps/cloudflare-workers-and-pages) for this repository. Git repository access cannot be granted by a Cloudflare API token; this GitHub security boundary has no supported Wrangler or Cloudflare REST API equivalent."
             echo
-            echo "Use the same repository and branch for all five connections:"
+            echo "Use the same repository and branch for all six connections:"
             echo
             echo "- Repository: \`${GITHUB_REPOSITORY}\`"
             echo "- Production branch: \`${GITHUB_REF_NAME}\`"
@@ -111,9 +128,9 @@ jobs:
             echo
             echo "| Worker | Root directory | Builds settings |"
             echo "| --- | --- | --- |"
-            for worker in xboard-edge xboard-subscription xboard-server xboard-jobs xboard-cron; do
+            for worker in xboard-edge xboard-subscription xboard-server xboard-jobs xboard-cron xboard-analytics; do
               echo "| \`$worker\` | \`workers/$worker\` | [Open settings](https://dash.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/workers/services/view/$worker/production/settings/builds) |"
             done
             echo
-            echo "After these five one-time connections, pushes to \`${GITHUB_REF_NAME}\` are built and deployed by Cloudflare Workers Builds. This workflow remains manual and is not the push deployment mechanism."
+            echo "After these six one-time connections, pushes to \`${GITHUB_REF_NAME}\` are built and deployed by Cloudflare Workers Builds. This workflow remains manual and is not the push deployment mechanism."
           } >> "$GITHUB_STEP_SUMMARY"

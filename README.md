@@ -65,8 +65,9 @@ https://你的域名/admin
 | `xboard-edge` | `workers/xboard-edge` | 后台 WebUI、后台 API、用户 API、节点接口代理 |
 | `xboard-subscription` | `workers/xboard-subscription` | 订阅校验、订阅格式生成和短缓存 |
 | `xboard-server` | `workers/xboard-server` | 节点 HTTP、机器模式、状态上报和 WebSocket |
-| `xboard-jobs` | `workers/xboard-jobs` | Queue 消费、流量和统计写入、Maileroo/Brevo 邮件发送 |
+| `xboard-jobs` | `workers/xboard-jobs` | Queue 消费、权威流量写入、Outbox、TrafficStatsHub 和通知发送 |
 | `xboard-cron` | `workers/xboard-cron` | 流量重置、过期检查、统计和清理任务 |
+| `xboard-analytics` | `workers/xboard-analytics` | 固定 Analytics Engine 查询、内存与 Cache API 缓存、D1 回退协调 |
 
 Worker 之间没有依赖仓库根目录的共享运行时代码，因此 Cloudflare 可以直接把每个目录设置为独立的构建根目录。
 
@@ -86,14 +87,20 @@ Worker 之间没有依赖仓库根目录的共享运行时代码，因此 Cloudf
 | Queue | `telegram-events-dlq` | Telegram 任务连续失败 5 次后的死信队列 |
 | Durable Object | `NodeHub` / `NODE_HUB` | 节点和机器 WebSocket 连接、同步事件与休眠连接管理 |
 | Durable Object | `StatusHub` / `STATUS_HUB` | 全局节点与机器实时状态、设备状态及 24 小时负载采样 |
+| Durable Object | `TrafficStatsHub` / `TRAFFIC_STATS_HUB` | 全局流量批次去重、16 分片日聚合、五分钟 AE 桶和绝对值物化 |
+| Analytics Engine | `xboard_user_traffic` / `USER_TRAFFIC_ANALYTICS` | 用户流量趋势和排行 |
+| Analytics Engine | `xboard_server_traffic` / `SERVER_TRAFFIC_ANALYTICS` | 服务器流量趋势和排行 |
+| Analytics Engine | `xboard_runtime` / `RUNTIME_ANALYTICS` | 节点状态变化和五分钟机器负载采样 |
 | Static Assets | `ASSETS` | `xboard-edge` 托管后台 WebUI、语言包和静态文件 |
 | Service Binding | `XBOARD_SERVER` | `xboard-edge`、`xboard-cron` 调用 `xboard-server` |
 | Service Binding | `XBOARD_SUBSCRIPTION` | `xboard-edge` 转发订阅请求到 `xboard-subscription` |
+| Service Binding | `XBOARD_ANALYTICS` | `xboard-edge` 查询 `xboard-analytics`，失败时回退 D1 或 StatusHub |
+| Service Binding | `XBOARD_JOBS` | `xboard-edge`、`xboard-cron` 补投 Outbox、物化和重置统计状态 |
 | Queue Producer | `TRAFFIC_EVENTS` | `xboard-server` 写入 `traffic-events` |
 | Queue Producer | `MAIL_EVENTS` | `xboard-edge`、`xboard-cron` 写入 `mail-events` |
 | Cron Trigger | `* * * * *` | `xboard-cron` 每分钟调度周期检查、统计和清理任务 |
 
-五个 Worker 都绑定同一个 D1 和 KV。D1 是正式业务数据的唯一权威来源；KV 只保存可重新生成的短期数据。高频机器心跳不写入 D1，而是进入 `StatusHub`。设置读取使用 Worker 内存、KV 版本快照和 D1 三级缓存，各 Worker 只加载自身需要的设置字段。KV 不可用或超过额度时会直接跳过 KV 并回源 D1，不会因为缓存故障阻断登录、订阅、节点上报或定时任务。
+业务 Worker 绑定同一个 D1 和 KV；`xboard-analytics` 不绑定 KV。D1 是正式业务数据的唯一权威来源。流量事件先原子写入用户、服务器累计量和 Outbox，再由 `TrafficStatsHub` 聚合并物化原版统计表；Analytics Engine 负责趋势与排行，故障时自动回退 D1。
 
 所有业务 D1 请求都通过 Sessions API 执行。后台、用户 API、节点协议、WebSocket 事件、Queue、Cron 和迁移从 `first-primary` 开始。`xboard-subscription` 的订阅鉴权与生成，以及 `GET /api/v1/guest/plan/fetch`、`GET /api/v1/guest/comm/config` 两个匿名展示接口使用 `first-unconstrained`。这会让订阅读取优先分散到可用副本，代价是封禁、Token、流量、权限组和节点配置变更可能在副本追上主库前短暂延迟生效。数据库未开启读取复制时 Sessions API 会自动使用主实例，不需要两套代码，也不会导致接口异常。读取复制用于降低远距离读取延迟和扩展读取吞吐量，不会减少 D1 的 `rows_read` 或 `rows_written` 计费。
 
@@ -122,19 +129,25 @@ flowchart TB
     Server["xboard-server<br/>V1 / V2 / Tidalab / 机器接口<br/>流量上报 / WebSocket / 热同步"]
     Jobs["xboard-jobs<br/>Queue consumer<br/>原子幂等 / 批量聚合 / 通知发送"]
     Cron["xboard-cron<br/>每分钟单 Trigger<br/>过期 / 流量重置 / 提醒 / 清理 / 汇总"]
+    Analytics["xboard-analytics<br/>固定 AE SQL 查询<br/>内存 + Cache API / D1 回退"]
   end
 
   Edge -->|"XBOARD_SUBSCRIPTION<br/>Service Binding"| Subscription
   Edge -->|"XBOARD_SERVER<br/>Service Binding"| Server
   Cron -->|"XBOARD_SERVER<br/>内部同步"| Server
+  Edge -->|"XBOARD_ANALYTICS<br/>Service Binding"| Analytics
+  Edge -->|"XBOARD_JOBS<br/>按需物化"| Jobs
+  Cron -->|"XBOARD_JOBS<br/>Outbox 补投"| Jobs
 
   subgraph Realtime["实时状态与连接协调"]
     NodeHub["NodeHub Durable Object<br/>按 node:{id} / machine:{id} 分片<br/>WebSocket Hibernation / sync.*"]
     StatusHub["StatusHub Durable Object<br/>单个 global 实例<br/>节点与机器状态 / 设备 / 24h 负载历史"]
+    TrafficStatsHub["TrafficStatsHub Durable Object<br/>单个 global 实例<br/>批次去重 / 16 分片日聚合 / 五分钟桶"]
   end
 
   Server <-->|"连接与配置热同步"| NodeHub
   Server <-->|"心跳 / Metrics / 历史查询"| StatusHub
+  Jobs -->|"Outbox 聚合批次"| TrafficStatsHub
 
   subgraph Queues["异步任务与失败隔离"]
     TrafficQ["traffic-events<br/>max retries: 5"]
@@ -161,6 +174,10 @@ flowchart TB
     KV["KV: xboard-kv<br/>Session / 验证码 / 限流<br/>版本号 / 设置快照 / 订阅短缓存"]
     D1["D1: xboard-db<br/>用户 / 套餐 / 节点 / 订单 / 余额<br/>设置 / 最终流量 / 统计 / 审计"]
     Pending["v2_traffic_pending_check<br/>仅保存真正需要复查的用户"]
+    Outbox["v2_traffic_stats_outbox<br/>每个聚合批次最多一行<br/>成功投递 DO 后删除"]
+    UserAE["Analytics Engine<br/>xboard_user_traffic"]
+    ServerAE["Analytics Engine<br/>xboard_server_traffic"]
+    RuntimeAE["Analytics Engine<br/>xboard_runtime"]
   end
 
   Edge -. "内存 -> KV -> D1" .-> Memory
@@ -175,10 +192,20 @@ flowchart TB
   Edge <-->|"正式业务读写"| D1
   Subscription -->|"只读业务数据"| D1
   Server <-->|"配置读取 / 流量事件来源"| D1
-  Jobs -->|"批量写用户、服务器与统计"| D1
+  Jobs -->|"权威累计 / 幂等 / Outbox"| D1
   Cron <-->|"周期业务检查与清理"| D1
   Jobs --> Pending
   Pending --> Cron
+  Jobs --> Outbox
+  Outbox --> TrafficStatsHub
+  TrafficStatsHub -->|"每小时绝对值覆盖 v2_stat*"| D1
+  TrafficStatsHub -->|"关闭的五分钟桶"| UserAE
+  TrafficStatsHub -->|"关闭的五分钟桶"| ServerAE
+  StatusHub -->|"五分钟负载与状态变化"| RuntimeAE
+  Analytics --> UserAE
+  Analytics --> ServerAE
+  Analytics --> RuntimeAE
+  Analytics -. "不可用 / 超时 / 覆盖不足" .-> D1
 
   subgraph External["外部 HTTPS 服务"]
     MailProvider["Maileroo / Brevo API"]
@@ -191,8 +218,8 @@ flowchart TB
 
   subgraph Delivery["首次部署与后续自动部署"]
     GitHub["GitHub 仓库<br/>master"]
-    Bootstrap["手动 GitHub Action<br/>首次创建资源、初始化 D1、部署五个 Worker"]
-    Builds["Cloudflare Workers Builds<br/>五个 Worker 分别绑定各自根目录"]
+    Bootstrap["手动 GitHub Action<br/>首次创建资源、初始化 D1、部署六个 Worker"]
+    Builds["Cloudflare Workers Builds<br/>六个 Worker 分别绑定各自根目录"]
     CFResources["Cloudflare 账号资源<br/>D1 / KV / Queues / DO / Workers"]
   end
 
@@ -203,7 +230,7 @@ flowchart TB
   Builds -->|"按根目录测试并部署"| CFResources
 ```
 
-图中实线表示正常请求、内部调用或持久化数据流；虚线表示缓存回源、失败转移或非主路径。五个 Worker 都从同一仓库部署，但构建根目录和 Cloudflare Worker 服务彼此独立。
+图中实线表示正常请求、内部调用或持久化数据流；虚线表示缓存回源、失败转移或非主路径。六个 Worker 都从同一仓库部署，但构建根目录和 Cloudflare Worker 服务彼此独立。
 
 ### 存储与流量写入
 
@@ -213,9 +240,13 @@ flowchart TB
 - **Cloudflare Cache API**：保存后台 Queue 统计 60 秒、流量排行 30 秒等可重新计算的短时结果，跨请求复用但不增加 KV 写入；未命中或过期时直接重新查询 D1。
 - **NodeHub**：维护节点或机器的 WebSocket 连接及配置、用户热同步。
 - **StatusHub**：保存高频在线状态、设备状态、机器心跳和滚动 24 小时负载采样；运行状态最多每 60 秒持久化一次，设备成员最多每 240 秒持久化一次，负载历史每 300 秒采样一次。
+- **TrafficStatsHub**：单个全局 DO 按 `batch_id` 去重，将用户日状态按 `user_id % 16` 分片，服务器日状态单独聚合；关闭的五分钟桶写入 Analytics Engine，每小时把绝对累计值覆盖回原版 `v2_stat*` 表。
+- **Analytics Engine**：保存趋势、排行和运行指标，不参与余额、限额或用户累计流量判断。查询失败、Token 缺失、超时或请求范围早于 `analytics_cutover_at` 时自动使用 D1/StatusHub，不向前端暴露 AE 错误。
 - **Queues**：把高频流量、邮件和 Telegram 任务与 HTTP 请求解耦；连续失败超过重试上限后进入对应 DLQ。
 
-流量事件使用稳定 `event_id` 去重，业务更新与最终 `done` 记录在同一个 D1 原子批次内提交，重复投递不会重复计费，也不再为每个事件先写一次 `processing` 再写一次 `done`。Cloudflare Queue 最多聚合 100 条消息，Jobs Worker 内部按 25 条子批次处理；节点上报按最多 250 个用户拆分事件，避免超过 D1 批次限制。同一子批次内会按用户和服务器聚合后再写 D1；只有已经达到流量阈值、真正需要复查的用户才写入 `v2_traffic_pending_check`，由 Cron 后续检查并删除已处理记录。
+流量事件使用稳定 `event_id` 去重，用户与服务器权威累计、事件幂等、待检查用户和一行 Outbox 在同一个 D1 原子批次内提交。`batch_id` 由排序后的已接受事件 ID 生成，Queue 和 Outbox 重试都不会重复计费或重复聚合。Cloudflare Queue 最多聚合 100 条消息，Jobs Worker 内部按 25 条子批次处理；节点上报按最多 250 个用户拆分事件。同一子批次只产生一行 Outbox，DO 确认后删除；失败则由每分钟 Cron 补投。只有已经达到流量阈值、真正需要复查的用户才写入 `v2_traffic_pending_check`。
+
+原版 `v2_stat_user`、`v2_stat_server` 和 `v2_stat` 继续保留。TrafficStatsHub 使用绝对值 `ON CONFLICT ... DO UPDATE SET value = excluded.value` 物化，重复执行不会叠加；`v2_stat` 只覆盖 `transfer_used`，不会改写收入、订单、佣金或注册统计。SQLite 导出前会强制补投 Outbox 和物化，失败时导出中断；完整迁移、覆盖导入和回滚会清空 Outbox 与 DO 状态，再从切换后的原版统计表建立当日基线。
 
 后台 Queue 统计使用 Worker isolate 内存与 Cloudflare Cache API 缓存 60 秒，流量排行缓存 30 秒，不增加 KV 写入。Cron 只有一个每分钟 Trigger，并使用一个共享 D1 所有权锁；健康心跳 `schedule:last_check_at` 最多每 300 秒刷新一次。WebSocket 在线路由 KV 只在连接变化、断开或持续在线满 6 小时时刷新，不随每次 `pong` 写入。
 
@@ -245,7 +276,7 @@ Maileroo 免费层通常为每月 3,000 封，Brevo 免费层通常为每天 300
 
 ## 首次部署与仓库自动部署
 
-最终部署结构是五个 Worker 分别连接同一个 GitHub 仓库，由 Cloudflare Workers Builds 监听 `master`。每个 Worker 使用自己的根目录，后续 push 不依赖 GitHub Actions 执行 `wrangler deploy`。
+最终部署结构是六个 Worker 分别连接同一个 GitHub 仓库，由 Cloudflare Workers Builds 监听 `master`。每个 Worker 使用自己的根目录，后续 push 不依赖 GitHub Actions 执行 `wrangler deploy`。
 
 开始前必须先让 Cloudflare 账号与 GitHub 账号建立授权关系。打开官方 [Cloudflare Workers & Pages GitHub App](https://github.com/apps/cloudflare-workers-and-pages)，选择 `Install` 或 `Configure`，授权当前 GitHub 账号，并允许它访问准备部署 XBoard 的仓库。Cloudflare 之后才能读取仓库并监听 push。
 
@@ -253,7 +284,7 @@ Maileroo 免费层通常为每月 3,000 封，Brevo 免费层通常为每天 300
 
    ![创建 Cloudflare API Token](https://github.com/user-attachments/assets/c71bfb4b-bec7-4bd1-865d-6190909d22ea)
 
-2. Fork 本仓库到自己的 GitHub 账号，或使用本仓库作为部署源。部署仓库必须包含完整项目，并保留五个 `workers/xboard-*` 目录；生产分支使用 `master`。
+2. Fork 本仓库到自己的 GitHub 账号，或使用本仓库作为部署源。部署仓库必须包含完整项目，并保留六个 `workers/xboard-*` 目录；生产分支使用 `master`。
 
    ![创建自己的 GitHub 仓库](https://github.com/lyc8503/UptimeFlare/assets/36782264/424d7be4-fec9-4c62-8efe-2ba486084111)
 
@@ -261,15 +292,18 @@ Maileroo 免费层通常为每月 3,000 封，Brevo 免费层通常为每天 300
 
    ![配置 CLOUDFLARE_API_TOKEN](https://github.com/lyc8503/UptimeFlare/assets/36782264/3e5e23a9-8163-49fb-9acf-530174cdd107)
 
+   如需启用 Analytics Engine 查询，再创建只含 `Account -> Account Analytics -> Read` 权限的 Token，并保存为 `CLOUDFLARE_ANALYTICS_TOKEN`。首次 Action 会自动把它写入 `xboard-analytics` 的 `ANALYTICS_API_TOKEN` Worker Secret；未配置时系统继续使用 D1。
+
 首次部署使用仓库内只允许手动触发的 `.github/workflows/deploy.yml`：
 
 ```text
 CLOUDFLARE_API_TOKEN
+CLOUDFLARE_ANALYTICS_TOKEN
 ```
 
-然后打开 `Actions -> Bootstrap XBoard on Cloudflare -> Run workflow`。workflow 会自动识别 Token 所属账号，创建或复用 `xboard-db`、`xboard-kv`、三个业务 Queue 及对应的三个死信队列，把当前账号、D1 和 KV 的资源 ID 写入五个 Worker 的 `wrangler.toml`，使用 GitHub 自动提供的 `GITHUB_TOKEN` 提交回当前分支，再自动执行 D1 schema 与 seed，创建 Durable Objects、Cron Trigger、Static Assets 和 Service Bindings，并按依赖顺序创建或更新五个 Worker。新建的 `xboard-db` 使用 `APAC` 位置提示，并自动尝试开启 D1 Read Replication；开启失败只会在 Action 中显示警告，不会阻断部署。已存在的同名数据库会原样复用，不修改主库位置或读取复制开关。它只配置了 `workflow_dispatch`，不会在每次 push 时运行。
+然后打开 `Actions -> Bootstrap XBoard on Cloudflare -> Run workflow`。workflow 会自动识别 Token 所属账号，创建或复用 `xboard-db`、`xboard-kv`、三个业务 Queue 及对应的三个死信队列，把当前账号、D1 和 KV 的资源 ID 写入六个 Worker 的 `wrangler.toml`，使用 GitHub 自动提供的 `GITHUB_TOKEN` 提交回当前分支，再自动执行 D1 schema 与 seed，创建 Durable Objects、Analytics Engine bindings、Cron Trigger、Static Assets 和 Service Bindings，并按依赖顺序创建或更新六个 Worker。新建的 `xboard-db` 使用 `APAC` 位置提示，并自动尝试开启 D1 Read Replication；开启失败只会在 Action 中显示警告，不会阻断部署。已存在的同名数据库会原样复用，不修改主库位置或读取复制开关。它只配置了 `workflow_dispatch`，不会在每次 push 时运行。
 
-资源 ID 不是 API Token 或数据库密码，必须随部署仓库保存，Cloudflare Workers Builds 后续检出代码时才能继续绑定同一套资源。workflow 只提交五个 `workers/xboard-*/wrangler.toml`，不会提交 `CLOUDFLARE_API_TOKEN`。如果仓库禁止 GitHub Actions 写入内容，或 `master` 分支保护规则禁止 workflow 直接推送，首次部署会在“Persist Cloudflare resource bindings”步骤明确失败；请允许该 workflow 写入仓库后重新手动运行。
+资源 ID 不是 API Token 或数据库密码，必须随部署仓库保存，Cloudflare Workers Builds 后续检出代码时才能继续绑定同一套资源。workflow 只提交六个 `workers/xboard-*/wrangler.toml`，不会提交任何 Token。如果仓库禁止 GitHub Actions 写入内容，或 `master` 分支保护规则禁止 workflow 直接推送，首次部署会在“Persist Cloudflare resource bindings”步骤明确失败；请允许该 workflow 写入仓库后重新手动运行。
 
 API Token 至少需要该账号下 Workers Scripts、D1、Workers KV Storage、Queues 和 Account Settings 的读取/编辑权限。若 Token 可访问多个账号，workflow 使用 Cloudflare API 返回的第一个账号。
 
@@ -277,7 +311,7 @@ API Token 至少需要该账号下 Workers Scripts、D1、Workers KV Storage、Q
 
 前置步骤中的 GitHub App 授权必须在配置 Builds 前完成。`CLOUDFLARE_API_TOKEN` 只能操作 Cloudflare 账号，不能替 GitHub 仓库所有者批准仓库访问；Cloudflare 目前也没有公开的 Wrangler 命令或 REST API 用于创建 Workers Builds 的 Git 仓库连接。这是 GitHub 的安全授权边界，workflow 无法绕过。
 
-授权完成后，在 Cloudflare 中依次打开每个已创建的 Worker，进入 `Settings -> Builds -> Connect`，五个 Worker 都选择：
+授权完成后，在 Cloudflare 中依次打开每个已创建的 Worker，进入 `Settings -> Builds -> Connect`，六个 Worker 都选择：
 
 ```text
 仓库：kemi-20/Xboard-cf
@@ -294,9 +328,10 @@ workers/xboard-subscription
 workers/xboard-server
 workers/xboard-jobs
 workers/xboard-cron
+workers/xboard-analytics
 ```
 
-workflow 的运行摘要会生成五个 Worker 的 Builds 设置直达链接和对应根目录，方便逐项连接。连接完成后，推送 `master` 会由 Cloudflare Workers Builds 自动构建和部署对应 Worker；GitHub Actions 只负责首次创建资源和 Worker，不负责后续 push 部署。
+workflow 的运行摘要会生成六个 Worker 的 Builds 设置直达链接和对应根目录，方便逐项连接。连接完成后，推送 `master` 会由 Cloudflare Workers Builds 自动构建和部署对应 Worker；GitHub Actions 只负责首次创建资源和 Worker，不负责后续 push 部署。
 
 Cloudflare 官方说明：[Workers Builds](https://developers.cloudflare.com/workers/ci-cd/builds/) 和 [GitHub integration](https://developers.cloudflare.com/workers/ci-cd/builds/git-integration/github-integration/)。
 
@@ -369,11 +404,11 @@ Cloudflare 内部可以使用 D1、KV、Queues 和 Durable Objects 替代 Larave
 
 ## 更新与排错
 
-正常更新只需 push 到已连接的生产分支。Cloudflare Workers Builds 会分别在五个根目录执行测试和部署；无需再次运行首次部署 Action。
+正常更新只需 push 到已连接的生产分支。Cloudflare Workers Builds 会分别在六个根目录执行测试和部署；无需再次运行首次部署 Action。
 
 遇到部署或运行问题时优先检查：
 
-1. 五个 Worker 最近一次 Build 是否成功，根目录是否各自正确。
+1. 六个 Worker 最近一次 Build 是否成功，根目录是否各自正确。
 2. `xboard-edge` 的 `XBOARD_SERVER`、`XBOARD_SUBSCRIPTION` 和 `ASSETS` 绑定是否存在。
 3. `xboard-server` 的 `NODE_HUB`、`STATUS_HUB` 和 `TRAFFIC_EVENTS` 是否存在。
 4. `xboard-jobs` 是否绑定三个业务 Queue 及其 DLQ。

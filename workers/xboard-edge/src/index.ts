@@ -13,6 +13,8 @@ export interface Env {
   ASSETS: Fetcher;
   XBOARD_SERVER: Fetcher;
   XBOARD_SUBSCRIPTION: Fetcher;
+  XBOARD_ANALYTICS: Fetcher;
+  XBOARD_JOBS: Fetcher;
   MAIL_EVENTS: Queue;
   TELEGRAM_EVENTS: Queue;
   PUBLIC_READ_DB?: D1Database;
@@ -21,6 +23,8 @@ export interface Env {
 
 const responseDataCache = new Map<string, { value: unknown; expiresAt: number }>();
 let storageOptimizationReady = false;
+let analyticsCutoverCache: { value: number; expiresAt: number } | null = null;
+let trafficMaterializedAt = 0;
 
 async function cachedData<T>(key: string, ttlSeconds: number, loader: () => Promise<T>): Promise<T> {
   const current = Date.now();
@@ -48,6 +52,34 @@ async function cachedData<T>(key: string, ttlSeconds: number, loader: () => Prom
     } catch {}
   }
   return value;
+}
+
+async function analyticsCutover(env: Env) {
+  if (analyticsCutoverCache && analyticsCutoverCache.expiresAt > Date.now()) return analyticsCutoverCache.value;
+  const row = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = 'analytics_cutover_at'").first<{ value: string }>();
+  const value = Number(row?.value || Number.MAX_SAFE_INTEGER);
+  analyticsCutoverCache = { value, expiresAt: Date.now() + 300_000 };
+  return value;
+}
+
+async function analyticsData<T>(env: Env, path: string, input: Record<string, unknown>): Promise<T | null> {
+  try {
+    const response = await env.XBOARD_ANALYTICS.fetch(`https://xboard-analytics.internal${path}`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input)
+    });
+    if (!response.ok) return null;
+    const payload = await response.json() as { data?: T };
+    return payload.data ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function materializeCurrentTraffic(env: Env) {
+  if (Date.now() - trafficMaterializedAt < 300_000) return;
+  const response = await env.XBOARD_JOBS.fetch(`https://xboard-jobs.internal/internal/traffic/materialize?record_at=${dayStart()}`, { method: "POST" });
+  if (!response.ok) throw new Error(`Traffic statistics materialization failed (${response.status})`);
+  trafficMaterializedAt = Date.now();
 }
 
 async function ensureStorageOptimization(env: Env) {
@@ -634,6 +666,7 @@ async function ensureBootstrap(env: Env) {
     "CREATE TABLE IF NOT EXISTS v2_plugins (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, code TEXT NOT NULL UNIQUE, version TEXT NOT NULL, type TEXT, is_enabled INTEGER NOT NULL DEFAULT 0, config TEXT, installed_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)",
     "CREATE TABLE IF NOT EXISTS failed_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, connection TEXT NOT NULL, queue TEXT NOT NULL, payload TEXT NOT NULL, exception TEXT NOT NULL, failed_at INTEGER NOT NULL)",
     "CREATE TABLE IF NOT EXISTS v2_traffic_dedup (event_id TEXT PRIMARY KEY, created_at INTEGER NOT NULL) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS v2_traffic_stats_outbox (batch_id TEXT PRIMARY KEY, event_ids TEXT NOT NULL, user_aggregates TEXT NOT NULL, server_aggregates TEXT NOT NULL, transfer_used INTEGER NOT NULL DEFAULT 0, record_at INTEGER NOT NULL, created_at INTEGER NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS v2_log (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, level TEXT, host TEXT, uri TEXT NOT NULL, method TEXT NOT NULL, data TEXT, ip TEXT, context TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"
     , "CREATE TABLE IF NOT EXISTS v2_migration_runs (id TEXT PRIMARY KEY, source_type TEXT NOT NULL, source_name TEXT, source_size INTEGER NOT NULL DEFAULT 0, mode TEXT NOT NULL DEFAULT 'merge', status TEXT NOT NULL DEFAULT 'running', source_counts TEXT, progress TEXT, report TEXT, error TEXT, access_token_hash TEXT, admin_id INTEGER, snapshot_counts TEXT, snapshot_complete INTEGER NOT NULL DEFAULT 0, skip_backup INTEGER NOT NULL DEFAULT 0, prepared_at INTEGER, rollback_progress TEXT, started_at INTEGER NOT NULL, finished_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"
     , "CREATE TABLE IF NOT EXISTS v2_migration_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, level TEXT NOT NULL DEFAULT 'info', table_name TEXT, message TEXT NOT NULL, details TEXT, created_at INTEGER NOT NULL)"
@@ -1368,6 +1401,20 @@ async function trafficRank(env: Env, url: URL) {
   const calculateChange = (value: number, previousValue: number) => previousValue > 0
     ? Math.round(((value - previousValue) / previousValue) * 1000) / 10
     : 0;
+  if (start >= await analyticsCutover(env)) {
+    const route = type === "node" ? "/internal/traffic/server-rank" : "/internal/traffic/rank";
+    const rows = await analyticsData<Record<string, any>[]>(env, route, { start, end, previous_start: previousStart, limit: 10 });
+    if (rows?.length) {
+      const ids = rows.map(row => Number(type === "node" ? row.server_id : row.user_id)).filter(Boolean);
+      const names = ids.length ? await env.XBOARD_DB.prepare(`SELECT id, ${type === "node" ? "name" : "email AS name"} FROM ${type === "node" ? "v2_server" : "v2_user"} WHERE id IN (${ids.map(() => "?").join(",")})`).bind(...ids).all<{ id: number; name: string }>() : { results: [] as { id: number; name: string }[] };
+      const byId = new Map((names.results || []).map(row => [Number(row.id), row.name]));
+      return rows.map(row => {
+        const id = Number(type === "node" ? row.server_id : row.user_id);
+        const value = Number(row.total || 0); const previousValue = Number(row.previous_total || 0);
+        return { id: String(id), name: byId.get(id) || `${type === "node" ? "Node" : "User"} ${id}`, value, previousValue, change: calculateChange(value, previousValue), timestamp: new Date(end * 1000).toISOString() };
+      });
+    }
+  }
   if (type === "node") {
     try {
       const rows = await env.XBOARD_DB.prepare(
@@ -1760,6 +1807,11 @@ async function adminMachineHistory(env: Env, url: URL) {
 
   const machine = await env.XBOARD_DB.prepare("SELECT id FROM v2_server_machine WHERE id = ?").bind(machineId).first();
   if (!machine) return fail("服务器不存在", 422, 422);
+  const end = now();
+  const aeRows = await analyticsData<Record<string, unknown>[]>(env, "/internal/runtime/load", {
+    entity_id: machineId, start: end - (rangeHours || 24) * 3600, end, limit
+  });
+  if (aeRows?.length) return ok(aeRows.slice(-limit));
   const params = new URLSearchParams({ machine_id: String(machineId), limit: String(limit) });
   if (rangeHours !== null) params.set("range_hours", String(rangeHours));
   try {
@@ -3387,6 +3439,15 @@ async function adminApi(request: Request, env: Env, path: string) {
   if (request.method === "GET" && (route === "/stat/getServerLastRank" || route === "/stat/getServerYesterdayRank")) {
     const start = route.endsWith("YesterdayRank") ? dayStart() - 86400 : 0;
     const end = route.endsWith("YesterdayRank") ? dayStart() : dayStart() + 172800;
+    if (start >= await analyticsCutover(env)) {
+      const aeRows = await analyticsData<Record<string, any>[]>(env, "/internal/traffic/server-rank", { start, end, limit: 100 });
+      if (aeRows?.length) {
+        const ids = aeRows.map(row => Number(row.server_id)).filter(Boolean);
+        const names = ids.length ? await env.XBOARD_DB.prepare(`SELECT id, name FROM v2_server WHERE id IN (${ids.map(() => "?").join(",")})`).bind(...ids).all<{ id: number; name: string }>() : { results: [] as { id: number; name: string }[] };
+        const byId = new Map((names.results || []).map(row => [Number(row.id), row.name]));
+        return ok(aeRows.map(row => ({ server_name: byId.get(Number(row.server_id)) || `Node ${row.server_id}`, server_id: Number(row.server_id), server_type: row.server_type, u: Number(row.u || 0), d: Number(row.d || 0), total: Number(row.total || 0) })));
+      }
+    }
     const result = await env.XBOARD_DB.prepare(`SELECT s.id AS server_id, COALESCE(parent.name, s.name) AS server_name,
       s.type AS server_type, COALESCE(SUM(stat.u), 0) AS u, COALESCE(SUM(stat.d), 0) AS d
       FROM v2_server s JOIN v2_stat_server stat ON stat.server_id = s.id
@@ -3400,6 +3461,7 @@ async function adminApi(request: Request, env: Env, path: string) {
     })));
   }
   if ((request.method === "GET" || request.method === "POST") && route === "/stat/getStatUser") {
+    await materializeCurrentTraffic(env);
     const input: Record<string, any> = request.method === "POST" ? await body<Record<string, any>>(request.clone()) : {};
     if (request.method === "GET") new URL(request.url).searchParams.forEach((value, key) => { input[key] = value; });
     const userId = nullableNumber(input.user_id);
@@ -3419,6 +3481,10 @@ async function adminApi(request: Request, env: Env, path: string) {
     const start = Number(url.searchParams.get("start_time") || 0);
     const end = Number(url.searchParams.get("end_time") || now());
     if (type === "server_traffic_rank") {
+      if (start >= await analyticsCutover(env)) {
+        const aeRows = await analyticsData<Record<string, any>[]>(env, "/internal/traffic/server-rank", { start, end, limit });
+        if (aeRows?.length) return ok(aeRows);
+      }
       const result = await env.XBOARD_DB.prepare(`SELECT server_id, server_type, COALESCE(SUM(u),0) AS u, COALESCE(SUM(d),0) AS d, COALESCE(SUM(u+d),0) AS total FROM v2_stat_server WHERE record_at >= ? AND record_at < ? AND COALESCE(record_type,'d') = 'd' GROUP BY server_id, server_type ORDER BY total DESC LIMIT ?`)
         .bind(start, end, limit).all();
       return ok(result.results || []);
@@ -3429,6 +3495,15 @@ async function adminApi(request: Request, env: Env, path: string) {
       return ok(result.results || []);
     }
     if (type !== "user_consumption_rank") return fail("统计类型无效", 422, 422);
+    if (start >= await analyticsCutover(env)) {
+      const aeRows = await analyticsData<Record<string, any>[]>(env, "/internal/traffic/rank", { start, end, limit });
+      if (aeRows?.length) {
+        const ids = aeRows.map(row => Number(row.user_id)).filter(Boolean);
+        const users = ids.length ? await env.XBOARD_DB.prepare(`SELECT id, email FROM v2_user WHERE id IN (${ids.map(() => "?").join(",")})`).bind(...ids).all<{ id: number; email: string }>() : { results: [] as { id: number; email: string }[] };
+        const emails = new Map((users.results || []).map(row => [Number(row.id), row.email]));
+        return ok(aeRows.map(row => ({ ...row, email: emails.get(Number(row.user_id)) || null })));
+      }
+    }
     const result = await env.XBOARD_DB.prepare(`SELECT su.user_id, u.email, COALESCE(SUM(su.u),0) AS u, COALESCE(SUM(su.d),0) AS d, COALESCE(SUM(su.u+su.d),0) AS total FROM v2_stat_user su LEFT JOIN v2_user u ON u.id = su.user_id WHERE su.record_at >= ? AND su.record_at < ? AND COALESCE(su.record_type,'d') = 'd' GROUP BY su.user_id, u.email ORDER BY total DESC LIMIT ?`)
       .bind(start, end, limit).all();
     return ok(result.results || []);
@@ -3439,6 +3514,7 @@ async function adminApi(request: Request, env: Env, path: string) {
     if (!["paid_total", "commission_total", "register_count"].includes(type)) return fail("统计类型无效", 422, 422);
     const start = Number(url.searchParams.get("start_time") || 0);
     const end = Number(url.searchParams.get("end_time") || now());
+    if (end >= dayStart()) await materializeCurrentTraffic(env);
     const result = await env.XBOARD_DB.prepare("SELECT * FROM v2_stat WHERE record_at >= ? AND record_at < ? ORDER BY record_at ASC LIMIT 1000").bind(start, end).all<Record<string, any>>();
     return ok((result.results || []).map(row => ({ ...row, ...(type === "paid_total" ? { paid_total: Number(row.paid_total || 0) / 100 } : {}), ...(type === "commission_total" ? { commission_total: Number(row.commission_total || 0) / 100 } : {}) })));
   }

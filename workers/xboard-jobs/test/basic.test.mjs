@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { __test } from "../src/index.ts";
+import { TrafficStatsHub } from "../src/traffic-stats.ts";
 
 test("xboard-jobs has an entrypoint", () => {
   assert.ok(fs.existsSync("src/index.ts"));
@@ -37,12 +38,60 @@ test("telegram and daily statistics preserve upstream success and record contrac
 });
 
 test("traffic statistics persist the official server_rate field", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = fs.readFileSync("src/traffic-stats.ts", "utf8");
   assert.match(source, /server_rate, record_type/);
   assert.match(source, /server_rate = excluded\.server_rate/);
   assert.match(source, /v2_stat_server\(server_id, server_type, u, d, record_type,[\s\S]*VALUES \(\?, \?, \?, \?, 'd'/);
   assert.doesNotMatch(source, /UPDATE v2_stat_server SET record_type = 'd' WHERE/);
-  assert.match(source, /SET u = u \+ \?, d = d \+ \?, t = \?, updated_at = \?/);
+  assert.match(source, /u = excluded\.u, d = excluded\.d/);
+  assert.doesNotMatch(source, /u = u \+ excluded\.u/);
+});
+
+test("traffic statistics use one-row Outbox batches and a global durable aggregator", async () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const hub = fs.readFileSync("src/traffic-stats.ts", "utf8");
+  const wrangler = fs.readFileSync("wrangler.toml", "utf8");
+  assert.match(source, /INSERT INTO v2_traffic_stats_outbox/);
+  assert.doesNotMatch(source, /v2_stat_user[\s\S]*u = u \+ excluded\.u/);
+  assert.match(hub, /class TrafficStatsHub/);
+  assert.match(hub, /processed:/);
+  assert.match(hub, /bucket:/);
+  assert.match(hub, /now\(\) - last >= 3600/);
+  assert.match(hub, /input\.force === true/);
+  assert.match(wrangler, /name = "TRAFFIC_STATS_HUB"/);
+  assert.match(wrangler, /dataset = "xboard_user_traffic"/);
+  const first = await __test.stableBatchId(["b", "a"]);
+  const second = await __test.stableBatchId(["a", "b"]);
+  assert.equal(first, second);
+});
+
+test("TrafficStatsHub deduplicates a retried batch and updates only involved user shards", async () => {
+  const values = new Map();
+  const storage = {
+    async get(key) { return values.get(key); },
+    async put(key, value) {
+      if (typeof key === "string") values.set(key, value);
+      else for (const [name, entry] of Object.entries(key)) values.set(name, entry);
+    },
+    async delete(key) { return values.delete(key); },
+    async list(options = {}) { return new Map([...values].filter(([key]) => !options.prefix || key.startsWith(options.prefix))); },
+    async setAlarm() {},
+    async transaction(closure) { return closure(this); }
+  };
+  const db = {
+    withSession() { return this; },
+    prepare() { return { bind() { return this; }, async all() { return { success: true, results: [] }; }, async first() { return null; }, async run() { return { success: true }; } }; },
+    async batch() { return []; }
+  };
+  const points = [];
+  const hub = new TrafficStatsHub({ storage }, { XBOARD_DB: db, USER_TRAFFIC_ANALYTICS: { writeDataPoint: point => points.push(point) }, SERVER_TRAFFIC_ANALYTICS: { writeDataPoint: point => points.push(point) } });
+  const payload = { batch_id: "stable", user_aggregates: [{ userId: 17, serverId: 3, serverType: "vless", u: 10, d: 20, rate: 1 }], server_aggregates: [{ serverId: 3, serverType: "vless", u: 10, d: 20 }], transfer_used: 30, record_at: 1000, created_at: 1200 };
+  assert.equal((await hub.fetch(new Request("https://hub/process", { method: "POST", body: JSON.stringify(payload) }))).status, 200);
+  assert.equal((await hub.fetch(new Request("https://hub/process", { method: "POST", body: JSON.stringify(payload) }))).status, 200);
+  assert.equal(values.get("daily:user:1000:1")["17:3:vless"].u, 10);
+  assert.equal(values.get("daily:total:1000"), 30);
+  assert.equal([...values.keys()].filter(key => key.startsWith("daily:user:1000:")).length, 1);
+  assert.equal(points.length, 0);
 });
 
 test("mail templates override fallbacks and provider credentials stay protocol-specific", () => {

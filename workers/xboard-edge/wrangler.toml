@@ -25,6 +25,14 @@ service = "xboard-server"
 binding = "XBOARD_SUBSCRIPTION"
 service = "xboard-subscription"
 
+[[services]]
+binding = "XBOARD_ANALYTICS"
+service = "xboard-analytics"
+
+[[services]]
+binding = "XBOARD_JOBS"
+service = "xboard-jobs"
+
 [[queues.producers]]
 binding = "MAIL_EVENTS"
 queue = "mail-events"

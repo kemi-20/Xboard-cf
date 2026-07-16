@@ -2,6 +2,7 @@ name = "xboard-jobs"
 main = "src/index.ts"
 compatibility_date = "2026-06-26"
 account_id = "CLOUDFLARE_ACCOUNT_ID"
+workers_dev = false
 
 [[d1_databases]]
 binding = "XBOARD_DB"
@@ -11,6 +12,22 @@ database_id = "D1_DATABASE_ID"
 [[kv_namespaces]]
 binding = "XBOARD_KV"
 id = "KV_NAMESPACE_ID"
+
+[[durable_objects.bindings]]
+name = "TRAFFIC_STATS_HUB"
+class_name = "TrafficStatsHub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["TrafficStatsHub"]
+
+[[analytics_engine_datasets]]
+binding = "USER_TRAFFIC_ANALYTICS"
+dataset = "xboard_user_traffic"
+
+[[analytics_engine_datasets]]
+binding = "SERVER_TRAFFIC_ANALYTICS"
+dataset = "xboard_server_traffic"
 
 [[queues.consumers]]
 queue = "traffic-events"

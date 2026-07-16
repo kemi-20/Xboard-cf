@@ -19,7 +19,19 @@ export interface D1Database {
 export interface Queue<T = unknown> { send(message: T): Promise<void>; sendBatch(messages: { body: T }[]): Promise<void>; }
 export interface Message<T = unknown> { body: T; ack(): void; retry(): void; }
 export interface MessageBatch<T = unknown> { messages: Message<T>[]; queue: string; }
-export interface DurableObjectState { storage: Map<string, unknown>; }
+export interface DurableObjectStorage {
+  get<T = unknown>(key: string): Promise<T | undefined>;
+  put(key: string, value: unknown): Promise<void>;
+  put(entries: Record<string, unknown>): Promise<void>;
+  delete(key: string): Promise<boolean>;
+  list<T = unknown>(options?: { prefix?: string }): Promise<Map<string, T>>;
+  setAlarm(timestamp: number | Date): Promise<void>;
+  transaction?<T>(closure: (txn: DurableObjectStorage) => Promise<T>): Promise<T>;
+}
+export interface DurableObjectState { storage: DurableObjectStorage; }
 export interface DurableObjectNamespace { idFromName(name: string): DurableObjectId; get(id: DurableObjectId): DurableObjectStub; }
 export interface DurableObjectId {}
 export interface DurableObjectStub { fetch(input: RequestInfo, init?: RequestInit): Promise<Response>; }
+export interface AnalyticsEngineDataset {
+  writeDataPoint(event: { indexes?: string[]; blobs?: string[]; doubles?: number[] }): void;
+}

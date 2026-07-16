@@ -2,7 +2,7 @@ import type { D1Database, D1PreparedStatement, Fetcher, KVNamespace, Queue } fro
 import { json, now, ok } from "./compat.ts";
 import { primaryDatabase, settings as loadSettings } from "./db.ts";
 
-export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; MAIL_EVENTS: Queue; XBOARD_SERVER: Fetcher; }
+export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; MAIL_EVENTS: Queue; XBOARD_SERVER: Fetcher; XBOARD_JOBS: Fetcher; }
 
 const SHANGHAI_OFFSET = 8 * 3600;
 
@@ -442,6 +442,14 @@ function scheduledTasks(ts: number) {
 async function run(env: Env, task = "scheduled") {
   const ts = now();
   await updateScheduleHeartbeat(env, ts);
+  if (task === "scheduled" || task === "all") {
+    try {
+      const response = await env.XBOARD_JOBS.fetch("https://xboard-jobs.internal/internal/traffic/replay", { method: "POST" });
+      if (!response.ok) throw new Error(`Outbox replay returned ${response.status}`);
+    } catch (error) {
+      console.warn("Traffic statistics Outbox replay deferred", { error: String((error as Error)?.message || error) });
+    }
+  }
   const day = dayStart(ts);
   const tasks = task === "all"
     ? ["check:order", "check:ticket", "check:commission", "check:traffic-exceeded", "reset:traffic", "cleanup:online-status", "reset:log", "xboard:statistics", "send:remindMail"]

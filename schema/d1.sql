@@ -397,6 +397,16 @@ CREATE TABLE IF NOT EXISTS v2_traffic_dedup (
   event_id TEXT PRIMARY KEY,
   created_at INTEGER NOT NULL
 ) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS v2_traffic_stats_outbox (
+  batch_id TEXT PRIMARY KEY,
+  event_ids TEXT NOT NULL,
+  user_aggregates TEXT NOT NULL,
+  server_aggregates TEXT NOT NULL,
+  transfer_used INTEGER NOT NULL DEFAULT 0,
+  record_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_v2_job_logs_failed_time ON v2_job_logs(updated_at, created_at) WHERE status = 'failed';
 
 CREATE TABLE IF NOT EXISTS v2_order (

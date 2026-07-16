@@ -1,8 +1,18 @@
-import type { D1Database, D1PreparedStatement, KVNamespace, MessageBatch } from "./types.ts";
+import type { AnalyticsEngineDataset, D1Database, D1PreparedStatement, DurableObjectNamespace, KVNamespace, MessageBatch } from "./types.ts";
 import { now, ok } from "./compat.ts";
 import { primaryDatabase, settings as loadSettings } from "./db.ts";
+export { TrafficStatsHub } from "./traffic-stats.ts";
 
-export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; MAILEROO_API_KEY?: string; BREVO_API_KEY?: string; TELEGRAM_BOT_TOKEN?: string; }
+export interface Env {
+  XBOARD_DB: D1Database;
+  XBOARD_KV: KVNamespace;
+  TRAFFIC_STATS_HUB: DurableObjectNamespace;
+  USER_TRAFFIC_ANALYTICS: AnalyticsEngineDataset;
+  SERVER_TRAFFIC_ANALYTICS: AnalyticsEngineDataset;
+  MAILEROO_API_KEY?: string;
+  BREVO_API_KEY?: string;
+  TELEGRAM_BOT_TOKEN?: string;
+}
 
 const SHANGHAI_OFFSET = 8 * 3600;
 let trafficDedupSchemaReady = false;
@@ -11,16 +21,77 @@ let trafficDedupSchemaPromise: Promise<void> | null = null;
 async function ensureTrafficDedupSchema(env: Env) {
   if (trafficDedupSchemaReady) return;
   if (!trafficDedupSchemaPromise) {
-    trafficDedupSchemaPromise = env.XBOARD_DB.prepare(`CREATE TABLE IF NOT EXISTS v2_traffic_dedup (
-      event_id TEXT PRIMARY KEY,
-      created_at INTEGER NOT NULL
-    ) WITHOUT ROWID`).run().then(() => {
+    trafficDedupSchemaPromise = (async () => {
+      await env.XBOARD_DB.prepare(`CREATE TABLE IF NOT EXISTS v2_traffic_dedup (
+        event_id TEXT PRIMARY KEY,
+        created_at INTEGER NOT NULL
+      ) WITHOUT ROWID`).run();
+      await env.XBOARD_DB.prepare(`CREATE TABLE IF NOT EXISTS v2_traffic_stats_outbox (
+        batch_id TEXT PRIMARY KEY,
+        event_ids TEXT NOT NULL,
+        user_aggregates TEXT NOT NULL,
+        server_aggregates TEXT NOT NULL,
+        transfer_used INTEGER NOT NULL DEFAULT 0,
+        record_at INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+      ) WITHOUT ROWID`).run();
+      try {
+        await env.XBOARD_DB.prepare("INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES ('analytics_cutover_at', ?, ?, ?) ON CONFLICT(name) DO NOTHING").bind(String(now()), now(), now()).run();
+      } catch { /* Fresh schema initialization may still be creating v2_settings. */ }
+    })().then(() => {
       trafficDedupSchemaReady = true;
     }).finally(() => {
       trafficDedupSchemaPromise = null;
     });
   }
   await trafficDedupSchemaPromise;
+}
+
+async function stableBatchId(eventIds: string[]) {
+  const input = new TextEncoder().encode([...eventIds].sort().join("\n"));
+  const digest = await crypto.subtle.digest("SHA-256", input);
+  return [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, "0")).join("");
+}
+
+function trafficStatsStub(env: Env) {
+  return env.TRAFFIC_STATS_HUB.get(env.TRAFFIC_STATS_HUB.idFromName("traffic-stats:global"));
+}
+
+async function dispatchOutbox(env: Env, row: Record<string, any>) {
+  const response = await trafficStatsStub(env).fetch("https://traffic-stats.internal/process", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      batch_id: row.batch_id,
+      user_aggregates: typeof row.user_aggregates === "string" ? JSON.parse(row.user_aggregates) : row.user_aggregates,
+      server_aggregates: typeof row.server_aggregates === "string" ? JSON.parse(row.server_aggregates) : row.server_aggregates,
+      transfer_used: Number(row.transfer_used || 0),
+      record_at: Number(row.record_at),
+      created_at: Number(row.created_at)
+    })
+  });
+  if (!response.ok) throw new Error(`TrafficStatsHub rejected batch ${row.batch_id}: ${response.status}`);
+  await env.XBOARD_DB.prepare("DELETE FROM v2_traffic_stats_outbox WHERE batch_id = ?").bind(row.batch_id).run();
+}
+
+async function replayOutbox(env: Env, limit = 100) {
+  await ensureTrafficDedupSchema(env);
+  const rows = await env.XBOARD_DB.prepare("SELECT * FROM v2_traffic_stats_outbox ORDER BY created_at ASC LIMIT ?").bind(Math.min(500, Math.max(1, limit))).all<Record<string, any>>();
+  let delivered = 0;
+  for (const row of rows.results || []) {
+    await dispatchOutbox(env, row);
+    delivered++;
+  }
+  return delivered;
+}
+
+async function materializeTraffic(env: Env, recordAt?: number, force = false) {
+  await replayOutbox(env, 500);
+  const response = await trafficStatsStub(env).fetch("https://traffic-stats.internal/materialize", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ record_at: recordAt || undefined, force })
+  });
+  if (!response.ok) throw new Error(`TrafficStatsHub materialization failed: ${response.status}`);
+  return response.json();
 }
 
 function dayStart(ts = now()) {
@@ -251,6 +322,9 @@ async function trafficBatch(env: Env, events: any[]) {
   const recordAt = dayStart();
   const aggregate = aggregateTrafficEvents(candidates);
   const ts = now();
+  const batchId = await stableBatchId(candidates.map(event => String(event.event_id)));
+  const userAggregates = [...aggregate.userStats.values()];
+  const serverAggregates = [...aggregate.servers.values()];
   const statements: D1PreparedStatement[] = [];
   for (const eventId of staleEventIds) {
     statements.push(env.XBOARD_DB.prepare("DELETE FROM v2_job_logs WHERE event_id = ? AND status != 'done'").bind(eventId));
@@ -261,27 +335,21 @@ async function trafficBatch(env: Env, events: any[]) {
       SELECT id, ? FROM v2_user WHERE id = ? AND banned = 0 AND transfer_enable > 0 AND u + d >= transfer_enable
       ON CONFLICT(user_id) DO NOTHING`).bind(ts, userId));
   }
-  for (const value of aggregate.userStats.values()) {
-    statements.push(env.XBOARD_DB.prepare("INSERT INTO v2_stat_user(user_id, server_id, server_type, u, d, rate, server_rate, record_type, record_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'd', ?, ?, ?) ON CONFLICT(user_id, server_id, server_type, record_at) DO UPDATE SET u = u + excluded.u, d = d + excluded.d, rate = excluded.rate, server_rate = excluded.server_rate, updated_at = excluded.updated_at")
-      .bind(value.userId, value.serverId, value.serverType, value.u, value.d, value.rate, value.rate, recordAt, ts, ts));
-  }
   for (const value of aggregate.servers.values()) {
     statements.push(env.XBOARD_DB.prepare("UPDATE v2_server SET u = u + ?, d = d + ?, updated_at = ? WHERE id = ?").bind(value.u, value.d, ts, value.serverId));
-    statements.push(env.XBOARD_DB.prepare("INSERT INTO v2_stat_server(server_id, server_type, u, d, record_type, record_at, created_at, updated_at) VALUES (?, ?, ?, ?, 'd', ?, ?, ?) ON CONFLICT(server_id, server_type, record_at) DO UPDATE SET u = u + excluded.u, d = d + excluded.d, record_type = 'd', updated_at = excluded.updated_at")
-      .bind(value.serverId, value.serverType, value.u, value.d, recordAt, ts, ts));
-  }
-  if (aggregate.transferUsed) {
-    statements.push(env.XBOARD_DB.prepare("INSERT INTO v2_stat(record_at, record_type, user_count, order_count, transfer_used, created_at, updated_at) VALUES (?, 'd', 0, 0, ?, ?, ?) ON CONFLICT(record_at, record_type) DO UPDATE SET transfer_used = v2_stat.transfer_used + excluded.transfer_used, updated_at = excluded.updated_at")
-      .bind(recordAt, aggregate.transferUsed, ts, ts));
   }
   for (const event of candidates) {
     statements.push(env.XBOARD_DB.prepare("INSERT INTO v2_traffic_dedup(event_id, created_at) VALUES (?, ?)")
       .bind(String(event.event_id), ts));
   }
+  statements.push(env.XBOARD_DB.prepare(`INSERT INTO v2_traffic_stats_outbox(batch_id, event_ids, user_aggregates, server_aggregates, transfer_used, record_at, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(batch_id) DO NOTHING`)
+    .bind(batchId, JSON.stringify(candidates.map(event => String(event.event_id)).sort()), JSON.stringify(userAggregates), JSON.stringify(serverAggregates), aggregate.transferUsed, recordAt, ts));
+  await env.XBOARD_DB.batch(statements);
   try {
-    await env.XBOARD_DB.batch(statements);
+    await dispatchOutbox(env, { batch_id: batchId, user_aggregates: userAggregates, server_aggregates: serverAggregates, transfer_used: aggregate.transferUsed, record_at: recordAt, created_at: ts });
   } catch (error) {
-    throw error;
+    console.warn("Traffic statistics retained in Outbox for replay", { batch_id: batchId, error: String((error as Error)?.message || error) });
   }
 }
 
@@ -407,10 +475,29 @@ async function handle(env: Env, event: any) {
   else throw new Error(`Unsupported queue event type: ${String(event.type || "unknown")}`);
 }
 
-export const __test = { dayStart, render, claimEvent, completeClaim, failClaim, ensureTrafficDedupSchema, aggregateTrafficEvents, splitTrafficEvents, trafficEventGroups, traffic, trafficBatch, trafficCandidates };
+export const __test = { dayStart, render, claimEvent, completeClaim, failClaim, ensureTrafficDedupSchema, stableBatchId, aggregateTrafficEvents, splitTrafficEvents, trafficEventGroups, traffic, trafficBatch, trafficCandidates };
 
 export default {
-  async fetch() { return ok({ service: "xboard-jobs", time: now() }); },
+  async fetch(request: Request, env: Env) {
+    env = { ...env, XBOARD_DB: primaryDatabase(env.XBOARD_DB) };
+    const path = new URL(request.url).pathname;
+    if (request.method === "POST" && path === "/internal/traffic/replay") return ok({ delivered: await replayOutbox(env, 500) });
+    if (request.method === "POST" && path === "/internal/traffic/materialize") {
+      const url = new URL(request.url);
+      return ok(await materializeTraffic(env, Number(url.searchParams.get("record_at") || 0) || undefined, url.searchParams.get("force") === "1"));
+    }
+    if (request.method === "POST" && path === "/internal/traffic/flush") {
+      await replayOutbox(env, 500);
+      const response = await trafficStatsStub(env).fetch("https://traffic-stats.internal/flush", { method: "POST" });
+      return new Response(response.body, response);
+    }
+    if (request.method === "POST" && path === "/internal/traffic/reset") {
+      await env.XBOARD_DB.prepare("DELETE FROM v2_traffic_stats_outbox").run();
+      const response = await trafficStatsStub(env).fetch("https://traffic-stats.internal/reset", { method: "POST" });
+      return new Response(response.body, response);
+    }
+    return ok({ service: "xboard-jobs", time: now() });
+  },
   async queue(batch: MessageBatch, env: Env) {
     env = { ...env, XBOARD_DB: primaryDatabase(env.XBOARD_DB) };
     const trafficMessages = batch.messages.filter(message => (message.body as any)?.type === "traffic");

@@ -1,4 +1,4 @@
-import type { D1Database, KVNamespace, Queue, DurableObjectState, ExecutionContext } from "./types.ts";
+import type { AnalyticsEngineDataset, D1Database, KVNamespace, Queue, DurableObjectState, ExecutionContext } from "./types.ts";
 import { now } from "./compat.ts";
 import { invalidateSettingsCache, primaryDatabase, settings as loadSettings } from "./db.ts";
 import {
@@ -12,6 +12,7 @@ export interface Env {
   TRAFFIC_EVENTS: Queue;
   NODE_HUB: any;
   STATUS_HUB: any;
+  RUNTIME_ANALYTICS: AnalyticsEngineDataset;
 }
 
 type AuthContext = { input: Row; node?: Row; machine?: Row };
@@ -582,6 +583,7 @@ export function appendMachineHistory(history: Row[], point: Row, recordedAt: num
 
 export class StatusHub {
   private state: DurableObjectState;
+  private env: Env;
   private status = new Map<string, Row>();
   private loadedStatus = new Set<string>();
   private persistedStatusAt = new Map<string, number>();
@@ -592,8 +594,9 @@ export class StatusHub {
   private devicesLoaded = false;
   private persistedDevicesAt = new Map<number, number>();
 
-  constructor(state: DurableObjectState) {
+  constructor(state: DurableObjectState, env: Env) {
     this.state = state;
+    this.env = env;
   }
 
   private async loadStatus(key: string) {
@@ -702,6 +705,11 @@ export class StatusHub {
         await this.state.storage.put(key, next);
         this.persistedStatusAt.set(key, updatedAt);
       }
+      if (critical) {
+        try {
+          this.env.RUNTIME_ANALYTICS.writeDataPoint({ indexes: [key], blobs: [input.state.connected === false ? "disconnect" : "status", "", "", "1"], doubles: [0, 0, 0, 0, 0, 0, 0, 0, updatedAt] });
+        } catch { /* Analytics must never block runtime status. */ }
+      }
       if (kind === "machine" && input.history && input.state.load_status && typeof input.state.load_status === "object") {
         const historyKey = `history:${id}`;
         const point = this.historyPoint(input.state.load_status as Row, updatedAt);
@@ -711,6 +719,9 @@ export class StatusHub {
           const nextHistory = appendMachineHistory(history, point, updatedAt);
           this.histories.set(id, nextHistory);
           await this.state.storage.put(historyKey, nextHistory);
+          try {
+            this.env.RUNTIME_ANALYTICS.writeDataPoint({ indexes: [`machine:${id}`], blobs: ["load", "", "", "1"], doubles: [Number(point.cpu || 0), Number(point.mem_used || 0), Number(point.disk_used || 0), Number(point.net_in_speed || 0), Number(point.net_out_speed || 0), 0, 0, 0, updatedAt, Number(point.mem_total || 0), Number(point.disk_total || 0)] });
+          } catch { /* StatusHub remains the runtime fallback. */ }
         }
       }
       return json({ data: true });

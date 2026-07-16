@@ -20,5 +20,9 @@ queue = "mail-events"
 binding = "XBOARD_SERVER"
 service = "xboard-server"
 
+[[services]]
+binding = "XBOARD_JOBS"
+service = "xboard-jobs"
+
 [triggers]
 crons = ["* * * * *"]

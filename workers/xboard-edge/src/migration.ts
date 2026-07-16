@@ -6,6 +6,7 @@ interface MigrationEnv {
   XBOARD_DB: D1Database;
   XBOARD_KV: KVNamespace;
   XBOARD_SERVER: Fetcher;
+  XBOARD_JOBS: Fetcher;
 }
 
 type MigrationMode = "merge" | "overwrite";
@@ -28,7 +29,7 @@ const SKIPPED_SOURCE_TABLES = ["v2_log", "v2_server_machine_load_history"] as co
 const tableSet = new Set<string>(MIGRATION_TABLES);
 const tableOrder = Object.fromEntries(MIGRATION_TABLES.map((table, index) => [table, index]));
 const DELETE_TABLES = [...MIGRATION_TABLES].reverse();
-const COMPLETE_RESET_TABLES = ["v2_log", "v2_server_machine_load_history", "v2_job_logs", "v2_traffic_pending_check", "v2_traffic_dedup"] as const;
+const COMPLETE_RESET_TABLES = ["v2_log", "v2_server_machine_load_history", "v2_job_logs", "v2_traffic_pending_check", "v2_traffic_dedup", "v2_traffic_stats_outbox"] as const;
 
 const NON_MIGRATABLE_SERVICE_TABLES = new Set(["v2_payment", "v2_plugins"]);
 const NON_MIGRATABLE_MAIL_SETTINGS = new Set([
@@ -75,6 +76,12 @@ async function resetServerRuntime(env: MigrationEnv) {
     await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/settings/invalidate", { method: "POST", headers: { "x-xboard-internal-token": token } });
     await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/status/reset", { method: "POST", headers: { "x-xboard-internal-token": token } });
   } catch { /* Nodes repopulate runtime state after migration or rollback. */ }
+}
+
+async function refreshTrafficStats(env: MigrationEnv, mode: "materialize" | "reset") {
+  const suffix = mode === "materialize" ? "?force=1" : "";
+  const response = await env.XBOARD_JOBS.fetch(`https://xboard-jobs.internal/internal/traffic/${mode}${suffix}`, { method: "POST" });
+  if (!response.ok) throw new Error(`Traffic statistics ${mode} failed (${response.status})`);
 }
 
 async function ensureMigrationSchema(env: MigrationEnv) {
@@ -376,6 +383,7 @@ async function startMigration(request: Request, env: MigrationEnv, adminId: numb
 }
 
 async function exportManifest(env: MigrationEnv) {
+  await refreshTrafficStats(env, "materialize");
   return ok({
     format: "xboard-sqlite3",
     template: "/migration/xboard-template.db",
@@ -759,6 +767,7 @@ async function finishRollback(request: Request, env: MigrationEnv) {
   ]);
   invalidateSettingsCache();
   await resetServerRuntime(env);
+  await refreshTrafficStats(env, "reset");
   const ts = now();
   const report = { restored_counts: expected, restored_at: ts };
   await env.XBOARD_DB.prepare("UPDATE v2_migration_runs SET status = 'rolled_back', rollback_progress = ?, report = ?, error = NULL, access_token_hash = NULL, finished_at = ?, updated_at = ? WHERE id = ?")
@@ -846,6 +855,13 @@ async function finishMigration(request: Request, env: MigrationEnv) {
   } catch { /* Cache invalidation is best effort. */ }
   invalidateSettingsCache();
   await resetServerRuntime(env);
+  try {
+    await refreshTrafficStats(env, "reset");
+  } catch (error) {
+    const details = { phase: "traffic_stats_reset", error: errorMessage(error) };
+    await markMigrationFailed(env, runId, "重置流量统计聚合状态失败", details);
+    return migrationError(`数据已切换，但重置流量统计聚合状态失败：${details.error}`, 500, details);
+  }
   try {
     await env.XBOARD_DB.batch([
       env.XBOARD_DB.prepare("DELETE FROM v2_migration_snapshot_rows WHERE run_id = ?").bind(runId),

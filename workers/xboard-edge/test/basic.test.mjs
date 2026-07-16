@@ -525,7 +525,7 @@ test("complete migration deletes old business data before strict replacement", (
   const source = fs.readFileSync("src/migration.ts", "utf8");
   const page = fs.readFileSync("public/migration/panel.html", "utf8");
   const app = fs.readFileSync("public/migration/app.js", "utf8");
-  assert.match(source, /COMPLETE_RESET_TABLES = \["v2_log", "v2_server_machine_load_history", "v2_job_logs", "v2_traffic_pending_check", "v2_traffic_dedup"\]/);
+  assert.match(source, /COMPLETE_RESET_TABLES = \["v2_log", "v2_server_machine_load_history", "v2_job_logs", "v2_traffic_pending_check", "v2_traffic_dedup", "v2_traffic_stats_outbox"\]/);
   assert.match(source, /DELETE FROM sqlite_sequence WHERE name IN/);
   assert.match(source, /COMPLETE_RESET_TABLES\.map\(\(\) => "\?"\)/);
   assert.match(source, /rollback_progress = \?[\s\S]*DELETE FROM sqlite_sequence WHERE name IN/);
