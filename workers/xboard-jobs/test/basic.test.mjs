@@ -70,7 +70,8 @@ test("traffic events use event-level idempotency and conditional exceeded checks
   assert.match(source, /ON CONFLICT\(user_id\) DO NOTHING/);
   assert.doesNotMatch(source, /traffic:pending_check/);
   assert.match(source, /trafficMessages = batch\.messages\.filter/);
-  assert.match(source, /offset < trafficMessages\.length; offset \+= 25/);
+  assert.match(source, /for \(const message of trafficMessages\)/);
+  assert.match(source, /trafficBatch\(env, \[message\.body as any\]\)/);
   assert.match(wrangler, /dead_letter_queue = "traffic-events-dlq"/);
   assert.match(wrangler, /dead_letter_queue = "mail-events-dlq"/);
   assert.match(wrangler, /max_retries = 5/);

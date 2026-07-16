@@ -691,3 +691,17 @@ test("ClashX Meta, legacy Clash plugins and TCP HTTP choices follow upstream", (
   const legacy = __test.clashProxy({ uuid: "u" }, { type: "shadowsocks", name: "S", host: "h", port: 1, protocol_settings: { cipher: "aes-128-gcm", plugin: "obfs-local", plugin_opts: "obfs=http" } }, "clash");
   assert.equal(legacy.plugin, "obfs-local");
 });
+
+test("missing uTLS configuration receives the upstream random fingerprint", () => {
+  const originalRandom = Math.random;
+  Math.random = () => 0;
+  try {
+    const proxy = __test.clashProxy({ uuid: "u" }, {
+      type: "vless", name: "V", host: "h", port: 443,
+      protocol_settings: { tls: 1, tls_settings: { server_name: "h" }, network: "tcp" }
+    }, "clashmeta");
+    assert.equal(proxy["client-fingerprint"], "chrome");
+  } finally {
+    Math.random = originalRandom;
+  }
+});

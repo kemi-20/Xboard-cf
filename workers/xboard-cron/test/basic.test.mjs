@@ -71,6 +71,7 @@ test("cron implements the official order, ticket, commission and traffic checks"
   assert.match(source, /const recordDay = day - 86400/);
   assert.match(source, /FROM v2_stat_server WHERE created_at >= \? AND created_at < \?/);
   assert.match(source, /transfer_used_total = \?/);
+  assert.doesNotMatch(source, /transfer_used = \?, transfer_used_total = \?/);
   for (const field of ["order_total", "paid_count", "paid_total", "commission_count", "commission_total", "register_count", "invite_count"]) assert.match(source, new RegExp(field));
   assert.match(source, /v2_traffic_reset_logs/);
   assert.match(source, /new_order_event_id/);
@@ -86,7 +87,7 @@ test("cron implements the official order, ticket, commission and traffic checks"
   assert.match(source, /ORDER BY u\.id ASC LIMIT 100/);
   assert.match(source, /online_count > 0 AND \(last_online_at IS NULL OR last_online_at < \?\)/);
   assert.match(source, /while \(true\)[\s\S]*commission_status = 1/);
-  assert.match(source, /v2_traffic_pending_check[\s\S]*LIMIT 1000[\s\S]*DELETE FROM v2_traffic_pending_check/);
+  assert.match(source, /DELETE FROM v2_traffic_pending_check WHERE user_id IN \([\s\S]*LIMIT 1000/);
   assert.match(source, /DELETE FROM failed_jobs WHERE failed_at < \?/);
   assert.match(source, /DELETE FROM v2_job_logs WHERE COALESCE\(updated_at, created_at\) < \?/);
   assert.match(source, /ts - 7 \* 86400/);
@@ -139,12 +140,12 @@ test("a stale cron owner cannot release its replacement's lock", async () => {
   const env = { XBOARD_DB: db };
   const first = await __test.acquireTaskLock(env, "check:order", 1_000);
   assert.ok(first);
-  const replacement = await __test.acquireTaskLock(env, "check:order", 1_601);
+  const replacement = await __test.acquireTaskLock(env, "check:order", 2_801);
   assert.ok(replacement);
   assert.notEqual(replacement, first);
-  await __test.releaseTaskLock(env, "check:order", first, 1_602);
+  await __test.releaseTaskLock(env, "check:order", first, 2_802);
   assert.equal(db.rows.get("schedule:lock:check:order").status, replacement);
-  await __test.releaseTaskLock(env, "check:order", replacement, 1_603);
+  await __test.releaseTaskLock(env, "check:order", replacement, 2_803);
   assert.equal(db.rows.get("schedule:lock:check:order").status, "done");
 });
 
@@ -158,6 +159,9 @@ test("scheduled cron keeps one trigger and one shared minute lock", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /acquireTaskLock\(env, "scheduled", ts\)/);
   assert.match(source, /releaseTaskLock\(env, "scheduled", scheduledClaim/);
+  assert.match(source, /Scheduled task failed/);
+  assert.match(source, /if \(task !== "scheduled"\) throw error/);
+  assert.match(source, /ts - 1800/);
   assert.doesNotMatch(source, /schedule:last_run:\$\{current\}/);
   assert.match(source, /ts - previous >= 300/);
 });

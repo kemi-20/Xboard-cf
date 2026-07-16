@@ -273,10 +273,13 @@ async function processAlive(env: Env, nodeId: number, data: unknown) {
       next[userId] = Object.fromEntries(Array.from(new Set(ips.map(normalizeDeviceIp).filter(Boolean))).map(ip => [ip, timestamp]));
     }
   }
-  const response = await statusHub(env).fetch("https://status-hub.internal/devices/report", {
-    method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ node_id: nodeId, devices: next, timestamp })
-  });
+  let response: Response;
+  try {
+    response = await statusHub(env).fetch("https://status-hub.internal/devices/report", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ node_id: nodeId, devices: next, timestamp })
+    });
+  } catch { return false; }
   if (!response.ok) return false;
   const result = await response.json() as { data?: { counts?: Record<string, number> } };
   const statements = Object.entries(result.data?.counts || {}).map(([userId, count]) =>
@@ -291,9 +294,12 @@ async function processAlive(env: Env, nodeId: number, data: unknown) {
 async function aggregateDevices(env: Env, users: Row[], limitedOnly = false) {
   const userIds = users.filter(user => !limitedOnly || Number(user.device_limit || 0) > 0).map(user => Number(user.id)).filter(Boolean);
   if (!userIds.length) return {};
-  const response = await statusHub(env).fetch("https://status-hub.internal/devices/list", {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ user_ids: userIds, timestamp: now() })
-  });
+  let response: Response;
+  try {
+    response = await statusHub(env).fetch("https://status-hub.internal/devices/list", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ user_ids: userIds, timestamp: now() })
+    });
+  } catch { return {}; }
   if (!response.ok) return {};
   const result = await response.json() as { data?: { users?: Row } };
   return result.data?.users || {};
@@ -306,9 +312,12 @@ async function aggregateDeviceCounts(env: Env, users: Row[]) {
 
 async function clearNodeDevices(env: Env, nodeId: number) {
   const timestamp = now();
-  const response = await statusHub(env).fetch("https://status-hub.internal/devices/clear", {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ node_id: nodeId, timestamp })
-  });
+  let response: Response;
+  try {
+    response = await statusHub(env).fetch("https://status-hub.internal/devices/clear", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ node_id: nodeId, timestamp })
+    });
+  } catch { return; }
   if (!response.ok) return;
   const result = await response.json() as { data?: { counts?: Record<string, number> } };
   const statements = Object.entries(result.data?.counts || {}).map(([userId, count]) =>
@@ -541,8 +550,13 @@ async function syncUserChange(env: Env, userId: number, oldGroupId?: number) {
 async function syncUsersChange(env: Env, userIds: number[]) {
   const ids = [...new Set(userIds.map(Number).filter(id => id > 0))].slice(0, 1000);
   if (!ids.length) return 0;
-  const users = await env.XBOARD_DB.prepare(`SELECT id, group_id FROM v2_user WHERE id IN (${ids.map(() => "?").join(",")})`).bind(...ids).all<Row>();
-  const groupByUser = new Map((users.results || []).map(user => [Number(user.id), Number(user.group_id || 0)]));
+  const userRows: Row[] = [];
+  for (let offset = 0; offset < ids.length; offset += 100) {
+    const chunk = ids.slice(offset, offset + 100);
+    const users = await env.XBOARD_DB.prepare(`SELECT id, group_id FROM v2_user WHERE id IN (${chunk.map(() => "?").join(",")})`).bind(...chunk).all<Row>();
+    userRows.push(...(users.results || []));
+  }
+  const groupByUser = new Map(userRows.map(user => [Number(user.id), Number(user.group_id || 0)]));
   const groups = new Set([...groupByUser.values()].filter(Boolean));
   let sent = 0;
   for (const node of await nodesForGroups(env, groups)) {
@@ -857,15 +871,15 @@ export class NodeHub {
           const updated = { ...identity, node_ids: nodeIds };
           (socket as any).serializeAttachment?.(updated);
           for (const removedId of previousNodeIds.filter(nodeId => !nodeIds.includes(nodeId))) {
-            if (await this.env.XBOARD_KV.get(`node:ws:target:${removedId}`) === `machine:${identity.machine_id}`) {
-              await this.env.XBOARD_KV.delete(`node:ws:target:${removedId}`);
+            if (await optionalKvGet(this.env, `node:ws:target:${removedId}`) === `machine:${identity.machine_id}`) {
+              await optionalKvDelete(this.env, `node:ws:target:${removedId}`);
             }
-            await this.env.XBOARD_KV.delete(`node:ws:alive:${removedId}`);
+            await optionalKvDelete(this.env, `node:ws:alive:${removedId}`);
             await clearNodeDevices(this.env, removedId);
           }
           for (const nodeId of nodeIds) {
-            await this.env.XBOARD_KV.put(`node:ws:target:${nodeId}`, `machine:${identity.machine_id}`, { expirationTtl: 86400 });
-            await this.env.XBOARD_KV.put(`node:ws:alive:${nodeId}`, "1", { expirationTtl: 86400 });
+            await optionalKvPut(this.env, `node:ws:target:${nodeId}`, `machine:${identity.machine_id}`, { expirationTtl: 86400 });
+            await optionalKvPut(this.env, `node:ws:alive:${nodeId}`, "1", { expirationTtl: 86400 });
           }
         }
         socket.send(wsMessage(event, data));
@@ -895,8 +909,8 @@ export class NodeHub {
       await reportStatus(this.env, "machine", Number(machine.id), { last_seen_at: now(), connected: true });
       for (const node of nodes) {
         await clearNodeDevices(this.env, Number(node.id));
-        await this.env.XBOARD_KV.put(`node:ws:target:${node.id}`, `machine:${machine.id}`, { expirationTtl: 86400 });
-        await this.env.XBOARD_KV.put(`node:ws:alive:${node.id}`, "1", { expirationTtl: 86400 });
+        await optionalKvPut(this.env, `node:ws:target:${node.id}`, `machine:${machine.id}`, { expirationTtl: 86400 });
+        await optionalKvPut(this.env, `node:ws:alive:${node.id}`, "1", { expirationTtl: 86400 });
         await this.fullSync(server, node, true);
       }
     } else {
@@ -913,8 +927,8 @@ export class NodeHub {
       (server as any).serializeAttachment?.(identity);
       server.send(wsMessage("auth.success", { node_id: Number(node.id) }));
       await clearNodeDevices(this.env, Number(node.id));
-      await this.env.XBOARD_KV.put(`node:ws:target:${node.id}`, `node:${node.id}`, { expirationTtl: 86400 });
-      await this.env.XBOARD_KV.put(`node:ws:alive:${node.id}`, "1", { expirationTtl: 86400 });
+      await optionalKvPut(this.env, `node:ws:target:${node.id}`, `node:${node.id}`, { expirationTtl: 86400 });
+      await optionalKvPut(this.env, `node:ws:alive:${node.id}`, "1", { expirationTtl: 86400 });
       await this.fullSync(server, node, false);
     }
     await this.state.storage.setAlarm(Date.now() + 55000);

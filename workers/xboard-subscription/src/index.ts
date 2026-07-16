@@ -324,10 +324,11 @@ function query(params: Config) {
 }
 
 function tlsFingerprint(ps: Config) {
+  const fingerprints = ["chrome", "firefox", "safari", "ios", "edge", "qq"];
+  if (ps.utls === null || ps.utls === undefined) return fingerprints[Math.floor(Math.random() * fingerprints.length)];
   if (!ps.utls?.enabled) return undefined;
   const fingerprint = ps.utls?.fingerprint || "chrome";
   if (fingerprint !== "random") return fingerprint;
-  const fingerprints = ["chrome", "firefox", "safari", "ios", "edge", "qq"];
   return fingerprints[Math.floor(Math.random() * fingerprints.length)];
 }
 

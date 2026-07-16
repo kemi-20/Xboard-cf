@@ -217,14 +217,14 @@ async function statistics(env: Env, ts: number, day: number) {
   const commissions = await env.XBOARD_DB.prepare("SELECT COUNT(*) AS commission_count, COALESCE(SUM(get_amount), 0) AS commission_total FROM v2_commission_log WHERE created_at >= ? AND created_at < ?").bind(recordDay, day).first<any>();
   const registrations = await env.XBOARD_DB.prepare("SELECT COUNT(*) AS register_count, COALESCE(SUM(CASE WHEN invite_user_id IS NOT NULL THEN 1 ELSE 0 END), 0) AS invite_count FROM v2_user WHERE created_at >= ? AND created_at < ?").bind(recordDay, day).first<any>();
   const userCount = Number(users?.user_count || 0);
-  const transferUsed = Number(traffic?.transfer_used || 0);
+  const transferUsedTotal = Number(traffic?.transfer_used || 0);
   const existing = await env.XBOARD_DB.prepare("SELECT id FROM v2_stat WHERE record_at = ? AND record_type = 'd' ORDER BY id ASC LIMIT 1").bind(recordDay).first<any>();
   if (existing) {
-    await env.XBOARD_DB.prepare("UPDATE v2_stat SET user_count = ?, order_count = ?, order_total = ?, paid_count = ?, paid_total = ?, commission_count = ?, commission_total = ?, register_count = ?, invite_count = ?, transfer_used = ?, transfer_used_total = ?, record_type = 'd', updated_at = ? WHERE id = ?")
-      .bind(userCount, Number(orders?.order_count || 0), Number(orders?.order_total || 0), Number(paid?.paid_count || 0), Number(paid?.paid_total || 0), Number(commissions?.commission_count || 0), Number(commissions?.commission_total || 0), Number(registrations?.register_count || 0), Number(registrations?.invite_count || 0), transferUsed, transferUsed, ts, existing.id).run();
+    await env.XBOARD_DB.prepare("UPDATE v2_stat SET user_count = ?, order_count = ?, order_total = ?, paid_count = ?, paid_total = ?, commission_count = ?, commission_total = ?, register_count = ?, invite_count = ?, transfer_used_total = ?, record_type = 'd', updated_at = ? WHERE id = ?")
+      .bind(userCount, Number(orders?.order_count || 0), Number(orders?.order_total || 0), Number(paid?.paid_count || 0), Number(paid?.paid_total || 0), Number(commissions?.commission_count || 0), Number(commissions?.commission_total || 0), Number(registrations?.register_count || 0), Number(registrations?.invite_count || 0), transferUsedTotal, ts, existing.id).run();
   } else {
     await env.XBOARD_DB.prepare("INSERT INTO v2_stat(record_at, record_type, user_count, order_count, order_total, paid_count, paid_total, commission_count, commission_total, register_count, invite_count, transfer_used, transfer_used_total, created_at, updated_at) VALUES (?, 'd', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .bind(recordDay, userCount, Number(orders?.order_count || 0), Number(orders?.order_total || 0), Number(paid?.paid_count || 0), Number(paid?.paid_total || 0), Number(commissions?.commission_count || 0), Number(commissions?.commission_total || 0), Number(registrations?.register_count || 0), Number(registrations?.invite_count || 0), transferUsed, transferUsed, ts, ts).run();
+      .bind(recordDay, userCount, Number(orders?.order_count || 0), Number(orders?.order_total || 0), Number(paid?.paid_count || 0), Number(paid?.paid_total || 0), Number(commissions?.commission_count || 0), Number(commissions?.commission_total || 0), Number(registrations?.register_count || 0), Number(registrations?.invite_count || 0), 0, transferUsedTotal, ts, ts).run();
   }
   await env.XBOARD_DB.prepare(`INSERT INTO v2_job_logs(event_id, type, status, payload, error, created_at, updated_at)
     VALUES (?, 'schedule', 'done', '{}', NULL, ?, ?)
@@ -351,7 +351,6 @@ async function checkTrafficExceeded(env: Env, ts: number) {
     const pending = await env.XBOARD_DB.prepare("SELECT u.id, u.banned, u.transfer_enable, u.u, u.d FROM v2_traffic_pending_check p JOIN v2_user u ON u.id = p.user_id ORDER BY p.updated_at ASC LIMIT 1000").all<any>();
     const rows = pending.results || [];
     if (!rows.length) break;
-    const pendingIds = rows.map(row => Number(row.id));
     const ids = rows.filter(row => !Number(row.banned) && Number(row.transfer_enable) > 0 && Number(row.u || 0) + Number(row.d || 0) >= Number(row.transfer_enable)).map(row => Number(row.id));
     if (ids.length) {
       const response = await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/sync", {
@@ -361,7 +360,9 @@ async function checkTrafficExceeded(env: Env, ts: number) {
       });
       if (!response.ok) throw new Error(`Traffic exceeded sync failed: HTTP ${response.status}`);
     }
-    await env.XBOARD_DB.prepare(`DELETE FROM v2_traffic_pending_check WHERE user_id IN (${pendingIds.map(() => "?").join(",")})`).bind(...pendingIds).run();
+    await env.XBOARD_DB.prepare(`DELETE FROM v2_traffic_pending_check WHERE user_id IN (
+      SELECT user_id FROM v2_traffic_pending_check ORDER BY updated_at ASC LIMIT 1000
+    )`).run();
   }
 }
 
@@ -386,7 +387,7 @@ async function acquireTaskLock(env: Env, task: string, ts: number) {
   const result = await env.XBOARD_DB.prepare(`INSERT INTO v2_job_logs(event_id, type, status, payload, created_at, updated_at)
     VALUES (?, 'schedule', ?, '{}', ?, ?)
     ON CONFLICT(event_id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at
-    WHERE v2_job_logs.status NOT LIKE 'running:%' OR v2_job_logs.updated_at < ?`).bind(eventId, claim, ts, ts, ts - 600).run();
+    WHERE v2_job_logs.status NOT LIKE 'running:%' OR v2_job_logs.updated_at < ?`).bind(eventId, claim, ts, ts, ts - 1800).run();
   return Number((result.meta as any)?.changes || 0) === 1 ? claim : null;
 }
 
@@ -436,6 +437,9 @@ async function run(env: Env, task = "scheduled") {
         else if (current === "reset:log") await resetLogs(env, ts);
         else if (current === "xboard:statistics") await statistics(env, ts, day);
         else if (current === "send:remindMail") await sendReminders(env, ts, day);
+      } catch (error) {
+        console.error("Scheduled task failed", { task: current, error });
+        if (task !== "scheduled") throw error;
       } finally {
         if (claim) await releaseTaskLock(env, current, claim, now());
       }

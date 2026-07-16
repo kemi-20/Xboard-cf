@@ -244,6 +244,10 @@ test("websocket device state follows the official per-IP contract", () => {
   assert.match(source, /aggregateDevices\(env, users, true\)/);
   assert.match(source, /enqueueTraffic\(env, node, traffic, true, raw\.length\)/);
   assert.match(source, /const nonEmptyObject =/);
+  assert.match(source, /catch \{ return false; \}/);
+  assert.match(source, /catch \{ return \{\}; \}/);
+  assert.match(source, /offset < ids\.length; offset \+= 100/);
+  assert.doesNotMatch(source, /this\.env\.XBOARD_KV\.put\(`node:ws:/);
 });
 
 test("traffic-exceeded user removals are batched per node", () => {

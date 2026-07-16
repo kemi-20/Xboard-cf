@@ -346,8 +346,8 @@ export default {
     const trafficMessages = batch.messages.filter(message => (message.body as any)?.type === "traffic");
     if (trafficMessages.length) {
       try {
-        for (let offset = 0; offset < trafficMessages.length; offset += 25) {
-          await trafficBatch(env, trafficMessages.slice(offset, offset + 25).map(message => message.body as any));
+        for (const message of trafficMessages) {
+          await trafficBatch(env, [message.body as any]);
         }
         for (const message of trafficMessages) message.ack();
       } catch (error) {
