@@ -237,7 +237,6 @@ async function cleanupOnlineStatus(env: Env, ts: number) {
   try {
     await env.XBOARD_DB.prepare("UPDATE v2_user SET online_count = 0 WHERE online_count > 0 AND (last_online_at IS NULL OR last_online_at < ?)").bind(ts - 600).run();
   } catch {}
-  await env.XBOARD_DB.prepare("UPDATE v2_gift_card_code SET status = 2, updated_at = ? WHERE status = 0 AND expires_at IS NOT NULL AND expires_at < ?").bind(ts, ts).run();
 }
 
 async function checkTickets(env: Env, ts: number) {

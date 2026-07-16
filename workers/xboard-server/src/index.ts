@@ -254,7 +254,7 @@ function normalizeDeviceIp(value: unknown) {
   return ipv4 ? ipv4[1] : ip;
 }
 
-async function processAlive(env: Env, nodeId: number, data: unknown) {
+async function processAlive(env: Env, nodeId: number, data: unknown, replaceNode = false) {
   if (!data || typeof data !== "object") return false;
   const next: Row = {};
   const timestamp = now();
@@ -267,7 +267,7 @@ async function processAlive(env: Env, nodeId: number, data: unknown) {
   try {
     response = await statusHub(env).fetch("https://status-hub.internal/devices/report", {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ node_id: nodeId, devices: next, timestamp })
+      body: JSON.stringify({ node_id: nodeId, devices: next, timestamp, replace_node: replaceNode })
     });
   } catch { return false; }
   if (!response.ok) return false;
@@ -295,8 +295,8 @@ async function aggregateDevices(env: Env, users: Row[], limitedOnly = false) {
   return result.data?.users || {};
 }
 
-async function aggregateDeviceCounts(env: Env, users: Row[]) {
-  const devices = await aggregateDevices(env, users);
+async function aggregateDeviceCounts(env: Env, users: Row[], limitedOnly = false) {
+  const devices = await aggregateDevices(env, users, limitedOnly);
   return Object.fromEntries(Object.entries(devices)
     .map(([userId, ips]) => [userId, Array.isArray(ips) ? ips.length : 0])
     .filter(([, count]) => Number(count) > 0));
@@ -389,7 +389,7 @@ async function handleUniProxy(request: Request, env: Env, action: string, auth: 
     if (auth.input.__invalid_json || !(await processAlive(env, Number(node.id), auth.input.__raw))) return json({ error: "Invalid online data" }, 400);
     return json({ data: true });
   }
-  if (action === "alivelist") return json({ alive: await aggregateDeviceCounts(env, await nodeUsers(env, node)) });
+  if (action === "alivelist") return json({ alive: await aggregateDeviceCounts(env, await nodeUsers(env, node), true) });
   if (action === "status") {
     const failure = validateStatus(auth.input);
     if (failure) return failure;
@@ -716,14 +716,14 @@ export class StatusHub {
       return json({ data: true });
     }
     if (url.pathname === "/devices/report" && request.method === "POST") {
-      const input = await request.json() as { node_id?: number; devices?: Row; timestamp?: number };
+      const input = await request.json() as { node_id?: number; devices?: Row; timestamp?: number; replace_node?: boolean };
       const nodeId = Number(input.node_id || 0);
       const timestamp = Number(input.timestamp || now());
       if (!nodeId || !input.devices || typeof input.devices !== "object") return json({ message: "Invalid device report" }, 422);
       await this.loadDevices();
       const previous = this.devices.get(nodeId) || {};
       const next: Row = {};
-      for (const [userId, value] of Object.entries(previous)) next[userId] = { ...(value as Row) };
+      if (!input.replace_node) for (const [userId, value] of Object.entries(previous)) next[userId] = { ...(value as Row) };
       for (const [userId, value] of Object.entries(input.devices)) {
         const reported = value && typeof value === "object" && !Array.isArray(value) ? value as Row : {};
         if (Object.keys(reported).length) next[userId] = { ...reported };
@@ -958,7 +958,7 @@ export class NodeHub {
       await reportStatus(this.env, "node", Number(node.id), runtime);
     }
     if (event === "report.devices") {
-      await processAlive(this.env, nodeId, data.devices ?? data);
+      await processAlive(this.env, nodeId, data.devices ?? data, true);
       socket.send(wsMessage("sync.devices", { users: await aggregateDevices(this.env, await nodeUsers(this.env, node)), ...(identity.mode === "machine" ? { node_id: nodeId } : {}) }));
     }
     if (event === "request.devices") socket.send(wsMessage("sync.devices", { users: await aggregateDevices(this.env, await nodeUsers(this.env, node)), ...(identity.mode === "machine" ? { node_id: nodeId } : {}) }));

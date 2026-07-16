@@ -124,8 +124,8 @@ test("StatusHub coalesces heartbeat storage while preserving device expiry and h
     await report({ connected: false });
     assert.equal(storage.writes.filter(key => key === "node:1").length, 2);
 
-    const deviceReport = (timestamp, devices) => hub.fetch(new Request("https://status-hub.internal/devices/report", {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ node_id: 1, timestamp, devices })
+    const deviceReport = (timestamp, devices, replaceNode = false) => hub.fetch(new Request("https://status-hub.internal/devices/report", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ node_id: 1, timestamp, devices, replace_node: replaceNode })
     }));
     await deviceReport(1000, { 7: { "1.1.1.1": 1000, "2.2.2.2": 1000 } });
     await deviceReport(1060, { 7: { "1.1.1.1": 1060 } });
@@ -140,11 +140,16 @@ test("StatusHub coalesces heartbeat storage while preserving device expiry and h
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ user_ids: [7, 8], timestamp: 1100 })
     }));
     assert.deepEqual((await listed.json()).data.users, { 7: ["1.1.1.1"], 8: ["3.3.3.3"] });
+    await deviceReport(1110, { 7: { "1.1.1.1": 1110 } }, true);
+    listed = await hub.fetch(new Request("https://status-hub.internal/devices/list", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ user_ids: [7, 8], timestamp: 1110 })
+    }));
+    assert.deepEqual((await listed.json()).data.users, { 7: ["1.1.1.1"] });
     await deviceReport(1120, { 7: {} });
     listed = await hub.fetch(new Request("https://status-hub.internal/devices/list", {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ user_ids: [7, 8], timestamp: 1120 })
     }));
-    assert.deepEqual((await listed.json()).data.users, { 8: ["3.3.3.3"] });
+    assert.deepEqual((await listed.json()).data.users, {});
 
     const machineReport = () => hub.fetch(new Request("https://status-hub.internal/report", {
       method: "POST", headers: { "content-type": "application/json" },
@@ -259,8 +264,10 @@ test("websocket device state follows the official per-IP contract", () => {
   assert.doesNotMatch(source, /event === "pong"[\s\S]{0,400}optionalKvPut/);
   assert.match(source, /Internal sync token is not configured/);
   assert.match(source, /event === "report\.devices"[\s\S]*socket\.send\(wsMessage\("sync\.devices"/);
+  assert.match(source, /processAlive\(this\.env, nodeId, data\.devices \?\? data, true\)/);
+  assert.match(source, /action === "alivelist"[\s\S]{0,160}aggregateDeviceCounts\(env, await nodeUsers\(env, node\), true\)/);
   assert.match(source, /Number\(seenAt \|\| 0\) > timestamp - 300/);
-  assert.match(source, /aggregateDevices\(env, users\)/);
+  assert.match(source, /aggregateDevices\(env, users, limitedOnly\)/);
   assert.match(source, /enqueueTraffic\(env, node, traffic\)/);
   assert.match(source, /const nonEmptyArrayLike =/);
   assert.match(source, /catch \{ return false; \}/);
