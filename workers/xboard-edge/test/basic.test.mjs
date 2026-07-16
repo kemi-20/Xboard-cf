@@ -323,8 +323,8 @@ test("bootstrap persists generated Cloudflare bindings for Workers Builds", () =
   assert.match(bootstrap, /if \(databaseCreated\) await enableReadReplication\(account\.id, databaseId\)/);
   assert.match(bootstrap, /Warning: xboard-db was created successfully, but read replication could not be enabled/);
   assert.match(bootstrap, /patchWrangler\(worker, account\.id, databaseId, kv\.id\)/);
-  assert.match(bootstrap, /"telegram-events"/);
-  assert.match(bootstrap, /"telegram-events-dlq"/);
+  assert.match(bootstrap, /"notification-events"/);
+  assert.match(bootstrap, /"notification-events-dlq"/);
 });
 
 test("admin can fetch a fresh subscription URL for the copy action", () => {
@@ -765,14 +765,14 @@ test("mail APIs support Maileroo and Brevo without SMTP fields", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   const adminBundle = fs.readFileSync("public/assets/index-CF20260713.js", "utf8");
   const wrangler = fs.readFileSync("wrangler.toml", "utf8");
-  assert.match(source, /MAIL_EVENTS: Queue/);
+  assert.match(source, /NOTIFICATION_EVENTS: Queue/);
   assert.match(source, /type: "mail"/);
   assert.match(source, /normalizeEmailProvider/);
   assert.match(source, /smtp\.maileroo\.com\/api\/v2\/emails/);
   assert.match(source, /api\.brevo\.com\/v3\/smtp\/email/);
   assert.doesNotMatch(source, /testSendMail"\) return fail\("未配置邮件队列发送服务"/);
-  assert.match(wrangler, /binding = "MAIL_EVENTS"/);
-  assert.match(wrangler, /queue = "mail-events"/);
+  assert.match(wrangler, /binding = "NOTIFICATION_EVENTS"/);
+  assert.match(wrangler, /queue = "notification-events"/);
   assert.match(source, /async function sendTestMail/);
   assert.match(source, /driver: provider/);
   assert.match(source, /return ok\(await sendTestMail/);
@@ -930,7 +930,7 @@ test("RX compatibility fixes preserve upstream CRUD, plans, Telegram and filters
   assert.match(source, /command === "\/getlatesturl"/);
   assert.match(source, /telegramRequest\(botToken, "getMe"\)/);
   assert.match(source, /async function queueTelegram/);
-  assert.match(wrangler, /binding = "TELEGRAM_EVENTS"[\s\S]*queue = "telegram-events"/);
+  assert.match(wrangler, /binding = "NOTIFICATION_EVENTS"[\s\S]*queue = "notification-events"/);
   assert.match(source, /l\.action = \?/);
   assert.match(source, /l\.uri LIKE \? OR l\.request_data LIKE \?/);
   assert.match(source, /l\.reset_type = \?/);

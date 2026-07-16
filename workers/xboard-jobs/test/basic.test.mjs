@@ -34,7 +34,7 @@ test("telegram and daily statistics preserve upstream success and record contrac
   assert.match(source, /INSERT INTO v2_stat\(record_at, record_type,[\s\S]*ON CONFLICT\(record_at, record_type\) DO UPDATE/);
   assert.match(source, /const fields = \["user_count", "order_count", "transfer_used", "transfer_used_total"/);
   assert.match(source, /fields\.map\(field => `\$\{field\} = CASE WHEN \? IS NULL THEN v2_stat\.\$\{field\} ELSE excluded\.\$\{field\} END`\)/);
-  assert.match(wrangler, /queue = "telegram-events"[\s\S]*dead_letter_queue = "telegram-events-dlq"/);
+  assert.match(wrangler, /queue = "notification-events"[\s\S]*dead_letter_queue = "notification-events-dlq"/);
 });
 
 test("traffic statistics persist the official server_rate field", () => {
@@ -132,7 +132,7 @@ test("traffic events use event-level idempotency and conditional exceeded checks
   assert.match(source, /trafficEventGroups\(splitTrafficEvents\(trafficMessages\.map/);
   assert.match(source, /trafficBatch\(env, events\)/);
   assert.match(wrangler, /dead_letter_queue = "traffic-events-dlq"/);
-  assert.match(wrangler, /dead_letter_queue = "mail-events-dlq"/);
+  assert.match(wrangler, /dead_letter_queue = "notification-events-dlq"/);
   assert.match(wrangler, /max_retries = 5/);
   assert.match(wrangler, /queue = "traffic-events"[\s\S]*?max_batch_size = 100/);
   assert.match(wrangler, /queue = "traffic-events"[\s\S]*?max_batch_timeout = 5/);

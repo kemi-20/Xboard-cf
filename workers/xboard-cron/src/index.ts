@@ -2,7 +2,7 @@ import type { D1Database, D1PreparedStatement, Fetcher, KVNamespace, Queue } fro
 import { json, now, ok } from "./compat.ts";
 import { primaryDatabase, settings as loadSettings } from "./db.ts";
 
-export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; MAIL_EVENTS: Queue; XBOARD_SERVER: Fetcher; XBOARD_JOBS: Fetcher; }
+export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; NOTIFICATION_EVENTS: Queue; XBOARD_SERVER: Fetcher; XBOARD_JOBS: Fetcher; }
 
 const SHANGHAI_OFFSET = 8 * 3600;
 
@@ -103,7 +103,7 @@ async function sendReminders(env: Env, ts: number, day: number) {
         await optionalKvPut(env, trafficReminderKey, String(ts), 86400);
       }
     }
-    for (let start = 0; start < events.length; start += 100) await env.MAIL_EVENTS.sendBatch(events.slice(start, start + 100));
+    for (let start = 0; start < events.length; start += 100) await env.NOTIFICATION_EVENTS.sendBatch(events.slice(start, start + 100));
     cursor = Number(page[page.length - 1].id);
     if (page.length < 500) break;
   }

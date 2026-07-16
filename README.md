@@ -79,11 +79,9 @@ Worker 之间没有依赖仓库根目录的共享运行时代码，因此 Cloudf
 | D1 | `xboard-db` / `XBOARD_DB` | 用户、套餐、节点、订单、设置、流量和统计等正式业务数据；新建数据库默认位于 APAC 并开启读取复制 |
 | KV | `xboard-kv` / `XBOARD_KV` | Session、验证码、限流、缓存和版本标记 |
 | Queue | `traffic-events` | 节点流量异步入库，由 `xboard-jobs` 消费 |
-| Queue | `mail-events` | 邮件任务，由 `xboard-jobs` 消费 |
-| Queue | `telegram-events` | 预留的 Telegram 异步通知入口，由 `xboard-jobs` 消费 |
+| Queue | `notification-events` | 邮件与 Telegram 通知任务，由 `xboard-jobs` 按消息类型消费 |
 | Queue | `traffic-events-dlq` | 流量任务连续失败 5 次后的死信队列 |
-| Queue | `mail-events-dlq` | 邮件任务连续失败 5 次后的死信队列 |
-| Queue | `telegram-events-dlq` | Telegram 任务连续失败 5 次后的死信队列 |
+| Queue | `notification-events-dlq` | 通知任务连续失败 5 次后的死信队列 |
 | Durable Object | `NodeHub` / `NODE_HUB` | 节点和机器 WebSocket 连接、同步事件与休眠连接管理 |
 | Durable Object | `StatusHub` / `STATUS_HUB` | 全局节点与机器实时状态及设备状态；不再重复持久化负载趋势 |
 | Durable Object | `TrafficStatsHub` / `TRAFFIC_STATS_HUB` | 全局流量批次去重、16 分片日聚合、五分钟 AE 桶和绝对值物化 |
@@ -95,7 +93,7 @@ Worker 之间没有依赖仓库根目录的共享运行时代码，因此 Cloudf
 | Service Binding | `XBOARD_ANALYTICS` | `xboard-edge` 查询 `xboard-analytics`；流量分析失败时回退 D1 |
 | Service Binding | `XBOARD_JOBS` | `xboard-edge`、`xboard-cron` 补投 Outbox、物化和重置统计状态 |
 | Queue Producer | `TRAFFIC_EVENTS` | `xboard-server` 写入 `traffic-events` |
-| Queue Producer | `MAIL_EVENTS` | `xboard-edge`、`xboard-cron` 写入 `mail-events` |
+| Queue Producer | `NOTIFICATION_EVENTS` | `xboard-edge`、`xboard-cron` 写入邮件或 Telegram 通知事件 |
 | Cron Trigger | `* * * * *` | `xboard-cron` 每分钟调度周期检查、统计和清理任务 |
 
 业务 Worker 绑定同一个 D1 和 KV；`xboard-analytics` 不绑定 KV。D1 是正式业务数据的唯一权威来源。流量事件先原子写入用户、服务器累计量和 Outbox，再由 `TrafficStatsHub` 聚合并物化原版统计表；Analytics Engine 负责趋势与排行，故障时自动回退 D1。
@@ -147,22 +145,18 @@ flowchart TB
 
   subgraph Queues["异步任务与失败隔离"]
     TrafficQ["traffic-events<br/>max retries: 5"]
-    MailQ["mail-events<br/>max retries: 5"]
-    TelegramQ["telegram-events<br/>预留异步入口 / max retries: 5"]
+    NotificationQ["notification-events<br/>邮件 + Telegram / max retries: 5"]
     TrafficDLQ["traffic-events-dlq"]
-    MailDLQ["mail-events-dlq"]
-    TelegramDLQ["telegram-events-dlq"]
+    NotificationDLQ["notification-events-dlq"]
   end
 
   Server -->|"TRAFFIC_EVENTS"| TrafficQ
-  Edge -->|"MAIL_EVENTS"| MailQ
-  Cron -->|"MAIL_EVENTS"| MailQ
+  Edge -->|"NOTIFICATION_EVENTS"| NotificationQ
+  Cron -->|"NOTIFICATION_EVENTS"| NotificationQ
   TrafficQ --> Jobs
-  MailQ --> Jobs
-  TelegramQ --> Jobs
+  NotificationQ --> Jobs
   TrafficQ -. "连续失败" .-> TrafficDLQ
-  MailQ -. "连续失败" .-> MailDLQ
-  TelegramQ -. "连续失败" .-> TelegramDLQ
+  NotificationQ -. "连续失败" .-> NotificationDLQ
 
   subgraph Data["数据与缓存层"]
     Memory["Worker isolate 内存缓存<br/>设置热缓存 / 并发请求合并<br/>Queue 统计与流量排行一级缓存"]
@@ -248,7 +242,7 @@ flowchart TB
 
 ## 邮件服务
 
-邮件不再使用 SMTP，`xboard-edge` 将邮件任务写入 `mail-events`，`xboard-jobs` 根据后台选择通过 Maileroo 或 Brevo 的 HTTPS API 发送。后台“邮件设置”中的字段含义为：
+邮件不再使用 SMTP，`xboard-edge` 将带有 `type: "mail"` 的任务写入统一的 `notification-events`，`xboard-jobs` 根据后台选择通过 Maileroo 或 Brevo 的 HTTPS API 发送。Telegram 通知使用同一 Queue，但以 `type: "telegram"` 区分，业务处理和幂等记录仍相互独立。后台“邮件设置”中的字段含义为：
 
 ```text
 邮件服务商：Maileroo 或 Brevo，默认 Maileroo
@@ -297,7 +291,7 @@ CLOUDFLARE_API_TOKEN
 CLOUDFLARE_ANALYTICS_TOKEN
 ```
 
-然后打开 `Actions -> Bootstrap XBoard on Cloudflare -> Run workflow`。workflow 会自动识别 Token 所属账号，创建或复用 `xboard-db`、`xboard-kv`、三个业务 Queue 及对应的三个死信队列，把当前账号、D1 和 KV 的资源 ID 写入五个 Worker 的 `wrangler.toml`，使用 GitHub 自动提供的 `GITHUB_TOKEN` 提交回当前分支，再自动执行 D1 schema 与 seed，创建 Durable Objects、Analytics Engine bindings、Cron Trigger、Static Assets 和 Service Bindings，并按依赖顺序创建或更新五个 Worker。新建的 `xboard-db` 使用 `APAC` 位置提示，并自动尝试开启 D1 Read Replication；开启失败只会在 Action 中显示警告，不会阻断部署。已存在的同名数据库会原样复用，不修改主库位置或读取复制开关。它只配置了 `workflow_dispatch`，不会在每次 push 时运行。
+然后打开 `Actions -> Bootstrap XBoard on Cloudflare -> Run workflow`。workflow 会自动识别 Token 所属账号，创建或复用 `xboard-db`、`xboard-kv`、两个业务 Queue 及对应的两个死信队列，把当前账号、D1 和 KV 的资源 ID 写入五个 Worker 的 `wrangler.toml`，使用 GitHub 自动提供的 `GITHUB_TOKEN` 提交回当前分支，再自动执行 D1 schema 与 seed，创建 Durable Objects、Analytics Engine bindings、Cron Trigger、Static Assets 和 Service Bindings，并按依赖顺序创建或更新五个 Worker。新建的 `xboard-db` 使用 `APAC` 位置提示，并自动尝试开启 D1 Read Replication；开启失败只会在 Action 中显示警告，不会阻断部署。已存在的同名数据库会原样复用，不修改主库位置或读取复制开关。它只配置了 `workflow_dispatch`，不会在每次 push 时运行。
 
 资源 ID 不是 API Token 或数据库密码，必须随部署仓库保存，Cloudflare Workers Builds 后续检出代码时才能继续绑定同一套资源。workflow 只提交五个 `workers/xboard-*/wrangler.toml`，不会提交任何 Token。如果仓库禁止 GitHub Actions 写入内容，或 `master` 分支保护规则禁止 workflow 直接推送，首次部署会在“Persist Cloudflare resource bindings”步骤明确失败；请允许该 workflow 写入仓库后重新手动运行。
 
@@ -406,7 +400,7 @@ Cloudflare 内部可以使用 D1、KV、Queues 和 Durable Objects 替代 Larave
 1. 五个 Worker 最近一次 Build 是否成功，根目录是否各自正确。
 2. `xboard-edge` 的 `XBOARD_SERVER`、`XBOARD_ANALYTICS`、`XBOARD_JOBS` 和 `ASSETS` 绑定是否存在。
 3. `xboard-server` 的 `NODE_HUB`、`STATUS_HUB` 和 `TRAFFIC_EVENTS` 是否存在。
-4. `xboard-jobs` 是否绑定三个业务 Queue 及其 DLQ。
+4. `xboard-jobs` 是否绑定 `traffic-events`、`notification-events` 及其 DLQ。
 5. D1 和 KV ID 是否仍与首次部署 Action 写入的 `wrangler.toml` 一致。
 6. 修改系统设置后短暂等待缓存版本传播；KV 故障时系统应自动回源 D1。
 

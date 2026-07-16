@@ -30,9 +30,5 @@ binding = "XBOARD_JOBS"
 service = "xboard-jobs"
 
 [[queues.producers]]
-binding = "MAIL_EVENTS"
-queue = "mail-events"
-
-[[queues.producers]]
-binding = "TELEGRAM_EVENTS"
-queue = "telegram-events"
+binding = "NOTIFICATION_EVENTS"
+queue = "notification-events"

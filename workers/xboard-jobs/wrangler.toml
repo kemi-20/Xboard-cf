@@ -37,15 +37,8 @@ max_retries = 5
 dead_letter_queue = "traffic-events-dlq"
 
 [[queues.consumers]]
-queue = "mail-events"
-max_batch_size = 5
+queue = "notification-events"
+max_batch_size = 10
 max_batch_timeout = 5
 max_retries = 5
-dead_letter_queue = "mail-events-dlq"
-
-[[queues.consumers]]
-queue = "telegram-events"
-max_batch_size = 5
-max_batch_timeout = 5
-max_retries = 5
-dead_letter_queue = "telegram-events-dlq"
+dead_letter_queue = "notification-events-dlq"

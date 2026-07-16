@@ -79,11 +79,9 @@ if (databaseCreated) await enableReadReplication(account.id, databaseId);
 const kv = await ensureKv(account.id, "xboard-kv");
 const queueNames = [
   "traffic-events",
-  "mail-events",
-  "telegram-events",
+  "notification-events",
   "traffic-events-dlq",
-  "mail-events-dlq",
-  "telegram-events-dlq"
+  "notification-events-dlq"
 ];
 for (const queueName of queueNames) await ensureQueue(account.id, queueName);
 

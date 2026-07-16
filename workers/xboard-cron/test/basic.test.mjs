@@ -52,7 +52,7 @@ test("scheduled reminders enqueue the official expiry and traffic notifications"
   assert.match(source, /template_name: "remindTraffic"/);
   assert.match(source, /mail:remind-expire/);
   assert.match(source, /mail:remind-traffic/);
-  assert.match(source, /MAIL_EVENTS\.sendBatch/);
+  assert.match(source, /NOTIFICATION_EVENTS\.sendBatch/);
   assert.match(source, /WHERE id > \?[\s\S]*ORDER BY id ASC LIMIT 500/);
 });
 

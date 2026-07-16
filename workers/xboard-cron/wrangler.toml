@@ -13,8 +13,8 @@ binding = "XBOARD_KV"
 id = "KV_NAMESPACE_ID"
 
 [[queues.producers]]
-binding = "MAIL_EVENTS"
-queue = "mail-events"
+binding = "NOTIFICATION_EVENTS"
+queue = "notification-events"
 
 [[services]]
 binding = "XBOARD_SERVER"

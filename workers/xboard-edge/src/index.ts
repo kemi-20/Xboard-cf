@@ -16,8 +16,7 @@ export interface Env {
   XBOARD_SERVER: Fetcher;
   XBOARD_ANALYTICS: Fetcher;
   XBOARD_JOBS: Fetcher;
-  MAIL_EVENTS: Queue;
-  TELEGRAM_EVENTS: Queue;
+  NOTIFICATION_EVENTS: Queue;
   PUBLIC_READ_DB?: D1Database;
   SETTINGS_MEMORY_SCOPE?: string;
 }
@@ -2289,7 +2288,7 @@ function mailHtml(content: string) {
 async function queueMail(env: Env, payload: { to: string; subject: string; content: string; template_name?: string }) {
   if (!payload.to || !payload.subject) throw new Error("邮件收件人或主题为空");
   const eventId = `mail:${crypto.randomUUID()}`;
-  await env.MAIL_EVENTS.send({
+  await env.NOTIFICATION_EVENTS.send({
     event_id: eventId,
     type: "mail",
     payload: {
@@ -2307,7 +2306,7 @@ async function queueTemplateMail(env: Env, name: string, email: string, vars: Re
   const template = await adminMailTemplateGet(env, name);
   if (!template) throw new Error("模板不存在");
   const eventId = `mail:${crypto.randomUUID()}`;
-  await env.MAIL_EVENTS.send({
+  await env.NOTIFICATION_EVENTS.send({
     event_id: eventId,
     type: "mail",
     payload: { to: email, subject: subjectOverride || template.subject, template_name: canonicalMailTemplateName(name), vars, content_mode: "text" }
@@ -2319,7 +2318,7 @@ async function queueTelegram(env: Env, text: string, chatId?: string | number) {
   const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
   if (!Number(pickSetting(all, "telegram_bot_enable", 0)) || !String(pickSetting(all, "telegram_bot_token", ""))) return null;
   const eventId = `telegram:${crypto.randomUUID()}`;
-  await env.TELEGRAM_EVENTS.send({ event_id: eventId, type: "telegram", payload: { text, ...(chatId ? { chat_id: chatId } : {}) } });
+  await env.NOTIFICATION_EVENTS.send({ event_id: eventId, type: "telegram", payload: { text, ...(chatId ? { chat_id: chatId } : {}) } });
   return eventId;
 }
 
