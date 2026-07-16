@@ -55,37 +55,37 @@ export async function settings(db: D1Database, kv?: KVNamespace, memoryScope = "
   let settingsPromise = settingsPromises.get(memoryScope);
   if (!settingsPromise) {
     settingsPromise = (async () => {
-      let version = settingsCache?.version || "0";
+      let version: string | null = settingsCache?.version || null;
       let availableKv = kv;
       let kvVersionFailed = false;
       if (availableKv) {
-        try { version = await availableKv.get("settings_version") || "0"; }
+        try { version = await availableKv.get("settings_version"); }
         catch {
           availableKv = undefined;
           kvVersionFailed = true;
         }
       }
-      if (!kvVersionFailed && settingsCache && settingsCache.expiresAt > Date.now() && settingsCache.version === version) {
+      if (!kvVersionFailed && version && settingsCache && settingsCache.expiresAt > Date.now() && settingsCache.version === version) {
         settingsCache.versionCheckedAt = Date.now();
         return settingsCache.value;
       }
-      const snapshotKey = `settings:snapshot:${SETTINGS_CACHE_SCOPE}:${version}`;
-      if (availableKv) {
+      const snapshotKey = version ? `settings:snapshot:${SETTINGS_CACHE_SCOPE}:${version}` : null;
+      if (availableKv && snapshotKey) {
         try {
           const snapshot = await availableKv.get(snapshotKey);
           if (snapshot) {
             const value = JSON.parse(snapshot) as Record<string, unknown>;
-            settingsCache = { value, version, expiresAt: Date.now() + SETTINGS_CACHE_TTL_MS, versionCheckedAt: Date.now() };
-            settingsCaches.set(memoryScope, settingsCache);
+            settingsCache = { value, version: version!, expiresAt: Date.now() + SETTINGS_CACHE_TTL_MS, versionCheckedAt: Date.now() };
+            settingsCaches.set(memoryScope, settingsCache!);
             return value;
           }
         } catch {}
       }
       const rows = await db.prepare("SELECT name, value FROM v2_settings").all<{ name: string; value: string }>();
       const value = Object.fromEntries((rows.results || []).map(r => [r.name, parseSettingValue(r.value)]));
-      settingsCache = { value, version, expiresAt: Date.now() + SETTINGS_CACHE_TTL_MS, versionCheckedAt: Date.now() };
+      settingsCache = { value, version: version || "", expiresAt: Date.now() + SETTINGS_CACHE_TTL_MS, versionCheckedAt: Date.now() };
       settingsCaches.set(memoryScope, settingsCache);
-      if (availableKv) {
+      if (availableKv && snapshotKey) {
         try { await availableKv.put(snapshotKey, JSON.stringify(value), { expirationTtl: SETTINGS_SNAPSHOT_TTL_SECONDS }); } catch {}
       }
       return value;

@@ -417,7 +417,7 @@ async function trafficBatch(env: Env, events: any[]) {
     statements.push(env.XBOARD_DB.prepare("DELETE FROM v2_job_logs WHERE event_id = ? AND status != 'done'").bind(eventId));
   }
   for (const [userId, value] of aggregate.users) {
-    statements.push(env.XBOARD_DB.prepare("UPDATE v2_user SET u = u + ?, d = d + ?, t = ?, updated_at = ? WHERE id = ?").bind(value.u, value.d, ts, ts, userId));
+    statements.push(env.XBOARD_DB.prepare("UPDATE v2_user SET u = u + ?, d = d + ?, t = ?, online_count = CASE WHEN COALESCE(online_count, 0) > 0 THEN online_count ELSE 1 END, last_online_at = ?, updated_at = ? WHERE id = ?").bind(value.u, value.d, ts, ts, ts, userId));
     statements.push(env.XBOARD_DB.prepare(`INSERT INTO v2_traffic_pending_check(user_id, updated_at)
       SELECT id, ? FROM v2_user WHERE id = ? AND banned = 0 AND transfer_enable > 0 AND u + d >= transfer_enable
       ON CONFLICT(user_id) DO NOTHING`).bind(ts, userId));

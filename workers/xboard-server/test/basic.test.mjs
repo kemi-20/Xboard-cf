@@ -289,6 +289,13 @@ test("websocket device state follows the official per-IP contract", () => {
   assert.doesNotMatch(source, /node:ws:(?:target|alive)/);
 });
 
+test("HTTP reports retain per-user online connections and clear empty snapshots", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /input\.online && typeof input\.online === "object"/);
+  assert.match(source, /runtime\.connections = input\.online/);
+  assert.match(source, /runtime\.connections_at = now\(\)/);
+});
+
 test("HTTP and websocket database work use request-scoped first-primary sessions", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   const db = fs.readFileSync("src/db.ts", "utf8");

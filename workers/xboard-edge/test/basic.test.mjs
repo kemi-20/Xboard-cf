@@ -248,6 +248,42 @@ test("worker settings use memory, versioned KV snapshots and D1 fallback", () =>
   }
 });
 
+test("missing settings version bypasses stale version-zero snapshots in every worker", async () => {
+  for (const [index, file] of [
+    [0, "../src/db.ts"],
+    [1, "../src/subscription/db.ts"],
+    [2, "../../xboard-server/src/db.ts"],
+    [3, "../../xboard-jobs/src/db.ts"]
+  ]) {
+    const module = await import(`${file}?missing-version=${Date.now()}-${index}`);
+    module.invalidateSettingsCache?.();
+    let d1Reads = 0;
+    const requestedKeys = [];
+    const statement = {
+      bind() { return statement; },
+      async all() {
+        d1Reads += 1;
+        return { success: true, results: [{ name: "server_pull_interval", value: "300" }] };
+      }
+    };
+    const db = { prepare() { return statement; } };
+    const kv = {
+      async get(key) {
+        requestedKeys.push(key);
+        if (key === "settings_version") return null;
+        if (key.endsWith(":0")) return JSON.stringify({ server_pull_interval: "60" });
+        return null;
+      },
+      async put() { throw new Error("an unversioned snapshot must not be written"); }
+    };
+    const value = await module.settings(db, kv, `missing-version-${index}`);
+    assert.equal(Number(value.server_pull_interval), 300);
+    assert.equal(d1Reads, 1);
+    assert.deepEqual(requestedKeys, ["settings_version"]);
+    module.invalidateSettingsCache?.();
+  }
+});
+
 test("settings saves invalidate the xboard-server instance cache", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   const migration = fs.readFileSync("src/migration.ts", "utf8");
@@ -938,7 +974,7 @@ test("RX compatibility fixes preserve upstream CRUD, plans, Telegram and filters
   const wrangler = fs.readFileSync("wrangler.toml", "utf8");
   assert.match(source, /const validServerTypes = new Set/);
   assert.match(source, /type === "shadowsocks"\) return requiredString\("cipher"/);
-  assert.match(source, /online_count: Number\(row\.online_count \|\| 0\)/);
+  assert.match(source, /liveDevices === null \? Number\(row\.online_count \|\| 0\)/);
   assert.match(source, /INSERT INTO v2_knowledge\(title,category,body,language,show/);
   assert.match(source, /route === "\/server\/route\/drop"/);
   assert.match(source, /DELETE FROM v2_server_route WHERE id = \?/);
@@ -1021,6 +1057,15 @@ test("GLM compatibility audit fixes preserve upstream mutations and envelopes", 
   assert.match(source, /user && limitEnabled/);
   assert.match(source, /timestamp: new Date\(\)\.toISOString\(\), data: await trafficRank/);
   assert.match(schema, /CREATE TABLE IF NOT EXISTS v2_stat_server[\s\S]*record_type TEXT NOT NULL DEFAULT 'd'/);
+});
+
+test("admin online state prefers StatusHub with a D1 fallback", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /statusHubRequest\(env, "devices\/list"/);
+  assert.match(source, /liveDevices === null \? Number\(row\.online_count \|\| 0\)/);
+  assert.match(source, /last_online_at: liveDevices\?\.\[String\(row\.id\)\]\?\.length \? now\(\) : row\.last_online_at/);
+  assert.match(source, /onlineUsers: liveOnline\?\.users \?\?/);
+  assert.match(source, /online_devices: liveOnline\?\.devices \?\?/);
 });
 
 test("current audit findings preserve upstream admin, plan, reset and Telegram contracts", () => {

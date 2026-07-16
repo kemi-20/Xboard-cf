@@ -1290,6 +1290,7 @@ async function adminStats(env: Env) {
   const lastMonth = monthStart(month - 1);
   const twoMonthsAgo = monthStart(lastMonth - 1);
   const nodes = await adminServerRows(env);
+  const liveOnline = await liveOnlineSummary(env);
   const totalUsers = await firstNumber(env, "SELECT COUNT(*) AS c FROM v2_user");
   const activeUsers = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE expired_at IS NULL OR expired_at >= ${current}`);
   const currentMonthNewUsers = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE created_at >= ${month} AND created_at < ${current}`);
@@ -1325,8 +1326,8 @@ async function adminStats(env: Env) {
     userGrowth: growth(currentMonthNewUsers, lastMonthNewUsers),
     totalUsers,
     activeUsers,
-    onlineUsers: await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE online_count > 0 AND last_online_at >= ${current - 600}`),
-    onlineDevices: await firstNumber(env, `SELECT COALESCE(SUM(online_count), 0) AS c FROM v2_user WHERE online_count > 0 AND last_online_at >= ${current - 600}`),
+    onlineUsers: liveOnline?.users ?? await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE online_count > 0 AND last_online_at >= ${current - 600}`),
+    onlineDevices: liveOnline?.devices ?? await firstNumber(env, `SELECT COALESCE(SUM(online_count), 0) AS c FROM v2_user WHERE online_count > 0 AND last_online_at >= ${current - 600}`),
     onlineNodes: nodes.filter(node => Number((node as any).available_status) > 0).length,
     todayTraffic: { upload: todayUpload, download: todayDownload, total: todayUpload + todayDownload },
     monthTraffic: { upload: monthUpload, download: monthDownload, total: monthUpload + monthDownload },
@@ -1570,6 +1571,7 @@ async function adminUserList(env: Env, request: Request) {
       .bind(...query.bindings).first<{ count: number }>()
   ]);
   const userRows = usersResult.results || [];
+  const liveDevices = await liveDeviceSnapshot(env);
   const inviterIds = [...new Set(userRows.map(row => Number(row.invite_user_id || 0)).filter(Boolean))];
   const planIds = [...new Set(userRows.map(row => Number(row.plan_id || 0)).filter(Boolean))];
   const groupIds = [...new Set(userRows.map(row => Number(row.group_id || 0)).filter(Boolean))];
@@ -1593,7 +1595,8 @@ async function adminUserList(env: Env, request: Request) {
       plan: plans.get(Number(row.plan_id || 0)) || null,
       group: groups.get(Number(row.group_id || 0)) || null,
       invite_user: inviters.get(Number(row.invite_user_id || 0)) || null,
-      online_count: Number(row.online_count || 0)
+      online_count: liveDevices === null ? Number(row.online_count || 0) : (liveDevices[String(row.id)]?.length || 0),
+      last_online_at: liveDevices?.[String(row.id)]?.length ? now() : row.last_online_at
     })));
   return paginated(data, Number(countResult?.count || 0), page, pageSize);
 }
@@ -1678,6 +1681,7 @@ function parseKvObject(value: string | null) {
 
 type StatusSnapshot = { machines: Record<string, Record<string, any>>; nodes: Record<string, Record<string, any>> };
 let statusSnapshotCache: { value: StatusSnapshot; expiresAt: number } | null = null;
+let liveDeviceSnapshotCache: { value: Record<string, string[]>; expiresAt: number } | null = null;
 
 async function statusHubRequest(env: Env, path: string, init: RequestInit = {}) {
   return env.XBOARD_SERVER.fetch(`https://xboard-server.internal/internal/status/${path}`, {
@@ -1721,6 +1725,48 @@ async function optionalKvPut(env: Env, key: string, value: string) {
 
 async function optionalKvPutTtl(env: Env, key: string, value: string, expirationTtl: number) {
   try { await env.XBOARD_KV.put(key, value, { expirationTtl }); } catch { /* Verification mail can still be queued when KV is temporarily unavailable. */ }
+}
+
+async function liveDeviceSnapshot(env: Env): Promise<Record<string, string[]> | null> {
+  if (liveDeviceSnapshotCache && liveDeviceSnapshotCache.expiresAt > Date.now()) return liveDeviceSnapshotCache.value;
+  const value: Record<string, string[]> = {};
+  let available = false;
+  try {
+    const response = await statusHubRequest(env, "devices/list", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ timestamp: now() })
+    });
+    if (response.ok) {
+      const payload = await response.json() as { data?: { users?: Record<string, unknown> } };
+      if (payload.data?.users && typeof payload.data.users === "object" && !Array.isArray(payload.data.users)) {
+        available = true;
+        for (const [userId, ips] of Object.entries(payload.data.users)) {
+          value[userId] = Array.isArray(ips) ? [...new Set(ips.map(String).filter(Boolean))] : [];
+        }
+      }
+    }
+  } catch { /* Connection reports below can still provide a live fallback. */ }
+  const runtime = await statusSnapshot(env);
+  const cutoff = now() - 900;
+  for (const node of Object.values(runtime.nodes || {})) {
+    const connectionsAt = Number(node.connections_at || node.updated_at || 0);
+    if (connectionsAt < cutoff || !node.connections || typeof node.connections !== "object" || Array.isArray(node.connections)) continue;
+    available = true;
+    for (const [userId, count] of Object.entries(node.connections)) {
+      if (Number(count || 0) > 0 && !value[userId]?.length) value[userId] = ["__active_connection__"];
+    }
+  }
+  if (!available) return null;
+  liveDeviceSnapshotCache = { value, expiresAt: Date.now() + 10_000 };
+  return value;
+}
+
+async function liveOnlineSummary(env: Env) {
+  const devices = await liveDeviceSnapshot(env);
+  if (devices === null) return null;
+  const counts = Object.values(devices).map(ips => ips.length).filter(Boolean);
+  return { users: counts.length, devices: counts.reduce((total, count) => total + count, 0) };
 }
 
 function normalizePublicPort(value: unknown) {
@@ -3515,6 +3561,7 @@ async function adminApi(request: Request, env: Env, path: string) {
   }
   if (request.method === "GET" && route === "/stat/getOverride") {
     const nodes = await adminServerRows(env);
+    const liveOnline = await liveOnlineSummary(env);
     const today = dayStart();
     const month = monthStart();
     const lastMonth = monthStart(month - 1);
@@ -3535,8 +3582,8 @@ async function adminApi(request: Request, env: Env, path: string) {
       commission_month_payout: await firstNumber(env, `SELECT COALESCE(SUM(get_amount), 0) AS c FROM v2_commission_log WHERE created_at >= ${month} AND created_at < ${now()}`),
       commission_last_month_payout: await firstNumber(env, `SELECT COALESCE(SUM(get_amount), 0) AS c FROM v2_commission_log WHERE created_at >= ${lastMonth} AND created_at < ${month}`),
       online_nodes: nodes.filter(node => Number((node as any).available_status) > 0).length,
-      online_devices: await firstNumber(env, `SELECT COALESCE(SUM(online_count), 0) AS c FROM v2_user WHERE online_count > 0 AND last_online_at >= ${now() - 600}`),
-      online_users: await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE online_count > 0 AND last_online_at >= ${now() - 600}`),
+      online_devices: liveOnline?.devices ?? await firstNumber(env, `SELECT COALESCE(SUM(online_count), 0) AS c FROM v2_user WHERE online_count > 0 AND last_online_at >= ${now() - 600}`),
+      online_users: liveOnline?.users ?? await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE online_count > 0 AND last_online_at >= ${now() - 600}`),
       today_traffic: { upload: todayU, download: todayD, total: todayU + todayD },
       month_traffic: { upload: monthU, download: monthD, total: monthU + monthD },
       total_traffic: { upload: totalU, download: totalD, total: totalU + totalD }

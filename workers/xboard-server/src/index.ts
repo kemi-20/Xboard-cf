@@ -1083,7 +1083,10 @@ routes.set("POST /api/v2/server/report", async (_request, env, input) => {
     runtime.last_push_at = now();
     runtime.online = trafficCount;
   }
-  if (nonEmptyArrayLike(input.online)) runtime.connections = input.online;
+  if (input.online && typeof input.online === "object" && !Array.isArray(input.online)) {
+    runtime.connections = input.online;
+    runtime.connections_at = now();
+  }
   const load = nonEmptyArrayLike(input.status) ? statusState(input.status) : null;
   const metricValues = nonEmptyArrayLike(input.metrics) ? metricsState(input.metrics) : null;
   if (load) runtime.load_status = load;

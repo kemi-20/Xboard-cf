@@ -351,6 +351,11 @@ test("settings read D1 when KV fails after the memory cache is warm", async () =
   }
 });
 
+test("accepted traffic refreshes last online in the existing user update", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /UPDATE v2_user SET u = u \+ \?, d = d \+ \?, t = \?, online_count = CASE WHEN COALESCE\(online_count, 0\) > 0 THEN online_count ELSE 1 END, last_online_at = \?, updated_at = \? WHERE id = \?/);
+});
+
 test("database mail templates use safe variables and preserve text line breaks", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /function safeMailVars/);
