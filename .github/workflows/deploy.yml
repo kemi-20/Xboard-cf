@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   deploy:
@@ -40,20 +40,6 @@ jobs:
         id: resources
         run: node scripts/prepare-cloudflare-ci.mjs
 
-      - name: Persist Cloudflare resource bindings
-        shell: bash
-        run: |
-          if git diff --quiet -- workers/*/wrangler.toml; then
-            echo "Cloudflare resource bindings already match this account."
-            exit 0
-          fi
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add workers/*/wrangler.toml
-          git commit -m "Configure Cloudflare resource bindings"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
-
       - name: Install Worker dependencies
         shell: bash
         run: |
@@ -69,15 +55,20 @@ jobs:
 
       - name: Deploy xboard-server
         working-directory: workers/xboard-server
-        run: npx wrangler deploy
+        run: npm run deploy
 
       - name: Deploy xboard-jobs
         working-directory: workers/xboard-jobs
-        run: npx wrangler deploy
+        run: npm run deploy
 
       - name: Deploy xboard-edge
         working-directory: workers/xboard-edge
-        run: npx wrangler deploy
+        run: npm run deploy
+
+      - name: Configure Analytics Engine account
+        working-directory: workers/xboard-edge
+        shell: bash
+        run: printf '%s' "$CLOUDFLARE_ACCOUNT_ID" | npx wrangler secret put CLOUDFLARE_ACCOUNT_ID
 
       - name: Configure Analytics Engine query token
         if: env.CLOUDFLARE_ANALYTICS_TOKEN != ''
@@ -100,7 +91,7 @@ jobs:
             echo "## Cloudflare bootstrap result"
             echo
             echo "The Cloudflare resources and existing Workers were bootstrapped by Wrangler."
-            echo "The generated account, D1, and KV identifiers were committed to \`${GITHUB_REF_NAME}\`, so Workers Builds can reuse the same bindings on later pushes."
+            echo "Account, D1, and KV identifiers were used only inside this workflow and were not committed to the repository."
             echo
             echo "> Before running the connection steps, install/authorize the [Cloudflare Workers & Pages GitHub App](https://github.com/apps/cloudflare-workers-and-pages) for this repository. Git repository access cannot be granted by a Cloudflare API token; this GitHub security boundary has no supported Wrangler or Cloudflare REST API equivalent."
             echo
@@ -109,7 +100,7 @@ jobs:
             echo "- Repository: \`${GITHUB_REPOSITORY}\`"
             echo "- Production branch: \`${GITHUB_REF_NAME}\`"
             echo "- Build command: \`npm ci && npm run typecheck && npm test\`"
-            echo "- Deploy command: \`npx wrangler deploy\`"
+            echo "- Deploy command: \`npm run deploy\`"
             echo
             echo "| Worker | Root directory | Builds settings |"
             echo "| --- | --- | --- |"

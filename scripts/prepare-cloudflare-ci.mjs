@@ -66,16 +66,16 @@ async function ensureQueue(accountId, queueName) {
 async function patchWrangler(worker, accountId, databaseId, kvId) {
   const path = resolve("workers", worker, "wrangler.toml");
   let toml = await readFile(path, "utf8");
-  toml = toml.replace(/^account_id\s*=\s*"[^"]*"/m, `account_id = "${accountId}"`);
-  toml = toml.replace(/^database_id\s*=\s*"[^"]*"/m, `database_id = "${databaseId}"`);
-  toml = toml.replace(/^id\s*=\s*"[^"]*"/m, `id = "${kvId}"`);
+  if (/^database_id\s*=/m.test(toml)) toml = toml.replace(/^database_id\s*=\s*"[^"]*"/m, `database_id = "${databaseId}"`);
+  else toml = toml.replace(/^(database_name\s*=\s*"[^"]*"\s*)$/m, `$1\ndatabase_id = "${databaseId}"`);
+  if (/^id\s*=/m.test(toml)) toml = toml.replace(/^id\s*=\s*"[^"]*"/m, `id = "${kvId}"`);
+  else toml = toml.replace(/^(binding\s*=\s*"XBOARD_KV"\s*)$/m, `$1\nid = "${kvId}"`);
   if (worker === "xboard-edge") {
     if (/^\[cache\]\s*$/m.test(toml)) {
       toml = toml.replace(/^(\[cache\]\s*\r?\n)(?:enabled\s*=\s*(?:true|false)\s*\r?\n)?/m, "$1enabled = true\n");
     } else {
-      toml = toml.replace(/^(account_id\s*=\s*"[^"]*"\s*\r?\n)/m, "$1\n[cache]\nenabled = true\n");
+      toml = toml.replace(/^(compatibility_date\s*=\s*"[^"]*"\s*\r?\n)/m, "$1\n[cache]\nenabled = true\n");
     }
-    toml = toml.replace(/^CLOUDFLARE_ACCOUNT_ID\s*=\s*"[^"]*"/m, `CLOUDFLARE_ACCOUNT_ID = "${accountId}"`);
   }
   await writeFile(path, toml);
 }
@@ -101,4 +101,6 @@ const output = process.env.GITHUB_OUTPUT;
 if (output) {
   await writeFile(output, `account_id=${account.id}\ndatabase_id=${databaseId}\nkv_id=${kv.id}\n`, { flag: "a" });
 }
+const githubEnv = process.env.GITHUB_ENV;
+if (githubEnv) await writeFile(githubEnv, `CLOUDFLARE_ACCOUNT_ID=${account.id}\n`, { flag: "a" });
 process.stdout.write(`Cloudflare resources ready for account ${account.name} (${account.id}).\n`);

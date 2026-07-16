@@ -5,7 +5,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --test test/*.test.mjs",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy --experimental-provision --keep-vars"
   },
   "devDependencies": {
     "typescript": "^5.9.2",

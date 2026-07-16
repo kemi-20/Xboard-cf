@@ -349,18 +349,17 @@ test("generated subscription URLs honor configured domain and path", () => {
   assert.match(source, /await subscribeUrl\(request, env,/);
 });
 
-test("bootstrap persists generated Cloudflare bindings for Workers Builds", () => {
+test("bootstrap keeps Cloudflare tenant identifiers out of the repository", () => {
   const workflow = fs.readFileSync("../../.github/workflows/deploy.yml", "utf8");
   const bootstrap = fs.readFileSync("../../scripts/prepare-cloudflare-ci.mjs", "utf8");
-  assert.match(workflow, /permissions:\s+contents: write/);
-  assert.match(workflow, /git diff --quiet -- workers\/\*\/wrangler\.toml/);
-  assert.match(workflow, /git add workers\/\*\/wrangler\.toml/);
-  assert.match(workflow, /git commit -m "Configure Cloudflare resource bindings"/);
-  assert.match(workflow, /git push origin "HEAD:\$\{GITHUB_REF_NAME\}"/);
+  assert.match(workflow, /permissions:\s+contents: read/);
+  assert.doesNotMatch(workflow, /git (?:add|commit|push)/);
   assert.match(workflow, /working-directory: workers\/xboard-edge[\s\S]*wrangler secret put ANALYTICS_API_TOKEN/);
+  assert.match(workflow, /wrangler secret put CLOUDFLARE_ACCOUNT_ID/);
+  assert.match(workflow, /run: npm run deploy/);
   assert.doesNotMatch(workflow, /workers\/xboard-analytics/);
   assert.match(bootstrap, /\["xboard-edge", "xboard-server", "xboard-jobs"\]/);
-  assert.match(bootstrap, /CLOUDFLARE_ACCOUNT_ID = "\$\{accountId\}"/);
+  assert.match(bootstrap, /GITHUB_ENV/);
   assert.match(bootstrap, /body: JSON\.stringify\(\{ name, primary_location_hint: "apac" \}\)/);
   assert.match(bootstrap, /read_replication: \{ mode: "auto" \}/);
   assert.match(bootstrap, /if \(existing\) return \{ database: existing, created: false \}/);
@@ -369,6 +368,15 @@ test("bootstrap persists generated Cloudflare bindings for Workers Builds", () =
   assert.match(bootstrap, /patchWrangler\(worker, account\.id, databaseId, kv\.id\)/);
   assert.match(bootstrap, /"notification-events"/);
   assert.match(bootstrap, /"notification-events-dlq"/);
+  for (const worker of ["xboard-edge", "xboard-server", "xboard-jobs"]) {
+    const wrangler = fs.readFileSync(`../${worker}/wrangler.toml`, "utf8");
+    const pkg = JSON.parse(fs.readFileSync(`../${worker}/package.json`, "utf8"));
+    assert.doesNotMatch(wrangler, /^account_id\s*=/m);
+    assert.doesNotMatch(wrangler, /^database_id\s*=/m);
+    assert.doesNotMatch(wrangler, /^id\s*=/m);
+    assert.match(pkg.scripts.deploy, /--experimental-provision/);
+    assert.match(pkg.scripts.deploy, /--keep-vars/);
+  }
 });
 
 test("admin can fetch a fresh subscription URL for the copy action", () => {

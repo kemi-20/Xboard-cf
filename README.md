@@ -205,7 +205,7 @@ flowchart TB
 
   GitHub -->|"首次手动运行"| Bootstrap
   Bootstrap --> CFResources
-  Bootstrap -->|"写回 account / D1 / KV ID"| GitHub
+  Bootstrap -->|"仅在部署进程中注入资源绑定"| CFResources
   GitHub -->|"后续 push"| Builds
   Builds -->|"按根目录测试并部署"| CFResources
 ```
@@ -281,9 +281,9 @@ CLOUDFLARE_API_TOKEN
 CLOUDFLARE_ANALYTICS_TOKEN
 ```
 
-然后打开 `Actions -> Bootstrap XBoard on Cloudflare -> Run workflow`。workflow 会自动识别 Token 所属账号，创建或复用 `xboard-db`、`xboard-kv`、两个业务 Queue 及对应的两个死信队列，把当前账号、D1 和 KV 的资源 ID 写入三个 Worker 的 `wrangler.toml`，使用 GitHub 自动提供的 `GITHUB_TOKEN` 提交回当前分支，再自动执行 D1 schema 与 seed，创建 Durable Objects、Analytics Engine bindings、Cron Trigger、Static Assets 和 Service Bindings，并按依赖顺序创建或更新三个 Worker。新建的 `xboard-db` 使用 `APAC` 位置提示，并自动尝试开启 D1 Read Replication；开启失败只会在 Action 中显示警告，不会阻断部署。已存在的同名数据库会原样复用，不修改主库位置或读取复制开关。它只配置了 `workflow_dispatch`，不会在每次 push 时运行。
+然后打开 `Actions -> Bootstrap XBoard on Cloudflare -> Run workflow`。workflow 会自动识别 Token 所属账号，创建或复用 `xboard-db`、`xboard-kv`、两个业务 Queue 及对应的两个死信队列，只在本次 Action 的临时 checkout 中注入账号、D1 和 KV 绑定，再自动执行 D1 schema 与 seed，创建 Durable Objects、Analytics Engine bindings、Cron Trigger、Static Assets 和 Service Bindings，并按依赖顺序创建或更新三个 Worker。资源 ID 不会提交或推送到仓库。新建的 `xboard-db` 使用 `APAC` 位置提示，并自动尝试开启 D1 Read Replication；开启失败只会在 Action 中显示警告，不会阻断部署。已存在的同名数据库会原样复用，不修改主库位置或读取复制开关。它只配置了 `workflow_dispatch`，不会在每次 push 时运行。
 
-资源 ID 不是 API Token 或数据库密码，必须随部署仓库保存，Cloudflare Workers Builds 后续检出代码时才能继续绑定同一套资源。workflow 只提交三个 Worker 的 `wrangler.toml`，不会提交任何 Token。如果仓库禁止 GitHub Actions 写入内容，或 `master` 分支保护规则禁止 workflow 直接推送，首次部署会在“Persist Cloudflare resource bindings”步骤明确失败；请允许该 workflow 写入仓库后重新手动运行。
+仓库中的 `wrangler.toml` 只保留公开的 Worker、绑定和资源名称，不包含 Cloudflare Account ID、D1 Database ID 或 KV Namespace ID。首次部署时 Action 使用临时绑定完成部署，并把 Analytics 查询需要的 Account ID 写成 `xboard-edge` Worker Secret。后续 Workers Builds 通过 `npm run deploy` 启用 Wrangler 资源重连，从已部署 Worker 的同名绑定复用现有 D1/KV，不会创建新的业务库，也不会把租户 ID 写回 Git。
 
 API Token 至少需要该账号下 Workers Scripts、D1、Workers KV Storage、Queues 和 Account Settings 的读取/编辑权限。若 Token 可访问多个账号，workflow 使用 Cloudflare API 返回的第一个账号。
 
@@ -297,7 +297,7 @@ API Token 至少需要该账号下 Workers Scripts、D1、Workers KV Storage、Q
 仓库：kemi-20/Xboard-cf
 生产分支：master
 构建命令：npm ci && npm run typecheck && npm test
-部署命令：npx wrangler deploy
+部署命令：npm run deploy
 ```
 
 分别设置根目录：
@@ -389,7 +389,7 @@ Cloudflare 内部可以使用 D1、KV、Queues 和 Durable Objects 替代 Larave
 2. `xboard-edge` 的 `XBOARD_SERVER`、`XBOARD_JOBS` 和 `ASSETS` 绑定是否存在；启用 AE 时还应存在 `ANALYTICS_API_TOKEN` Secret。
 3. `xboard-server` 的 `NODE_HUB`、`STATUS_HUB` 和 `TRAFFIC_EVENTS` 是否存在。
 4. `xboard-jobs` 是否绑定 `traffic-events`、`notification-events` 及其 DLQ，并拥有唯一的每分钟 Cron Trigger。
-5. D1 和 KV ID 是否仍与首次部署 Action 写入的 `wrangler.toml` 一致。
+5. Cloudflare Worker 当前的 `XBOARD_DB` 和 `XBOARD_KV` 绑定是否仍指向首次部署创建的资源。
 6. 修改系统设置后短暂等待缓存版本传播；KV 故障时系统应自动回源 D1。
 
 ## 暂未启用的功能
