@@ -22,10 +22,6 @@ binding = "XBOARD_SERVER"
 service = "xboard-server"
 
 [[services]]
-binding = "XBOARD_SUBSCRIPTION"
-service = "xboard-subscription"
-
-[[services]]
 binding = "XBOARD_ANALYTICS"
 service = "xboard-analytics"
 

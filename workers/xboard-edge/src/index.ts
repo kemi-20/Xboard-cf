@@ -6,13 +6,13 @@ import { bump } from "./kv";
 import { handleAdminGiftCard, handleUserGiftCard } from "./gift-card";
 import { authorizeMigration, handleAdminMigration } from "./migration";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { handleSubscriptionRequest } from "./subscription/index.ts";
 
 export interface Env {
   XBOARD_DB: D1Database;
   XBOARD_KV: KVNamespace;
   ASSETS: Fetcher;
   XBOARD_SERVER: Fetcher;
-  XBOARD_SUBSCRIPTION: Fetcher;
   XBOARD_ANALYTICS: Fetcher;
   XBOARD_JOBS: Fetcher;
   MAIL_EVENTS: Queue;
@@ -1136,10 +1136,12 @@ async function clientApi(request: Request, env: Env, path: string) {
   if (request.method === "GET" && path === "/api/v1/client/app/getConfig") {
     const baseResponse = await env.ASSETS.fetch(new Request(new URL("/rules/app.clash.yaml", request.url)));
     if (!baseResponse.ok) return fail("Client config template is unavailable", 500, 500);
-    const subscription = new URL("https://xboard-subscription.internal/api/v1/client/subscribe");
+    const subscription = new URL(request.url);
+    subscription.pathname = "/api/v1/client/subscribe";
+    subscription.search = "";
     subscription.searchParams.set("token", String(user.token));
     subscription.searchParams.set("flag", "clash");
-    const response = await env.XBOARD_SUBSCRIPTION.fetch(new Request(subscription, { headers: { "user-agent": request.headers.get("user-agent") || "Clash" } }));
+    const response = await handleSubscriptionRequest(new Request(subscription, { headers: { "user-agent": request.headers.get("user-agent") || "Clash" } }), env);
     if (!response.ok) return new Response(response.body, { status: response.status, headers: response.headers });
     const base = parseYaml(await baseResponse.text()) || {};
     const generated = parseYaml(await response.text()) || {};
@@ -4763,12 +4765,12 @@ function isAdminDistAlias(pathname: string) {
 async function edgeFetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     if (isNodeProtocolPath(url.pathname, request.method)) return env.XBOARD_SERVER.fetch(request);
-    if (url.pathname === "/api/v1/client/subscribe") return env.XBOARD_SUBSCRIPTION.fetch(request);
+    if (url.pathname === "/api/v1/client/subscribe") return handleSubscriptionRequest(request, env);
     const staticAsset = url.pathname === "/settings.local.js" || url.pathname === "/manifest.json" || url.pathname.startsWith("/assets/") || url.pathname.startsWith("/locales/") || url.pathname.startsWith("/images/");
     if (!staticAsset) {
       await ensureBootstrap(env);
     }
-    if (!staticAsset && isSubscriptionPath(url.pathname, await currentSubscribePath(env))) return env.XBOARD_SUBSCRIPTION.fetch(request);
+    if (!staticAsset && isSubscriptionPath(url.pathname, await currentSubscribePath(env))) return handleSubscriptionRequest(request, env);
     if (url.pathname === "/health") return ok({ service: "xboard-edge", time: now() });
     const securePath = staticAsset ? "admin" : await currentSecurePath(env);
     const adminUiPath = `/${securePath}`;

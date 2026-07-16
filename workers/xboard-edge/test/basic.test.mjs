@@ -229,7 +229,7 @@ test("worker settings use memory, versioned KV snapshots and D1 fallback", () =>
   for (const file of [
     "src/db.ts",
     "../xboard-server/src/db.ts",
-    "../xboard-subscription/src/db.ts",
+    "src/subscription/db.ts",
     "../xboard-jobs/src/db.ts",
     "../xboard-cron/src/db.ts"
   ]) {
@@ -267,15 +267,16 @@ test("node protocol paths are proxied through the xboard-server service binding"
   assert.match(wrangler, /service = "xboard-server"/);
 });
 
-test("official subscription paths are proxied through the subscription service binding", () => {
+test("official subscription paths are handled inside xboard-edge", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   const wrangler = fs.readFileSync("wrangler.toml", "utf8");
-  assert.match(source, /XBOARD_SUBSCRIPTION: Fetcher/);
+  assert.match(source, /import \{ handleSubscriptionRequest \} from "\.\/subscription\/index\.ts"/);
   assert.match(source, /url\.pathname === "\/api\/v1\/client\/subscribe"/);
   assert.match(source, /async function currentSubscribePath/);
   assert.match(source, /isSubscriptionPath\(url\.pathname, await currentSubscribePath\(env\)\)/);
+  assert.match(source, /return handleSubscriptionRequest\(request, env\)/);
   assert.doesNotMatch(source, /url\.pathname\.startsWith\("\/sub\/"\)/);
-  assert.match(wrangler, /binding = "XBOARD_SUBSCRIPTION"[\s\S]*service = "xboard-subscription"/);
+  assert.doesNotMatch(wrangler, /XBOARD_SUBSCRIPTION|xboard-subscription/);
 });
 
 test("machine detail GET endpoints read ids from query parameters", () => {
@@ -819,8 +820,8 @@ test("request bodies preserve repeated form keys and urlencoded payloads", () =>
 test("V1 app config merges supported nodes into the official Clash app profile", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /\/rules\/app\.clash\.yaml/);
-  assert.match(source, /XBOARD_SUBSCRIPTION\.fetch/);
-  assert.match(source, /xboard-subscription\.internal\/api\/v1\/client\/subscribe/);
+  assert.match(source, /handleSubscriptionRequest\(new Request\(subscription/);
+  assert.match(source, /subscription\.pathname = "\/api\/v1\/client\/subscribe"/);
   assert.match(source, /supportedCiphers/);
   assert.match(source, /proxy\?\.type === "vmess" \|\| proxy\?\.type === "trojan"/);
   assert.match(source, /base\["proxy-groups"\]/);

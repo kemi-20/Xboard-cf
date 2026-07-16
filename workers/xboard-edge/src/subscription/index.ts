@@ -1169,11 +1169,9 @@ async function optionalKvVersion(kv: KVNamespace, key: string) {
 
 export const __test = { clientOf, clientDetails, versionAtLeast, filterByClientCompatibility, regexValue, protocolPrefix, traffic, nextResetAt, decorateServers, general, generalUri, yamlProfile, clashProxy, singboxOutbound, singboxProfile, singboxCoreVersion, adaptSingboxConfig, shadowsocksProfile, textTemplateProfile, proxyLine, shadowrocketLine, quantumultXLine, loonLine, serverPassword, randomizedPort, replaceByPattern, subscriptionUrl, output, responseHeaders, matchesConfiguredSubscribePath, optionalKvVersion };
 
-export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+export async function handleSubscriptionRequest(request: Request, env: Env): Promise<Response> {
     env = { ...env, XBOARD_DB: replicaDatabase(env.XBOARD_DB) };
     const url = new URL(request.url);
-    if (url.pathname === "/health") return new Response(JSON.stringify({ data: { service: "xboard-subscription", time: now() } }), { headers: { "content-type": "application/json" } });
     if (url.pathname !== "/api/v1/client/subscribe") {
       const configured = await loadSettings(env.XBOARD_DB, env.XBOARD_KV);
       if (!matchesConfiguredSubscribePath(url.pathname, configured.subscribe_path)) return fail("Not Found", 404);
@@ -1199,5 +1197,4 @@ export default {
     headers.set("etag", etag);
     if ((request.headers.get("if-none-match") || "").split(",").map(value => value.trim()).includes(etag)) return new Response(null, { status: 304, headers });
     return new Response(result.body, { status: result.status, headers });
-  }
-};
+}

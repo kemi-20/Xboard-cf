@@ -1,15 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { __test } from "../src/index.ts";
+import { __test } from "../src/subscription/index.ts";
 
-test("xboard-subscription has an entrypoint", () => {
-  assert.ok(fs.existsSync("src/index.ts"));
-  assert.match(fs.readFileSync("src/index.ts", "utf8"), /export default/);
+test("xboard-edge contains the subscription handler", () => {
+  assert.ok(fs.existsSync("src/subscription/index.ts"));
+  assert.match(fs.readFileSync("src/subscription/index.ts", "utf8"), /export async function handleSubscriptionRequest/);
 });
 
 test("legacy client subscribe reads the query token instead of the route name", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = fs.readFileSync("src/subscription/index.ts", "utf8");
   assert.match(source, /url\.pathname === "\/api\/v1\/client\/subscribe"[\s\S]*url\.searchParams\.get\("token"\)/);
 });
 
@@ -26,7 +26,7 @@ test("subscription version keys degrade cleanly when KV is unavailable", async (
 });
 
 test("subscription output reads saved settings and templates", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = fs.readFileSync("src/subscription/index.ts", "utf8");
   assert.match(source, /await loadSettings\(env\.XBOARD_DB, env\.XBOARD_KV\)/);
   assert.match(source, /FROM v2_subscribe_templates/);
   assert.match(source, /show_info_to_server_enable/);
@@ -107,7 +107,7 @@ test("sing-box slash user agents retain their actual core version", () => {
 });
 
 test("subscription availability follows upstream UserService semantics", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = fs.readFileSync("src/subscription/index.ts", "utf8");
   assert.equal(__test.nextResetAt({ plan_id: null, expired_at: 1784520000, plan_reset_traffic_method: null }, 0, 1784000000), null);
   assert.doesNotMatch(source, /Number\(user\.u \|\| 0\) \+ Number\(user\.d \|\| 0\) >= Number\(user\.transfer_enable\)/);
   assert.match(source, /Number\(user\.transfer_enable \|\| 0\) <= 0/);
@@ -119,7 +119,7 @@ test("Surge template subscription domain preserves a non-standard port", () => {
 });
 
 test("subscription cache varies by filters and hostname", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = fs.readFileSync("src/subscription/index.ts", "utf8");
   assert.match(source, /searchParams\.get\("types"\)/);
   assert.match(source, /searchParams\.get\("filter"\)/);
   assert.match(source, /url\.hostname/);
@@ -164,7 +164,7 @@ test("client matching and encoded formats follow upstream flags", () => {
 });
 
 test("subscription preparation follows upstream expiry, group, dynamic-port and SS-2022 rules", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = fs.readFileSync("src/subscription/index.ts", "utf8");
   assert.match(source, /user\.expired_at !== null/);
   assert.match(source, /Number\(user\.transfer_enable \|\| 0\) <= 0/);
   assert.match(source, /groups\.includes\(Number\(user\.group_id/);
@@ -245,13 +245,13 @@ test("client feature filters and protocol-specific allowlists match upstream", (
 });
 
 test("invalid type filters behave like upstream and do not hide all nodes", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = fs.readFileSync("src/subscription/index.ts", "utf8");
   assert.match(source, /filter\(value => validServerTypes\.has\(value\)\)/);
   assert.match(source, /requestedTypes\.length && !requestedTypes\.includes\(server\.type\)/);
 });
 
 test("subscription generation survives KV quota and cache failures", () => {
-  const source = fs.readFileSync("src/kv.ts", "utf8");
+  const source = fs.readFileSync("src/subscription/kv.ts", "utf8");
   assert.match(source, /try[\s\S]*await kv\.get\(key\)[\s\S]*catch/);
   assert.match(source, /const value = await load\(\)/);
   assert.match(source, /try[\s\S]*await kv\.put\(key[\s\S]*catch/);
@@ -300,7 +300,7 @@ test("subscription URL patterns, compatibility filters and cache headers follow 
   const user = { uuid: "uuid", u: 0, d: 0, transfer_enable: 1 };
   const unsupported = [{ type: "vmess", name: "Upgrade", host: "example.com", port: 443, protocol_settings: { network: "httpupgrade" } }];
   assert.doesNotMatch(__test.output("clash", {}, { clash: "proxies: []\nproxy-groups: []\nrules: []\n" }, user, unsupported, new Request("https://sub.example/s/token"), "token"), /Upgrade/);
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = fs.readFileSync("src/subscription/index.ts", "utf8");
   assert.match(source, /value => value\.status < 400/);
   assert.match(source, /if-none-match/);
   assert.match(source, /status: 304/);
@@ -447,7 +447,7 @@ test("Sing-box selectors honor include, exclude and fallback and protocol-specif
 });
 
 test("QuantumultX user agents and disabled template fallbacks match upstream behavior", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = fs.readFileSync("src/subscription/index.ts", "utf8");
   assert.match(source, /flag\.includes\("quantumultx"\)/);
   assert.match(source, /quantumult%20x/);
   assert.match(source, /SELECT name, COALESCE\(content, ''\) AS content FROM v2_subscribe_templates/);
@@ -726,8 +726,8 @@ test("Stash transport and Trojan Reality fields match protocol-specific upstream
 });
 
 test("subscription validation and generation use a first-unconstrained D1 session", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
-  const db = fs.readFileSync("src/db.ts", "utf8");
+  const source = fs.readFileSync("src/subscription/index.ts", "utf8");
+  const db = fs.readFileSync("src/subscription/db.ts", "utf8");
   assert.match(db, /db\.withSession\("first-unconstrained"\)/);
   assert.match(source, /XBOARD_DB: replicaDatabase\(env\.XBOARD_DB\)/);
   assert.doesNotMatch(db, /db\.withSession\("first-primary"\)/);
