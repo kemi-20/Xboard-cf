@@ -687,6 +687,44 @@ test("audited SOCKS, uTLS, TLS defaults and reset-day behavior match upstream", 
   assert.equal(__test.nextResetAt({ plan_id: 1, expired_at: expiry, plan_reset_traffic_method: null }, 0, from), Date.UTC(2026, 6, 31, 16, 0) / 1000);
 });
 
+test("General VMess HTTP randomizes configured path and host like upstream", () => {
+  const originalRandom = Math.random;
+  const values = [0.99, 0.99, 0.99];
+  Math.random = () => values.shift() ?? 0;
+  try {
+    const uri = __test.generalUri({ uuid: "uuid" }, {
+      type: "vmess", name: "Random HTTP", host: "node.example", port: 80,
+      protocol_settings: { network: "tcp", network_settings: { header: { type: "http", request: { path: ["/a", "/b"], headers: { Host: ["h1", "h2"] } } } } }
+    });
+    const config = JSON.parse(Buffer.from(uri.slice("vmess://".length), "base64").toString("utf8"));
+    assert.equal(config.path, "/b");
+    assert.equal(config.host, "h2");
+  } finally {
+    Math.random = originalRandom;
+  }
+});
+
+test("Stash transport and Trojan Reality fields match protocol-specific upstream support", () => {
+  const user = { uuid: "uuid" };
+  const reality = __test.clashProxy(user, {
+    type: "trojan", name: "Reality", host: "node.example", port: 443,
+    protocol_settings: { tls: 2, network: "tcp", reality_settings: { server_name: "sni.example", public_key: "pk", short_id: "sid" } }
+  }, "stash");
+  assert.equal(reality.tls, true);
+
+  const vmessH2 = __test.clashProxy(user, { type: "vmess", name: "VMess H2", host: "node.example", port: 443, protocol_settings: { network: "h2", network_settings: { path: "/h2", host: "cdn.example" } } }, "stash");
+  assert.equal(vmessH2.network, "h2");
+  assert.equal(vmessH2["h2-opts"].path, "/h2");
+
+  const vlessXhttp = __test.clashProxy(user, { type: "vless", name: "VLESS XHTTP", host: "node.example", port: 443, protocol_settings: { network: "xhttp", network_settings: { path: "/x" } } }, "stash");
+  assert.equal(vlessXhttp.network, "tcp");
+  assert.equal(vlessXhttp["xhttp-opts"], undefined);
+
+  const trojanH2 = __test.clashProxy(user, { type: "trojan", name: "Trojan H2", host: "node.example", port: 443, protocol_settings: { network: "h2", tls_settings: {}, network_settings: { path: "/h2" } } }, "stash");
+  assert.equal(trojanH2.network, "tcp");
+  assert.equal(trojanH2["h2-opts"], undefined);
+});
+
 test("subscription validation and generation use a first-unconstrained D1 session", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   const db = fs.readFileSync("src/db.ts", "utf8");

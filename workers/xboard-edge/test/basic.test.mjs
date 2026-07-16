@@ -196,7 +196,7 @@ test("audited compatibility fixes match upstream order, ticket and statistics be
   assert.match(source, /SELECT COALESCE\(SUM\(get_amount\), 0\)/);
   assert.doesNotMatch(source, /COALESCE\(SUM\(COALESCE\(get_amount, amount, 0\)\)/);
   assert.match(source, /coupon\.limit_use !== null[\s\S]*Number\(coupon\.limit_use\) <= 0/);
-  assert.match(source, /capacity_limit === null \|\| \(row as any\)\.capacity_limit === undefined/);
+  assert.match(source, /const hasCapacity = \(row: Record<string, any>\)/);
 });
 
 test("server validation keeps public and backend ports independent", () => {
@@ -693,9 +693,8 @@ test("admin user relations, CSV units and smoke tests cover functional paths", (
 test("traffic history exposes the official server_rate field", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /server_rate: Number\(row\.server_rate \?\? 1\) \|\| 1/);
-  assert.match(source, /SELECT \* FROM v2_stat_user WHERE user_id = \? ORDER BY record_at DESC/);
-  assert.match(source, /GROUP BY user_id, server_rate, record_at ORDER BY record_at DESC/);
-  assert.doesNotMatch(source, /MIN\(id\) AS id, user_id, server_rate/);
+  assert.match(source, /SUM\(u\) AS u, SUM\(d\) AS d/);
+  assert.match(source, /GROUP BY user_id, server_rate, record_type, record_at/);
   assert.match(source, /ALTER TABLE v2_stat_user ADD COLUMN server_rate/);
   assert.match(source, /UPDATE v2_stat_user SET server_rate = COALESCE\(rate, 1\)/);
 });
@@ -922,7 +921,7 @@ test("RX compatibility fixes preserve upstream CRUD, plans, Telegram and filters
   assert.match(source, /INSERT INTO v2_knowledge\(title,category,body,language,show/);
   assert.match(source, /route === "\/server\/route\/drop"/);
   assert.match(source, /DELETE FROM v2_server_route WHERE id = \?/);
-  assert.match(source, /boolNumber\(input\.show, 0\)/);
+  assert.match(source, /boolNumber\(input\.show, id \? Number\(existing\?\.show \|\| 0\) : 0\)/);
   assert.match(source, /async function publicPlanRows/);
   assert.match(source, /Number\(value\) \* 100/);
   assert.match(source, /async function handleTelegramMessage/);
@@ -990,7 +989,7 @@ test("GLM compatibility audit fixes preserve upstream mutations and envelopes", 
   const schema = fs.readFileSync("../../schema/d1.sql", "utf8");
   assert.match(source, /id \? String\(existing\?\.code \|\| ""\) : randomString\(8\)/);
   assert.doesNotMatch(source, /new Response\(`\\uFEFF\$\{lines/);
-  assert.match(source, /trigger_source: row\.trigger_source/);
+  assert.match(source, /trigger_source: triggerSource/);
   assert.match(source, /next_reset_at = \?, updated_at = \? WHERE id = \?/);
   assert.match(source, /trigger_source = 'cron'/);
   assert.match(source, /queueTemplateMail\(env, "notify"/);
@@ -1001,4 +1000,25 @@ test("GLM compatibility audit fixes preserve upstream mutations and envelopes", 
   assert.match(source, /user && limitEnabled/);
   assert.match(source, /timestamp: new Date\(\)\.toISOString\(\), data: await trafficRank/);
   assert.match(schema, /CREATE TABLE IF NOT EXISTS v2_stat_server[\s\S]*record_type TEXT NOT NULL DEFAULT 'd'/);
+});
+
+test("current audit findings preserve upstream admin, plan, reset and Telegram contracts", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /const auditRequest = request\.method === "POST" \? request\.clone\(\) : request/);
+  assert.match(source, /await audit\(env,[\s\S]*auditRequest, path\)/);
+  assert.match(source, /SELECT id, code, show FROM v2_coupon/);
+  assert.match(source, /boolNumber\(input\.show, id \? Number\(existing\?\.show \|\| 0\) : 0\)/);
+  assert.match(source, /GROUP BY user_id, server_rate, record_type, record_at/);
+  assert.match(source, /SELECT DISTINCT category FROM v2_knowledge WHERE category IS NOT NULL AND category != '' ORDER BY category/);
+  assert.match(source, /request\.headers\.get\("content-language"\) \|\| request\.headers\.get\("accept-language"\)/);
+  assert.match(source, /ownPlan \? Number\(plan\.renew\) === 1/);
+  assert.match(source, /return available \? ok\(plan\) : fail\("Subscription plan does not exist", 400, 400\)/);
+  assert.match(source, /function trafficResetResource/);
+  assert.match(source, /reset_type_name: resetNames/);
+  assert.match(source, /trigger_source_name: sourceNames/);
+  assert.match(source, /history: \(result\.results \|\| \[\]\)\.map\(row => trafficResetResource\(row, request\)\)/);
+  assert.match(source, /queueTelegramToAdmins/);
+  assert.match(source, /is_admin = 1 OR is_staff = 1/);
+  assert.match(source, /系统繁忙，请稍后重试/);
+  assert.match(source, /telegramGb\(total - used\)/);
 });

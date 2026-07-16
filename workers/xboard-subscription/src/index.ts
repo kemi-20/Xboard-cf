@@ -373,7 +373,11 @@ function generalUri(user: any, server: any) {
     const config: Config = { v: "2", ps: server.name, add: server.host, port: String(server.port), id: password, aid: "0", net: network ?? null, type: "none", host: "", path: "", tls: ps.tls ? "tls" : "" };
     if (ps.tls_settings?.server_name) config.sni = ps.tls_settings.server_name;
     if (fingerprint) config.fp = fingerprint;
-    if (network === "tcp" && networkSettings.header?.type && networkSettings.header.type !== "none") Object.assign(config, { type: networkSettings.header.type, path: networkSettings.header?.request?.path?.[0] || "/", host: networkSettings.header?.request?.headers?.Host?.[0] || "" });
+    if (network === "tcp" && networkSettings.header?.type && networkSettings.header.type !== "none") Object.assign(config, {
+      type: networkSettings.header.type,
+      path: randomArrayValue(networkSettings.header?.request?.path, "/"),
+      host: randomArrayValue(networkSettings.header?.request?.headers?.Host, "")
+    });
     else if (network === "ws") Object.assign(config, { type: "ws", path: networkSettings.path || "", host: networkSettings.headers?.Host || "" });
     else if (network === "grpc") Object.assign(config, { type: "grpc", path: networkSettings.serviceName || "" });
     else if (network === "h2") Object.assign(config, { net: "h2", type: "h2", path: networkSettings.path || "", host: Array.isArray(networkSettings.host) ? networkSettings.host.join(",") : networkSettings.host || "" });
@@ -421,7 +425,7 @@ function clashProxy(user: any, server: any, client: Client = "clashmeta") {
   if (server.type === "shadowsocks") Object.assign(base, { cipher: ps.cipher || "aes-128-gcm", password: server.password || user.uuid, ...clashPluginOptions(ps, client) });
   else if (server.type === "vmess") {
     Object.assign(base, { uuid: user.uuid, alterId: 0, cipher: "auto", network: ps.network || "tcp", tls: client === "stash" ? Boolean(ps.tls) : ps.tls ? true : undefined, servername: ps.tls ? ps.tls_settings?.server_name : undefined, "skip-cert-verify": client === "stash" ? Boolean(ps.tls_settings?.allow_insecure) : ps.tls ? Boolean(ps.tls_settings?.allow_insecure) : undefined });
-    applyClashTransport(base, ps, server);
+    applyClashTransport(base, ps, server, client, "vmess");
     applyClashExtras(base, ps, client, fingerprint);
   }
   else if (server.type === "vless") {
@@ -431,12 +435,13 @@ function clashProxy(user: any, server: any, client: Client = "clashmeta") {
     if (tlsMode === 2) base["reality-opts"] = { "public-key": ps.reality_settings?.public_key, "short-id": ps.reality_settings?.short_id };
     if (client !== "clash" && fingerprint) base["client-fingerprint"] = fingerprint;
     const ns = ps.network_settings || {};
-    if (ps.network === "tcp" && ns.header?.type === "http") Object.assign(base, { network: "http", "http-opts": { headers: ns.header?.request?.headers, path: ns.header?.request?.path || ["/"] } });
-    else if (ps.network === "ws") Object.assign(base, { network: "ws", "ws-opts": { path: ns.path, headers: ns.headers?.Host ? { Host: ns.headers.Host } : undefined } });
-    else if (ps.network === "grpc") Object.assign(base, { network: "grpc", "grpc-opts": { "grpc-service-name": ns.serviceName } });
-    else if (ps.network === "h2") Object.assign(base, { network: "h2", "h2-opts": { path: ns.path, host: Array.isArray(ns.host) ? ns.host : ns.host ? [ns.host] : undefined } });
-    else if (ps.network === "httpupgrade") Object.assign(base, { network: "ws", "ws-opts": { "v2ray-http-upgrade": true, path: ns.path, headers: ns.host ? { Host: ns.host } : undefined } });
-    else if (ps.network === "xhttp") {
+    const network = clashTransportNetwork(ps, client, "vless");
+    if (network === "tcp" && ns.header?.type === "http") Object.assign(base, { network: "http", "http-opts": { headers: ns.header?.request?.headers, path: ns.header?.request?.path || ["/"] } });
+    else if (network === "ws") Object.assign(base, { network: "ws", "ws-opts": { path: ns.path, headers: ns.headers?.Host ? { Host: ns.headers.Host } : undefined } });
+    else if (network === "grpc") Object.assign(base, { network: "grpc", "grpc-opts": { "grpc-service-name": ns.serviceName } });
+    else if (network === "h2") Object.assign(base, { network: "h2", "h2-opts": { path: ns.path, host: Array.isArray(ns.host) ? ns.host : ns.host ? [ns.host] : undefined } });
+    else if (network === "httpupgrade") Object.assign(base, { network: "ws", "ws-opts": { "v2ray-http-upgrade": true, path: ns.path, headers: ns.host ? { Host: ns.host } : undefined } });
+    else if (network === "xhttp") {
       base.network = "xhttp";
       const options = compactObject({ path: ns.path, host: ns.host, mode: ns.mode });
       if (Object.keys(options).length) base["xhttp-opts"] = options;
@@ -449,9 +454,12 @@ function clashProxy(user: any, server: any, client: Client = "clashmeta") {
   else if (server.type === "trojan") {
     const tlsMode = client === "clash" ? 1 : Number(ps.tls ?? 1);
     const tlsSettings = tlsMode === 2 ? ps.reality_settings : ps.tls_settings;
-    Object.assign(base, { password: server.password || user.uuid, sni: tlsSettings?.server_name, network: ps.network || "tcp", "skip-cert-verify": Boolean(tlsSettings?.allow_insecure) });
-    if (tlsMode === 2) base["reality-opts"] = { "public-key": ps.reality_settings?.public_key, "short-id": ps.reality_settings?.short_id };
-    applyClashTransport(base, ps, server);
+    Object.assign(base, { password: server.password || user.uuid, sni: tlsSettings?.server_name, network: clashTransportNetwork(ps, client, "trojan"), "skip-cert-verify": Boolean(tlsSettings?.allow_insecure) });
+    if (tlsMode === 2) {
+      base["reality-opts"] = { "public-key": ps.reality_settings?.public_key, "short-id": ps.reality_settings?.short_id };
+      if (client === "stash") base.tls = true;
+    }
+    applyClashTransport(base, ps, server, client, "trojan");
     applyClashExtras(base, ps, client, fingerprint);
   }
   else if (server.type === "hysteria") {
@@ -506,14 +514,27 @@ function clashPluginOptions(ps: any, client: Client) {
   return { plugin, "plugin-opts": parsed };
 }
 
-function applyClashTransport(base: Config, ps: any, server: any) {
+function randomArrayValue(value: unknown, fallback: string) {
+  if (Array.isArray(value)) return value.length ? value[Math.floor(Math.random() * value.length)] : fallback;
+  return value === null || value === undefined || value === "" ? fallback : value;
+}
+
+function clashTransportNetwork(ps: any, client: Client, protocol: "vmess" | "vless" | "trojan") {
+  const network = String(ps.network || "tcp");
+  if (client !== "stash") return network;
+  const supported = protocol === "trojan" ? new Set(["tcp", "ws", "grpc"]) : new Set(["tcp", "ws", "grpc", "h2"]);
+  return supported.has(network) ? network : "tcp";
+}
+
+function applyClashTransport(base: Config, ps: any, server: any, client: Client, protocol: "vmess" | "vless" | "trojan") {
   const ns = ps.network_settings || {};
-  if (ps.network === "tcp" && ns.header?.type === "http") Object.assign(base, { network: "http", "http-opts": { headers: ns.header?.request?.headers, path: ns.header?.request?.path || ["/"] } });
-  else if (ps.network === "ws") Object.assign(base, { network: "ws", "ws-opts": { path: ns.path, headers: ns.headers?.Host ? { Host: ns.headers.Host } : undefined } });
-  else if (ps.network === "grpc") Object.assign(base, { network: "grpc", "grpc-opts": { "grpc-service-name": ns.serviceName } });
-  else if (ps.network === "h2") Object.assign(base, { network: "h2", "h2-opts": { path: ns.path, host: Array.isArray(ns.host) ? ns.host : ns.host ? [ns.host] : undefined } });
-  else if (ps.network === "httpupgrade") Object.assign(base, { network: "ws", "ws-opts": { "v2ray-http-upgrade": true, path: ns.path, headers: ns.host ? { Host: ns.host } : undefined } });
-  else if (ps.network === "xhttp") Object.assign(base, { network: "xhttp", "xhttp-opts": { path: ns.path, host: ns.host, mode: ns.mode } });
+  const network = clashTransportNetwork(ps, client, protocol);
+  if (network === "tcp" && ns.header?.type === "http") Object.assign(base, { network: "http", "http-opts": { headers: ns.header?.request?.headers, path: ns.header?.request?.path || ["/"] } });
+  else if (network === "ws") Object.assign(base, { network: "ws", "ws-opts": { path: ns.path, headers: ns.headers?.Host ? { Host: ns.headers.Host } : undefined } });
+  else if (network === "grpc") Object.assign(base, { network: "grpc", "grpc-opts": { "grpc-service-name": ns.serviceName } });
+  else if (network === "h2") Object.assign(base, { network: "h2", "h2-opts": { path: ns.path, host: Array.isArray(ns.host) ? ns.host : ns.host ? [ns.host] : undefined } });
+  else if (network === "httpupgrade") Object.assign(base, { network: "ws", "ws-opts": { "v2ray-http-upgrade": true, path: ns.path, headers: ns.host ? { Host: ns.host } : undefined } });
+  else if (network === "xhttp") Object.assign(base, { network: "xhttp", "xhttp-opts": { path: ns.path, host: ns.host, mode: ns.mode } });
   else base.network = "tcp";
 }
 

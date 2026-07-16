@@ -1036,7 +1036,7 @@ async function handleTelegramMessage(request: Request, env: Env, botToken: strin
   if (command === "/traffic") {
     const user = await bound(); if (!user) return;
     const used = Number(user.u || 0) + Number(user.d || 0); const total = Number(user.transfer_enable || 0);
-    return send(`流量使用情况\n\n已用流量：${telegramGb(used)}G\n总流量：${telegramGb(total)}G\n剩余流量：${telegramGb(Math.max(0, total - used))}G\n使用率：${(total > 0 ? used / total * 100 : 0).toFixed(2)}%`);
+    return send(`流量使用情况\n\n已用流量：${telegramGb(used)}G\n总流量：${telegramGb(total)}G\n剩余流量：${telegramGb(total - used)}G\n使用率：${(total > 0 ? used / total * 100 : 0).toFixed(2)}%`);
   }
   if (command === "/getlatesturl" || command === "/subscribe") {
     const user = await bound(); if (!user) return;
@@ -1062,7 +1062,14 @@ async function guestApi(request: Request, env: Env, path: string) {
       try { await telegramRequest(botToken, available ? "approveChatJoinRequest" : "declineChatJoinRequest", { chat_id: join.chat.id, user_id: join.from.id }); } catch (error: any) { return fail(error?.message || "Telegram request failed", 400, 400); }
     }
     if (update.message) {
-      try { await handleTelegramMessage(request, env, botToken, update.message); } catch (error: any) { return fail(error?.message || "Telegram request failed", 400, 400); }
+      try {
+        await handleTelegramMessage(request, env, botToken, update.message);
+      } catch {
+        const chatId = update.message?.chat?.id;
+        if (chatId) {
+          try { await telegramRequest(botToken, "sendMessage", { chat_id: chatId, text: "系统繁忙，请稍后重试" }); } catch {}
+        }
+      }
     }
     return ok(true);
   }
@@ -1613,7 +1620,7 @@ async function adminPlanRows(env: Env) {
 }
 
 function requestLanguage(request: Request) {
-  const language = (request.headers.get("accept-language") || "").toLowerCase();
+  const language = (request.headers.get("content-language") || request.headers.get("accept-language") || "").toLowerCase();
   if (language.startsWith("ru")) return "ru";
   if (language.startsWith("zh")) return "zh";
   return "en";
@@ -2313,6 +2320,43 @@ async function queueTelegram(env: Env, text: string, chatId?: string | number) {
   return eventId;
 }
 
+async function queueTelegramToAdmins(env: Env, text: string) {
+  const recipients = await env.XBOARD_DB.prepare(`SELECT telegram_id FROM v2_user
+    WHERE telegram_id IS NOT NULL AND (is_admin = 1 OR is_staff = 1)`).all<{ telegram_id: string | number }>();
+  await Promise.all((recipients.results || []).map(recipient => queueTelegram(env, text, recipient.telegram_id)));
+}
+
+function ticketLocation(request: Request) {
+  const location = [request.headers.get("cf-ipcountry"), request.headers.get("cf-region"), request.headers.get("cf-ipcity")].filter(Boolean).join(" / ");
+  return location || requestIp(request) || "NULL";
+}
+
+async function ticketTelegramText(env: Env, request: Request, user: Record<string, any>, ticketId: number, subject: string, message: string) {
+  const plan = user.plan_id ? await env.XBOARD_DB.prepare("SELECT name FROM v2_plan WHERE id = ?").bind(user.plan_id).first<{ name: string }>() : null;
+  const total = Number(user.transfer_enable || 0); const upload = Number(user.u || 0); const download = Number(user.d || 0);
+  const expires = user.expired_at ? new Date(Number(user.expired_at) * 1000).toISOString().replace("T", " ").slice(0, 19) : "长期有效";
+  const lines = [
+    `工单提醒 #${ticketId}`,
+    "━━━━━━━━━━━━━━━━━━━━",
+    `邮箱: ${String(user.email || "")}`,
+    `位置: ${ticketLocation(request)}`,
+    plan ? `套餐: ${plan.name}` : "套餐: 未订购任何套餐"
+  ];
+  if (plan) lines.push(
+    `流量: ${telegramGb(total - upload - download)}G / ${telegramGb(total)}G (剩余/总计)`,
+    `已用: ${telegramGb(upload)}G / ${telegramGb(download)}G (上传/下载)`,
+    `到期: ${expires}`
+  );
+  lines.push(
+    `余额: ${(Number(user.balance || 0) / 100).toFixed(2)}元`,
+    `佣金: ${(Number(user.commission_balance || 0) / 100).toFixed(2)}元`,
+    "━━━━━━━━━━━━━━━━━━━━",
+    `主题: ${subject}`,
+    `内容: ${message}`
+  );
+  return lines.join("\n");
+}
+
 type EmailProvider = "maileroo" | "brevo";
 
 function normalizeEmailProvider(value: unknown): EmailProvider {
@@ -2429,6 +2473,33 @@ function dateBoundary(value: unknown, end = false) {
   return timestamp + (end ? 86399 : 0);
 }
 
+function trafficResetResource(row: Record<string, any>, request: Request) {
+  const language = requestLanguage(request);
+  const resetNames = {
+    en: { monthly: "Monthly Reset", first_day_month: "First Day of Month Reset", yearly: "Yearly Reset", first_day_year: "First Day of Year Reset", manual: "Manual Reset", purchase: "Purchase Reset Package" },
+    zh: { monthly: "按月重置", first_day_month: "每月1号重置", yearly: "按年重置", first_day_year: "每年1月1日重置", manual: "手动重置", purchase: "购买重置包" },
+    ru: { monthly: "Ежемесячный сброс", first_day_month: "Сброс в первый день месяца", yearly: "Ежегодный сброс", first_day_year: "Сброс в первый день года", manual: "Ручной сброс", purchase: "Приобретение пакета сброса" }
+  }[language] as Record<string, string>;
+  const sourceNames = {
+    en: { auto: "Auto Trigger", manual: "Manual Trigger", api: "API Call", cron: "Cron Job", user_access: "User Access", order: "Order", gift_card: "Gift Card" },
+    zh: { auto: "自动触发", manual: "手动触发", api: "API调用", cron: "定时任务", user_access: "用户访问", order: "订单", gift_card: "礼品卡" },
+    ru: { auto: "Автоматический запуск", manual: "Ручной запуск", api: "Вызов API", cron: "Cron-задача", user_access: "Доступ пользователя", order: "Заказ", gift_card: "Подарочная карта" }
+  }[language] as Record<string, string>;
+  const metadata = parseJsonObject(row.metadata);
+  const triggerSource = String(row.trigger_source || metadata.trigger_source || "manual");
+  const oldTotal = Number(row.old_total ?? (Number(row.old_u || 0) + Number(row.old_d || 0)));
+  const newTotal = Number(row.new_total || 0);
+  return {
+    ...row,
+    old_traffic: { upload: Number(row.old_upload ?? row.old_u ?? 0), download: Number(row.old_download ?? row.old_d ?? 0), total: oldTotal, formatted: trafficText(oldTotal) },
+    new_traffic: { upload: Number(row.new_upload || 0), download: Number(row.new_download || 0), total: newTotal, formatted: trafficText(newTotal) },
+    trigger_source: triggerSource,
+    reset_type_name: resetNames[String(row.reset_type)] || String(row.reset_type || ""),
+    trigger_source_name: sourceNames[triggerSource] || triggerSource,
+    metadata
+  };
+}
+
 async function trafficResetLogs(env: Env, request: Request) {
   const url = new URL(request.url);
   const page = Math.max(1, Number(url.searchParams.get("page") || 1));
@@ -2456,15 +2527,7 @@ async function trafficResetLogs(env: Env, request: Request) {
   if (end !== null) { clauses.push("l.reset_time <= ?"); binds.push(end); }
   const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
   const result = await env.XBOARD_DB.prepare(`SELECT l.*, u.email AS user_email FROM v2_traffic_reset_logs l LEFT JOIN v2_user u ON u.id = l.user_id${where} ORDER BY l.reset_time DESC LIMIT ? OFFSET ?`).bind(...binds, pageSize, offset).all<Record<string, any>>();
-  const data = (result.results || []).map(row => ({
-    ...row,
-    old_traffic: { upload: Number(row.old_upload ?? row.old_u ?? 0), download: Number(row.old_download ?? row.old_d ?? 0), total: Number(row.old_total ?? (Number(row.old_u || 0) + Number(row.old_d || 0))), formatted: trafficText(Number(row.old_total ?? (Number(row.old_u || 0) + Number(row.old_d || 0)))) },
-    new_traffic: { upload: Number(row.new_upload || 0), download: Number(row.new_download || 0), total: Number(row.new_total || 0), formatted: trafficText(Number(row.new_total || 0)) },
-    trigger_source: row.trigger_source || parseJsonObject(row.metadata).trigger_source || "manual",
-    reset_type_name: row.reset_type,
-    trigger_source_name: row.trigger_source || parseJsonObject(row.metadata).trigger_source || "manual",
-    metadata: parseJsonObject(row.metadata)
-  }));
+  const data = (result.results || []).map(row => trafficResetResource(row, request));
   const totalRow = await env.XBOARD_DB.prepare(`SELECT COUNT(*) AS count FROM v2_traffic_reset_logs l LEFT JOIN v2_user u ON u.id = l.user_id${where}`).bind(...binds).first<{ count: number }>();
   const total = Number(totalRow?.count || 0);
   return { data, pagination: { current_page: page, last_page: Math.max(1, Math.ceil(total / pageSize)), per_page: pageSize, total } };
@@ -2799,13 +2862,13 @@ async function adminCoupon(request: Request, env: Env, route: string): Promise<R
     if (required.some(key => input[key] === undefined || input[key] === "")) return fail("优惠券参数不完整", 422, 422);
     const couponType = Math.trunc(Number.parseFloat(String(input.type ?? "")));
     if (![1, 2].includes(couponType)) return fail("类型格式有误", 422, 422);
-    const existing = id ? await env.XBOARD_DB.prepare("SELECT id, code FROM v2_coupon WHERE id = ?").bind(id).first<Record<string, any>>() : null;
+    const existing = id ? await env.XBOARD_DB.prepare("SELECT id, code, show FROM v2_coupon WHERE id = ?").bind(id).first<Record<string, any>>() : null;
     if (id && !existing) return fail("优惠券不存在", 500, 500);
     const count = id ? 1 : Math.min(500, Math.max(1, Number(input.generate_count || 1))); const ts = now();
     const generatedCoupons: Array<Record<string, any>> = [];
     const statements = Array.from({ length: count }, (_, index) => {
       const code = count === 1 && input.code ? String(input.code) : id ? String(existing?.code || "") : randomString(8);
-      const values = [code, String(input.name), couponType, Number(input.value), boolNumber(input.show, 0), nullableNumber(input.limit_use), nullableNumber(input.limit_use_with_user), couponValue(input, "limit_plan_ids"), couponValue(input, "limit_period"), Number(input.started_at), Number(input.ended_at), ts, ts];
+      const values = [code, String(input.name), couponType, Number(input.value), boolNumber(input.show, id ? Number(existing?.show || 0) : 0), nullableNumber(input.limit_use), nullableNumber(input.limit_use_with_user), couponValue(input, "limit_plan_ids"), couponValue(input, "limit_period"), Number(input.started_at), Number(input.ended_at), ts, ts];
       generatedCoupons.push({ ...input, code, type: couponType, created_at: ts });
       if (id && index === 0) return env.XBOARD_DB.prepare("UPDATE v2_coupon SET code=?, name=?, type=?, value=?, show=?, limit_use=?, limit_use_with_user=?, limit_plan_ids=?, limit_period=?, started_at=?, ended_at=?, updated_at=? WHERE id=?").bind(...values.slice(0, 11), ts, id);
       return env.XBOARD_DB.prepare("INSERT INTO v2_coupon(code,name,type,value,show,limit_use,limit_use_with_user,limit_plan_ids,limit_period,started_at,ended_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(...values);
@@ -3339,6 +3402,7 @@ async function adminApi(request: Request, env: Env, path: string) {
     if (migrationAdminId !== null) admin = { id: migrationAdminId, email: "migration-session", is_admin: 1 };
   }
   if (!admin) return fail("未授权", 401, 401);
+  const auditRequest = request.method === "POST" ? request.clone() : request;
   const response = await (async () => {
   if (request.method === "POST" && route === "/system/backfillAnalytics") {
     const callJobs = async (dataset: "user" | "server") => {
@@ -3510,9 +3574,13 @@ async function adminApi(request: Request, env: Env, path: string) {
     if (!userId) return fail("user_id 字段是必须的", 422, 422);
     const page = Math.max(1, Number(input.page || 1));
     const pageSize = Math.min(100, Math.max(1, Number(input.pageSize || input.page_size || 10)));
-    const result = await env.XBOARD_DB.prepare(`SELECT * FROM v2_stat_user WHERE user_id = ? ORDER BY record_at DESC LIMIT ? OFFSET ?`)
+    const result = await env.XBOARD_DB.prepare(`SELECT user_id, server_rate, record_type, record_at, SUM(u) AS u, SUM(d) AS d, MIN(created_at) AS created_at, MAX(updated_at) AS updated_at
+      FROM v2_stat_user WHERE user_id = ? GROUP BY user_id, server_rate, record_type, record_at
+      ORDER BY record_at DESC LIMIT ? OFFSET ?`)
       .bind(userId, pageSize, (page - 1) * pageSize).all<Record<string, any>>();
-    const totalRow = await env.XBOARD_DB.prepare("SELECT COUNT(*) AS count FROM v2_stat_user WHERE user_id = ?").bind(userId).first<{ count: number }>();
+    const totalRow = await env.XBOARD_DB.prepare(`SELECT COUNT(*) AS count FROM (
+      SELECT 1 FROM v2_stat_user WHERE user_id = ? GROUP BY user_id, server_rate, record_type, record_at
+    )`).bind(userId).first<{ count: number }>();
     const data = (result.results || []).map(row => ({ ...row, u: Number(row.u || 0), d: Number(row.d || 0), server_rate: Number(row.server_rate ?? 1) || 1 }));
     return json(paginated(data, Number(totalRow?.count || 0), page, pageSize));
   }
@@ -3549,6 +3617,10 @@ async function adminApi(request: Request, env: Env, path: string) {
     const result = await env.XBOARD_DB.prepare(`SELECT su.user_id, u.email, COALESCE(SUM(su.u),0) AS u, COALESCE(SUM(su.d),0) AS d, COALESCE(SUM(su.u+su.d),0) AS total FROM v2_stat_user su LEFT JOIN v2_user u ON u.id = su.user_id WHERE su.record_at >= ? AND su.record_at < ? AND COALESCE(su.record_type,'d') = 'd' GROUP BY su.user_id, u.email ORDER BY total DESC LIMIT ?`)
       .bind(start, end, limit).all();
     return ok(result.results || []);
+  }
+  if (request.method === "GET" && route === "/knowledge/getCategory") {
+    const result = await env.XBOARD_DB.prepare("SELECT DISTINCT category FROM v2_knowledge WHERE category IS NOT NULL AND category != '' ORDER BY category").all<{ category: string }>();
+    return ok((result.results || []).map(row => row.category));
   }
   if (request.method === "GET" && route === "/stat/getStatRecord") {
     const url = new URL(request.url);
@@ -3895,8 +3967,8 @@ async function adminApi(request: Request, env: Env, path: string) {
     const userId = Number(historyMatch[1]);
     const user = await env.XBOARD_DB.prepare("SELECT id, email, reset_count, last_reset_at, next_reset_at FROM v2_user WHERE id = ?").bind(userId).first();
     if (!user) return fail("用户不存在", 404, 404);
-    const result = await env.XBOARD_DB.prepare("SELECT * FROM v2_traffic_reset_logs WHERE user_id = ? ORDER BY reset_time DESC LIMIT ?").bind(userId, Math.min(50, Number(new URL(request.url).searchParams.get("limit") || 10))).all();
-    return json({ data: { user, history: result.results || [] } });
+    const result = await env.XBOARD_DB.prepare("SELECT * FROM v2_traffic_reset_logs WHERE user_id = ? ORDER BY reset_time DESC LIMIT ?").bind(userId, Math.min(50, Number(new URL(request.url).searchParams.get("limit") || 10))).all<Record<string, any>>();
+    return json({ data: { user, history: (result.results || []).map(row => trafficResetResource(row, request)) } });
   }
   for (const [suffix, table] of Object.entries(directFetchTables)) {
     if (path.includes(suffix)) {
@@ -3947,7 +4019,7 @@ async function adminApi(request: Request, env: Env, path: string) {
   }
   return json({ message: "Not Found" }, 404);
   })();
-  if (!route.startsWith("/migration/")) await audit(env, Number((admin as any).id || 0), request, path);
+  if (!route.startsWith("/migration/")) await audit(env, Number((admin as any).id || 0), auditRequest, path);
   return response;
 }
 
@@ -4377,12 +4449,18 @@ async function userApi(request: Request, env: Env, path: string) {
     }
   }
   if (path.includes("/plan/fetch")) {
-    const plans = (await publicPlanRows(request, env)).filter(row => Number(row.show) === 1 && Number(row.sell) === 1);
+    const plans = await publicPlanRows(request, env);
     const counts = await env.XBOARD_DB.prepare("SELECT plan_id, COUNT(*) AS count FROM v2_user WHERE plan_id IS NOT NULL AND (expired_at IS NULL OR expired_at >= ?) GROUP BY plan_id").bind(now()).all<any>();
     const countMap = new Map((counts.results || []).map(row => [Number(row.plan_id), Number(row.count)]));
-    const available = plans.filter(row => (row as any).capacity_limit === null || (row as any).capacity_limit === undefined || (countMap.get(Number((row as any).id)) || 0) < Number((row as any).capacity_limit) || Number((user as any).plan_id) === Number((row as any).id));
     const id = nullableNumber(new URL(request.url).searchParams.get("id"));
-    return ok(id ? available.find(row => Number((row as any).id) === id) || null : available);
+    const hasCapacity = (row: Record<string, any>) => row.capacity_limit === null || row.capacity_limit === undefined || (countMap.get(Number(row.id)) || 0) < Number(row.capacity_limit);
+    if (id) {
+      const plan = plans.find(row => Number((row as any).id) === id) as Record<string, any> | undefined;
+      const ownPlan = Number((user as any).plan_id) === id;
+      const available = !!plan && (ownPlan ? Number(plan.renew) === 1 : Number(plan.show) === 1 && Number(plan.sell) === 1 && hasCapacity(plan));
+      return available ? ok(plan) : fail("Subscription plan does not exist", 400, 400);
+    }
+    return ok(plans.filter(row => Number((row as any).show) === 1 && Number((row as any).sell) === 1 && hasCapacity(row as Record<string, any>)));
   }
   if (path.includes("/server/fetch")) {
     const available = userIsAvailable(user as Record<string, any>);
@@ -4468,7 +4546,8 @@ async function userApi(request: Request, env: Env, path: string) {
       .bind((user as any).id, String(input.subject), Number(input.level || 0), (user as any).id, ts, ts).run();
     await env.XBOARD_DB.prepare("INSERT INTO v2_ticket_message(ticket_id, user_id, message, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
       .bind(Number((result.meta as any)?.last_row_id || 0), (user as any).id, String(input.message), ts, ts).run();
-    try { await queueTelegram(env, `工单提醒 #${Number((result.meta as any)?.last_row_id || 0)}\n邮箱: ${(user as any).email}\n主题: ${String(input.subject)}\n内容: ${String(input.message)}`); } catch {}
+    const ticketId = Number((result.meta as any)?.last_row_id || 0);
+    try { await queueTelegramToAdmins(env, await ticketTelegramText(env, request, user as Record<string, any>, ticketId, String(input.subject), String(input.message))); } catch {}
     return ok(true);
   }
   if (path.includes("/ticket/close")) {
@@ -4479,7 +4558,7 @@ async function userApi(request: Request, env: Env, path: string) {
   if (request.method === "POST" && route === "/ticket/reply") {
     const input = await body<Record<string, any>>(request);
     if (!input.id || !input.message) return fail("参数不正确", 400, 400);
-    const ticket = await env.XBOARD_DB.prepare("SELECT id, status, reply_status, last_reply_user_id FROM v2_ticket WHERE id = ? AND user_id = ?").bind(input.id, (user as any).id).first<Record<string, any>>();
+    const ticket = await env.XBOARD_DB.prepare("SELECT id, subject, status, reply_status, last_reply_user_id FROM v2_ticket WHERE id = ? AND user_id = ?").bind(input.id, (user as any).id).first<Record<string, any>>();
     if (!ticket) return fail("工单不存在", 400, 400);
     if (Number(ticket.status)) return fail("工单已关闭，无法回复", 400, 400);
     const config = await settings(env.XBOARD_DB, env.XBOARD_KV);
@@ -4489,7 +4568,7 @@ async function userApi(request: Request, env: Env, path: string) {
       env.XBOARD_DB.prepare("INSERT INTO v2_ticket_message(ticket_id, user_id, message, created_at, updated_at) VALUES (?, ?, ?, ?, ?)").bind(ticket.id, (user as any).id, String(input.message), ts, ts),
       env.XBOARD_DB.prepare("UPDATE v2_ticket SET reply_status = 0, last_reply_user_id = ?, updated_at = ? WHERE id = ?").bind((user as any).id, ts, ticket.id)
     ]);
-    try { await queueTelegram(env, `工单提醒 #${ticket.id}\n邮箱: ${(user as any).email}\n用户回复: ${String(input.message)}`); } catch {}
+    try { await queueTelegramToAdmins(env, await ticketTelegramText(env, request, user as Record<string, any>, Number(ticket.id), String(ticket.subject || ""), String(input.message))); } catch {}
     return ok(true);
   }
   if (request.method === "POST" && route === "/ticket/withdraw") {
