@@ -65,7 +65,7 @@ async function optionalKvPut(env: Env, key: string, value: string, expirationTtl
 
 async function updateScheduleHeartbeat(env: Env, ts: number) {
   const previous = Number(await optionalKvGet(env, "schedule:last_check_at") || 0);
-  if (!previous || ts - previous >= 300) await optionalKvPut(env, "schedule:last_check_at", String(ts), 900);
+  if (!previous || ts - previous >= 480) await optionalKvPut(env, "schedule:last_check_at", String(ts), 900);
 }
 
 async function setting(env: Env, name: string, fallback = "") {
@@ -382,8 +382,24 @@ async function resetLogs(env: Env, ts: number) {
 }
 
 async function acquireTaskLock(env: Env, task: string, ts: number) {
+  const doClaim = `do:${crypto.randomUUID()}`;
+  try {
+    const token = (await setting(env, "internal_sync_token", "")).trim() || (await setting(env, "server_token", "")).trim();
+    if (token) {
+      const response = await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/status/locks/acquire", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-xboard-internal-token": token },
+        body: JSON.stringify({ name: task, claim: doClaim, timestamp: ts, ttl: 1800 })
+      });
+      if (response.ok) {
+        const result = await response.json() as { data?: { acquired?: boolean } };
+        if (result.data?.acquired === true) return doClaim;
+        if (result.data?.acquired === false) return null;
+      }
+    }
+  } catch { /* Fall back to D1 so scheduled business tasks remain available. */ }
   const eventId = `schedule:lock:${task}`;
-  const claim = `running:${crypto.randomUUID()}`;
+  const claim = `d1:${crypto.randomUUID()}`;
   const result = await env.XBOARD_DB.prepare(`INSERT INTO v2_job_logs(event_id, type, status, payload, created_at, updated_at)
     VALUES (?, 'schedule', ?, '{}', ?, ?)
     ON CONFLICT(event_id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at
@@ -392,6 +408,17 @@ async function acquireTaskLock(env: Env, task: string, ts: number) {
 }
 
 async function releaseTaskLock(env: Env, task: string, claim: string, ts: number) {
+  if (claim.startsWith("do:")) {
+    try {
+      const token = (await setting(env, "internal_sync_token", "")).trim() || (await setting(env, "server_token", "")).trim();
+      if (token) await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/status/locks/release", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-xboard-internal-token": token },
+        body: JSON.stringify({ name: task, claim })
+      });
+    } catch { /* The DO lock expires automatically. */ }
+    return;
+  }
   await env.XBOARD_DB.prepare("UPDATE v2_job_logs SET status = 'done', updated_at = ? WHERE event_id = ? AND status = ?")
     .bind(ts, `schedule:lock:${task}`, claim).run();
 }

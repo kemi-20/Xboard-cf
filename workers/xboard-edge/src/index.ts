@@ -42,14 +42,14 @@ async function cachedData<T>(key: string, ttlSeconds: number, loader: () => Prom
 
 async function ensureStorageOptimization(env: Env) {
   if (storageOptimizationReady) return;
-  const markerKey = "bootstrap:storage:v2";
+  const markerKey = "bootstrap:storage:v3";
   if (await optionalKvGet(env, markerKey)) {
     storageOptimizationReady = true;
     return;
   }
   try {
     const persisted = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = 'system_storage_optimization_version'").first<{ value: string }>();
-    if (persisted?.value === "v2") {
+    if (persisted?.value === "v3") {
       storageOptimizationReady = true;
       await optionalKvPut(env, markerKey, String(now()));
       return;
@@ -61,14 +61,16 @@ async function ensureStorageOptimization(env: Env) {
       "DROP INDEX IF EXISTS idx_v2_stat_server_upload",
       "DROP INDEX IF EXISTS idx_v2_stat_server_download",
       "DROP INDEX IF EXISTS idx_v2_stat_server_record",
+      "DROP INDEX IF EXISTS idx_v2_job_logs_status_time",
+      "CREATE INDEX IF NOT EXISTS idx_v2_job_logs_failed_time ON v2_job_logs(updated_at, created_at) WHERE status = 'failed'",
       "CREATE INDEX IF NOT EXISTS idx_v2_stat_server_record_server ON v2_stat_server(record_at, server_id, server_type)"
     ]) await runSqlIgnore(env, sql);
     const timestamp = now();
     await runSqlIgnore(env, `UPDATE v2_mail_templates SET subject = '{{name}} - 站点通知', updated_at = ?
       WHERE name = 'notify' AND subject = 'Notification from {{app.name}}'`, [timestamp]);
     await env.XBOARD_DB.prepare(`INSERT INTO v2_settings(name, value, created_at, updated_at)
-      VALUES ('system_storage_optimization_version', 'v2', ?, ?)
-      ON CONFLICT(name) DO UPDATE SET value = 'v2', updated_at = excluded.updated_at`).bind(timestamp, timestamp).run();
+      VALUES ('system_storage_optimization_version', 'v3', ?, ?)
+      ON CONFLICT(name) DO UPDATE SET value = 'v3', updated_at = excluded.updated_at`).bind(timestamp, timestamp).run();
     storageOptimizationReady = true;
     await optionalKvPut(env, markerKey, String(timestamp));
   } catch {
@@ -605,7 +607,7 @@ async function ensureBootstrap(env: Env) {
     "CREATE INDEX IF NOT EXISTS idx_v2_user_availability ON v2_user(banned, expired_at, group_id, transfer_enable, u, d)",
     "CREATE INDEX IF NOT EXISTS idx_v2_commission_log_created_at ON v2_commission_log(created_at)",
     "CREATE INDEX IF NOT EXISTS idx_failed_jobs_failed_at ON failed_jobs(failed_at)",
-    "CREATE INDEX IF NOT EXISTS idx_v2_job_logs_status_time ON v2_job_logs(status, updated_at, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_v2_job_logs_failed_time ON v2_job_logs(updated_at, created_at) WHERE status = 'failed'",
     "CREATE INDEX IF NOT EXISTS idx_v2_commission_log_get_amount ON v2_commission_log(get_amount)",
     "CREATE INDEX IF NOT EXISTS idx_v2_user_t ON v2_user(t)",
     "CREATE INDEX IF NOT EXISTS idx_v2_user_online_count ON v2_user(online_count)",

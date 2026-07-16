@@ -203,18 +203,6 @@ async function touchNode(env: Env, node: Row) {
   await reportStatus(env, "node", Number(node.id), { machine_id: Number(node.machine_id || 0) || null, last_check_at: ts });
 }
 
-async function optionalKvPut(env: Env, key: string, value: string, options?: { expirationTtl?: number }) {
-  try { await env.XBOARD_KV.put(key, value, options); } catch { /* D1 and live reports remain authoritative. */ }
-}
-
-async function optionalKvGet(env: Env, key: string) {
-  try { return await env.XBOARD_KV.get(key); } catch { return null; }
-}
-
-async function optionalKvDelete(env: Env, key: string) {
-  try { await env.XBOARD_KV.delete(key); } catch { /* KV device state is ephemeral. */ }
-}
-
 function currentRate(node: Row) {
   const parsedFallback = Number(node.rate);
   const fallback = Number.isFinite(parsedFallback) ? parsedFallback : 0;
@@ -486,14 +474,15 @@ async function disconnectDo(env: Env, name: string) {
   await env.NODE_HUB.get(id).fetch("https://node-hub.internal/disconnect", { method: "POST" });
 }
 
-async function nodePushTarget(env: Env, node: Row) {
-  return await optionalKvGet(env, `node:ws:target:${node.id}`)
-    || (Number(node.machine_id) > 0 ? `machine:${node.machine_id}` : `node:${node.id}`);
-}
-
-async function nodeWebsocketIsAlive(env: Env, nodeId: number) {
-  try { return Boolean(await env.XBOARD_KV.get(`node:ws:alive:${nodeId}`)); }
-  catch { return false; }
+async function pushNodeEvent(env: Env, node: Row, event: string, data: Row) {
+  const nodeId = Number(node.id);
+  const machineId = Number(node.machine_id || 0);
+  if (machineId > 0) {
+    const machine = await pushDo(env, `machine:${machineId}`, event, { ...data, node_id: nodeId });
+    if (Number(machine.sent || 0) > 0) return Number(machine.sent);
+  }
+  const direct = await pushDo(env, `node:${nodeId}`, event, data);
+  return Number(direct.sent || 0);
 }
 
 function websocketError(message: string) {
@@ -507,11 +496,8 @@ function websocketError(message: string) {
 
 async function syncNode(env: Env, node: Row) {
   if (!Number(node.enabled ?? 1)) return;
-  if (!await nodeWebsocketIsAlive(env, Number(node.id))) return;
-  const target = await nodePushTarget(env, node);
-  const suffix = target.startsWith("machine:") ? { node_id: Number(node.id) } : {};
-  await pushDo(env, target, "sync.config", { config: await nodeConfig(env, node), ...suffix });
-  await pushDo(env, target, "sync.users", { users: await nodeUsers(env, node), ...suffix });
+  await pushNodeEvent(env, node, "sync.config", { config: await nodeConfig(env, node) });
+  await pushNodeEvent(env, node, "sync.users", { users: await nodeUsers(env, node) });
 }
 
 function userIsAvailable(user: Row | null): user is Row {
@@ -534,15 +520,12 @@ async function syncUserChange(env: Env, userId: number, oldGroupId?: number) {
   const groups = new Set<number>([Number(oldGroupId || 0), currentGroupId].filter(Boolean));
   const canAdd = userIsAvailable(user);
   let sent = 0;
-  for (const node of await nodesForGroups(env, groups)) {
-    if (!await nodeWebsocketIsAlive(env, Number(node.id))) continue;
+  const nodes = await nodesForGroups(env, groups);
+  for (const node of nodes) {
     const nodeGroups = new Set(parseJson<unknown[]>(node.group_ids, []).map(Number));
     const action = canAdd && nodeGroups.has(currentGroupId) ? "add" : "remove";
     const users = action === "add" && user ? [availableUser(user)] : [{ id: userId }];
-    const target = await nodePushTarget(env, node);
-    const suffix = target.startsWith("machine:") ? { node_id: Number(node.id) } : {};
-    const result = await pushDo(env, target, "sync.user.delta", { action, users, ...suffix });
-    sent += Number(result.sent || 0);
+    sent += await pushNodeEvent(env, node, "sync.user.delta", { action, users });
   }
   return sent;
 }
@@ -559,15 +542,12 @@ async function syncUsersChange(env: Env, userIds: number[]) {
   const groupByUser = new Map(userRows.map(user => [Number(user.id), Number(user.group_id || 0)]));
   const groups = new Set([...groupByUser.values()].filter(Boolean));
   let sent = 0;
-  for (const node of await nodesForGroups(env, groups)) {
-    if (!await nodeWebsocketIsAlive(env, Number(node.id))) continue;
+  const nodes = await nodesForGroups(env, groups);
+  for (const node of nodes) {
     const nodeGroups = new Set(parseJson<unknown[]>(node.group_ids, []).map(Number));
     const affected = ids.filter(id => nodeGroups.has(groupByUser.get(id) || 0)).map(id => ({ id }));
     if (!affected.length) continue;
-    const target = await nodePushTarget(env, node);
-    const suffix = target.startsWith("machine:") ? { node_id: Number(node.id) } : {};
-    const result = await pushDo(env, target, "sync.user.delta", { action: "remove", users: affected, ...suffix });
-    sent += Number(result.sent || 0);
+    sent += await pushNodeEvent(env, node, "sync.user.delta", { action: "remove", users: affected });
   }
   return sent;
 }
@@ -575,12 +555,11 @@ async function syncUsersChange(env: Env, userIds: number[]) {
 async function syncAll(env: Env) {
   const result = await env.XBOARD_DB.prepare("SELECT * FROM v2_server WHERE enabled = 1").all<Row>();
   for (const node of result.results || []) {
-    await syncNode(env, node);
+    await pushNodeEvent(env, node, "sync.config", { config: await nodeConfig(env, node) });
+    await pushNodeEvent(env, node, "sync.users", { users: await nodeUsers(env, node) });
   }
   const machines = await env.XBOARD_DB.prepare("SELECT * FROM v2_server_machine").all<Row>();
   for (const machine of machines.results || []) {
-    const online = await env.XBOARD_DB.prepare("SELECT id FROM v2_server WHERE machine_id = ? AND enabled = 1").bind(machine.id).all<{ id: number }>();
-    if (!(await Promise.all((online.results || []).map(node => nodeWebsocketIsAlive(env, Number(node.id))))).some(Boolean)) continue;
     await pushDo(env, `machine:${machine.id}`, "sync.nodes", { nodes: (await machineNodes(env, machine)).nodes });
   }
 }
@@ -777,6 +756,29 @@ export class StatusHub {
       const users = this.deviceSnapshot(Number(input.timestamp || now()), affected);
       return json({ data: { counts: Object.fromEntries([...affected].map(userId => [userId, users[userId]?.length || 0])) } });
     }
+    if (url.pathname === "/locks/acquire" && request.method === "POST") {
+      const input = await request.json() as { name?: string; claim?: string; timestamp?: number; ttl?: number };
+      const name = String(input.name || "");
+      const claim = String(input.claim || "");
+      const timestamp = Number(input.timestamp || now());
+      const ttl = Math.min(3600, Math.max(60, Number(input.ttl || 1800)));
+      if (!name || !claim) return json({ message: "Invalid lock" }, 422);
+      const key = `lock:${name}`;
+      const current = await this.state.storage.get<{ claim?: string; expires_at?: number }>(key);
+      if (current?.claim && Number(current.expires_at || 0) > timestamp) return json({ data: { acquired: false } });
+      await this.state.storage.put(key, { claim, expires_at: timestamp + ttl });
+      return json({ data: { acquired: true } });
+    }
+    if (url.pathname === "/locks/release" && request.method === "POST") {
+      const input = await request.json() as { name?: string; claim?: string };
+      const name = String(input.name || "");
+      const claim = String(input.claim || "");
+      if (!name || !claim) return json({ message: "Invalid lock" }, 422);
+      const key = `lock:${name}`;
+      const current = await this.state.storage.get<{ claim?: string }>(key);
+      if (current?.claim === claim) await this.state.storage.delete(key);
+      return json({ data: true });
+    }
     if (url.pathname === "/snapshot" && request.method === "GET") return json({ data: await this.snapshot() });
     if (url.pathname === "/history" && request.method === "GET") {
       const machineId = Number(url.searchParams.get("machine_id") || 0);
@@ -817,7 +819,6 @@ export class NodeHub {
   private localSockets = new Set<WebSocket>();
   private state: DurableObjectState;
   private env: Env;
-  private lastPresenceRefreshAt = 0;
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
     this.env = env;
@@ -870,16 +871,9 @@ export class NodeHub {
           const nodeIds = Array.isArray(data.nodes) ? data.nodes.map((node: Row) => Number(node.id)).filter(Boolean) : [];
           const updated = { ...identity, node_ids: nodeIds };
           (socket as any).serializeAttachment?.(updated);
-          for (const removedId of previousNodeIds.filter(nodeId => !nodeIds.includes(nodeId))) {
-            if (await optionalKvGet(this.env, `node:ws:target:${removedId}`) === `machine:${identity.machine_id}`) {
-              await optionalKvDelete(this.env, `node:ws:target:${removedId}`);
-            }
-            await optionalKvDelete(this.env, `node:ws:alive:${removedId}`);
+          const removedIds = previousNodeIds.filter(nodeId => !nodeIds.includes(nodeId));
+          for (const removedId of removedIds) {
             await clearNodeDevices(this.env, removedId);
-          }
-          for (const nodeId of nodeIds) {
-            await optionalKvPut(this.env, `node:ws:target:${nodeId}`, `machine:${identity.machine_id}`, { expirationTtl: 86400 });
-            await optionalKvPut(this.env, `node:ws:alive:${nodeId}`, "1", { expirationTtl: 86400 });
           }
         }
         socket.send(wsMessage(event, data));
@@ -909,8 +903,6 @@ export class NodeHub {
       await reportStatus(this.env, "machine", Number(machine.id), { last_seen_at: now(), connected: true });
       for (const node of nodes) {
         await clearNodeDevices(this.env, Number(node.id));
-        await optionalKvPut(this.env, `node:ws:target:${node.id}`, `machine:${machine.id}`, { expirationTtl: 86400 });
-        await optionalKvPut(this.env, `node:ws:alive:${node.id}`, "1", { expirationTtl: 86400 });
         await this.fullSync(server, node, true);
       }
     } else {
@@ -927,8 +919,6 @@ export class NodeHub {
       (server as any).serializeAttachment?.(identity);
       server.send(wsMessage("auth.success", { node_id: Number(node.id) }));
       await clearNodeDevices(this.env, Number(node.id));
-      await optionalKvPut(this.env, `node:ws:target:${node.id}`, `node:${node.id}`, { expirationTtl: 86400 });
-      await optionalKvPut(this.env, `node:ws:alive:${node.id}`, "1", { expirationTtl: 86400 });
       await this.fullSync(server, node, false);
     }
     await this.state.storage.setAlarm(Date.now() + 55000);
@@ -972,10 +962,6 @@ export class NodeHub {
     if (this.sockets().some(candidate => candidate !== socket)) return;
     const nodeIds: number[] = Array.isArray(identity.node_ids) ? identity.node_ids.map(Number) : [];
     for (const nodeId of nodeIds) {
-      const expectedTarget = identity.mode === "machine" ? `machine:${identity.machine_id}` : `node:${nodeId}`;
-      if (await optionalKvGet(this.env, `node:ws:target:${nodeId}`) !== expectedTarget) continue;
-      await optionalKvDelete(this.env, `node:ws:target:${nodeId}`);
-      await optionalKvDelete(this.env, `node:ws:alive:${nodeId}`);
       await clearNodeDevices(this.env, nodeId);
       await reportStatus(this.env, "node", nodeId, { connected: false, disconnected_at: now() });
     }
@@ -987,19 +973,6 @@ export class NodeHub {
   async alarm() {
     const sockets = this.sockets();
     for (const socket of sockets) socket.send(JSON.stringify({ event: "ping" }));
-    const timestamp = now();
-    if (sockets.length && timestamp - this.lastPresenceRefreshAt >= 21600) {
-      for (const socket of sockets) {
-        const identity = this.attachment(socket);
-        const nodeIds: number[] = Array.isArray(identity.node_ids) ? identity.node_ids.map(Number) : [];
-        for (const nodeId of nodeIds) {
-          const target = identity.mode === "machine" ? `machine:${identity.machine_id}` : `node:${nodeId}`;
-          await optionalKvPut(this.env, `node:ws:alive:${nodeId}`, "1", { expirationTtl: 86400 });
-          await optionalKvPut(this.env, `node:ws:target:${nodeId}`, target, { expirationTtl: 86400 });
-        }
-      }
-      this.lastPresenceRefreshAt = timestamp;
-    }
     if (sockets.length) await this.state.storage.setAlarm(Date.now() + 55000);
   }
 }

@@ -451,6 +451,10 @@ test("storage optimization removes write-heavy unused traffic indexes", () => {
   }
   assert.match(source, /idx_v2_stat_server_record_server ON v2_stat_server\(record_at, server_id, server_type\)/);
   assert.match(schema, /idx_v2_stat_server_record_server ON v2_stat_server\(record_at, server_id, server_type\)/);
+  assert.match(source, /bootstrap:storage:v3/);
+  assert.match(source, /DROP INDEX IF EXISTS idx_v2_job_logs_status_time/);
+  assert.doesNotMatch(schema, /CREATE INDEX IF NOT EXISTS idx_v2_job_logs_status_time/);
+  assert.match(schema, /idx_v2_job_logs_failed_time ON v2_job_logs\(updated_at, created_at\) WHERE status = 'failed'/);
 });
 
 test("revenue overview reads the migrated daily statistics table", () => {

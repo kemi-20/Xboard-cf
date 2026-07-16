@@ -152,6 +152,18 @@ test("StatusHub coalesces heartbeat storage while preserving device expiry and h
     clock += 241_000;
     await machineReport();
     assert.equal(storage.writes.filter(key => key === "history:3").length, 2);
+
+    const acquire = claim => hub.fetch(new Request("https://status-hub.internal/locks/acquire", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "scheduled", claim, timestamp: 3000, ttl: 1800 })
+    }));
+    assert.equal((await (await acquire("owner-1")).json()).data.acquired, true);
+    assert.equal((await (await acquire("owner-2")).json()).data.acquired, false);
+    await hub.fetch(new Request("https://status-hub.internal/locks/release", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "scheduled", claim: "owner-1" })
+    }));
+    assert.equal((await (await acquire("owner-2")).json()).data.acquired, true);
   } finally {
     Date.now = originalNow;
   }
@@ -235,7 +247,9 @@ test("websocket device state follows the official per-IP contract", () => {
   assert.match(source, /next\[userId\] = Object\.fromEntries/);
   assert.match(source, /deviceSnapshot\(Number\(input\.timestamp \|\| now\(\)\)/);
   assert.match(source, /await clearNodeDevices\(this\.env, Number\(node\.id\)\)/);
-  assert.match(source, /node:ws:target:\$\{nodeId\}`[\s\S]*expirationTtl: 86400/);
+  assert.match(source, /async function pushNodeEvent/);
+  assert.match(source, /pushDo\(env, `machine:\$\{machineId\}`/);
+  assert.match(source, /pushDo\(env, `node:\$\{nodeId\}`/);
   assert.match(source, /UPDATE v2_user SET online_count = \?/);
   assert.doesNotMatch(source, /event === "pong"[\s\S]{0,400}optionalKvPut/);
   assert.match(source, /Internal sync token is not configured/);
@@ -248,6 +262,7 @@ test("websocket device state follows the official per-IP contract", () => {
   assert.match(source, /catch \{ return \{\}; \}/);
   assert.match(source, /offset < ids\.length; offset \+= 100/);
   assert.doesNotMatch(source, /this\.env\.XBOARD_KV\.put\(`node:ws:/);
+  assert.doesNotMatch(source, /node:ws:(?:target|alive)/);
 });
 
 test("traffic-exceeded user removals are batched per node", () => {
@@ -281,8 +296,8 @@ test("invalid node rates follow the upstream numeric cast instead of charging at
 test("node synchronization targets live users and preserves child node keys", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   const protocol = fs.readFileSync("src/protocol.ts", "utf8");
-  assert.match(source, /async function nodeWebsocketIsAlive/);
-  assert.match(source, /catch \{ return false; \}/);
+  assert.match(source, /async function pushNodeEvent/);
+  assert.doesNotMatch(source, /status-hub\.internal\/presence/);
   assert.match(source, /!Number\(user\.plan_id\)/);
   assert.match(protocol, /shadowsocksServerKey\(node\.created_at, keyLength\)/);
   assert.match(protocol, /function nullableNested/);

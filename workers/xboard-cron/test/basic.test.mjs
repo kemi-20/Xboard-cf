@@ -163,7 +163,10 @@ test("scheduled cron keeps one trigger and one shared minute lock", () => {
   assert.match(source, /if \(task !== "scheduled"\) throw error/);
   assert.match(source, /ts - 1800/);
   assert.doesNotMatch(source, /schedule:last_run:\$\{current\}/);
-  assert.match(source, /ts - previous >= 300/);
+  assert.match(source, /internal\/status\/locks\/acquire/);
+  assert.match(source, /if \(result\.data\?\.acquired === true\) return doClaim/);
+  assert.match(source, /Fall back to D1 so scheduled business tasks remain available/);
+  assert.match(source, /ts - previous >= 480/);
 });
 
 test("settings read D1 when KV fails after the memory cache is warm", async () => {

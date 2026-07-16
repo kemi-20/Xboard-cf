@@ -70,8 +70,8 @@ test("traffic events use event-level idempotency and conditional exceeded checks
   assert.match(source, /ON CONFLICT\(user_id\) DO NOTHING/);
   assert.doesNotMatch(source, /traffic:pending_check/);
   assert.match(source, /trafficMessages = batch\.messages\.filter/);
-  assert.match(source, /for \(const message of trafficMessages\)/);
-  assert.match(source, /trafficBatch\(env, \[message\.body as any\]\)/);
+  assert.match(source, /trafficEventGroups\(trafficMessages\.map/);
+  assert.match(source, /trafficBatch\(env, events\)/);
   assert.match(wrangler, /dead_letter_queue = "traffic-events-dlq"/);
   assert.match(wrangler, /dead_letter_queue = "mail-events-dlq"/);
   assert.match(wrangler, /max_retries = 5/);
@@ -90,6 +90,13 @@ test("traffic batches aggregate users and servers while preserving rate semantic
   assert.deepEqual(aggregate.servers.get("1:vless"), { serverId: 1, serverType: "vless", u: 14, d: 11 });
   assert.deepEqual(aggregate.userStats.get("7:1:vless"), { userId: 7, serverId: 1, serverType: "vless", u: 32, d: 28, rate: 3 });
   assert.equal(aggregate.transferUsed, 63);
+
+  const groups = __test.trafficEventGroups([
+    { payload: Array(100).fill({ user_id: 1 }) },
+    { payload: Array(100).fill({ user_id: 2 }) },
+    { payload: Array(100).fill({ user_id: 3 }) }
+  ]);
+  assert.deepEqual(groups.map(group => group.length), [2, 1]);
 });
 
 test("traffic candidate selection skips completed and active duplicate deliveries", async () => {

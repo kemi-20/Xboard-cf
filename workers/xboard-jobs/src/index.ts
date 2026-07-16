@@ -171,6 +171,30 @@ function aggregateTrafficEvents(events: any[]) {
   return { users, userStats, servers, transferUsed };
 }
 
+function trafficEventSize(event: any) {
+  const payload = event?.payload;
+  const rows = Array.isArray(payload) ? payload : Array.isArray(payload?.data) ? payload.data : payload ? [payload] : [];
+  return Math.max(1, rows.length);
+}
+
+function trafficEventGroups(events: any[], maxRows = 250, maxEvents = 25) {
+  const groups: any[][] = [];
+  let current: any[] = [];
+  let rows = 0;
+  for (const event of events) {
+    const size = trafficEventSize(event);
+    if (current.length && (current.length >= maxEvents || rows + size > maxRows)) {
+      groups.push(current);
+      current = [];
+      rows = 0;
+    }
+    current.push(event);
+    rows += size;
+  }
+  if (current.length) groups.push(current);
+  return groups;
+}
+
 async function trafficBatch(env: Env, events: any[]) {
   if (!events.length) return;
   const { candidates, staleEventIds } = await trafficCandidates(env, events);
@@ -338,7 +362,7 @@ async function handle(env: Env, event: any) {
   else throw new Error(`Unsupported queue event type: ${String(event.type || "unknown")}`);
 }
 
-export const __test = { dayStart, render, claimEvent, completeClaim, failClaim, aggregateTrafficEvents, traffic, trafficBatch, trafficCandidates };
+export const __test = { dayStart, render, claimEvent, completeClaim, failClaim, aggregateTrafficEvents, trafficEventGroups, traffic, trafficBatch, trafficCandidates };
 
 export default {
   async fetch() { return ok({ service: "xboard-jobs", time: now() }); },
@@ -346,8 +370,8 @@ export default {
     const trafficMessages = batch.messages.filter(message => (message.body as any)?.type === "traffic");
     if (trafficMessages.length) {
       try {
-        for (const message of trafficMessages) {
-          await trafficBatch(env, [message.body as any]);
+        for (const events of trafficEventGroups(trafficMessages.map(message => message.body as any))) {
+          await trafficBatch(env, events);
         }
         for (const message of trafficMessages) message.ack();
       } catch (error) {
