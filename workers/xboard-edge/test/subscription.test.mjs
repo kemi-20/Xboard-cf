@@ -87,7 +87,7 @@ test("inactive Reality settings never override the active standard TLS SNI", () 
 
   const trojan = { ...server, type: "trojan" };
   assert.equal(__test.clashProxy(user, trojan, "clashmeta").sni, "us2.example.com");
-  assert.match(__test.proxyLine(user, trojan, "surge"), /sni=us2\.91786913\.xyz/);
+  assert.match(__test.proxyLine(user, trojan, "surge"), /sni=us2\.example\.com/);
   assert.doesNotMatch(__test.proxyLine(user, trojan, "surge"), /apple\.com/);
 
   const realityTrojan = { ...trojan, protocol_settings: { ...trojan.protocol_settings, tls: 2 } };
