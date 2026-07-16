@@ -190,3 +190,11 @@ test("settings read D1 when KV fails after the memory cache is warm", async () =
     Date.now = originalNow;
   }
 });
+
+test("missing next reset timestamps are repaired once in bounded pages", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /system_next_reset_backfill_v1/);
+  assert.match(source, /u\.id > \? AND u\.next_reset_at IS NULL/);
+  assert.match(source, /ORDER BY u\.id ASC LIMIT 100/);
+  assert.match(source, /value = users\.length < 100 \? "done"/);
+});

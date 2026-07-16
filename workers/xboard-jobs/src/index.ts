@@ -31,7 +31,7 @@ function safeMailVars(vars: Record<string, unknown>, contentMode: unknown) {
   const safe = Object.fromEntries(Object.entries(vars).filter(([, value]) => ["string", "number", "boolean"].includes(typeof value)).map(([key, value]) => [key, escapeHtml(value)]));
   if (vars.content !== undefined) {
     const content = String(vars.content ?? "");
-    safe.content = contentMode === "text" ? content.replace(/\r?\n/g, "<br>\n") : content;
+    safe.content = contentMode === "text" ? escapeHtml(content).replace(/\r?\n/g, "<br>\n") : content;
   }
   return safe;
 }
@@ -51,7 +51,8 @@ async function resolveMailContent(env: Env, payload: any) {
   const template = row || defaults[name] || defaults.notify;
   const vars = payload.template_value?.vars || payload.vars || {};
   const renderVars = row ? safeMailVars(vars, payload.template_value?.content_mode || payload.content_mode) : vars;
-  const subject = render(String(template.subject || ""), renderVars) || render(String(payload.subject || ""), renderVars);
+  const subjectTemplate = row ? template.subject : payload.subject || template.subject;
+  const subject = render(String(subjectTemplate || ""), renderVars);
   const renderedContent = render(String(template.content), renderVars);
   const text = row || (!payload.html && !payload.text) ? renderedContent : render(String(payload.text || ""), vars);
   const html = row
@@ -289,10 +290,10 @@ async function telegram(env: Env, event: any) {
   const botToken = env.TELEGRAM_BOT_TOKEN || await setting(env, "telegram_bot_token");
   const chatId = payload.chat_id || payload.chatId || await setting(env, "telegram_discuss_id");
   if (!botToken || !chatId || !payload.text) throw new Error("Telegram 任务参数不完整");
-  const parseMode = String(payload.parse_mode || "").toLowerCase();
+  const parseMode = String(payload.parse_mode || "Markdown").toLowerCase();
   const text = parseMode === "markdown" ? String(payload.text).replaceAll("_", "\\_") : String(payload.text);
   const telegramBody: Record<string, unknown> = { chat_id: chatId, text, disable_web_page_preview: payload.disable_web_page_preview };
-  if (parseMode) telegramBody.parse_mode = parseMode;
+  telegramBody.parse_mode = parseMode === "markdown" ? "Markdown" : payload.parse_mode;
   const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
     method: "POST",
     headers: { "content-type": "application/json" },

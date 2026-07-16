@@ -112,7 +112,7 @@ INSERT INTO v2_knowledge(id, category, title, body, show, sort, created_at, upda
 ON CONFLICT(id) DO UPDATE SET category = excluded.category, title = excluded.title, body = excluded.body, show = excluded.show, updated_at = unixepoch();
 
 INSERT INTO v2_mail_templates(name, subject, content, enabled, created_at, updated_at) VALUES
-('notify', 'Notification from {{app.name}}', '{{content}}', 1, unixepoch(), unixepoch()),
+('notify', '{{name}} - 站点通知', '{{content}}', 1, unixepoch(), unixepoch()),
 ('verify', 'Email verification code', 'Your verification code is {{code}}.', 1, unixepoch(), unixepoch()),
 ('remind_expire', 'Service expiry reminder', 'Your service is about to expire.', 1, unixepoch(), unixepoch()),
 ('remind_traffic', 'Traffic usage reminder', 'Your traffic usage is high.', 1, unixepoch(), unixepoch())

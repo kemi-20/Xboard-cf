@@ -82,6 +82,18 @@ test("builds every protocol accepted by the official node client", () => {
   }
 });
 
+test("missing protocol settings receive the official model defaults", () => {
+  assert.equal(buildNodeConfig({ type: "trojan", host: "h", server_port: 443, protocol_settings: {} }).tls, 1);
+  assert.equal(buildNodeConfig({ type: "hysteria", host: "h", server_port: 443, protocol_settings: {} }).version, 2);
+  const tuic = buildNodeConfig({ type: "tuic", host: "h", server_port: 443, protocol_settings: {} });
+  assert.equal(tuic.version, 5);
+  assert.equal(tuic.congestion_control, "cubic");
+  assert.deepEqual(buildNodeConfig({ type: "anytls", host: "h", server_port: 443, protocol_settings: {} }).padding_scheme, [
+    "stop=8", "0=30-30", "1=100-400", "2=400-500,c,500-1000,c,500-1000,c,500-1000,c,500-1000",
+    "3=9-9,500-1000", "4=500-1000", "5=500-1000", "6=500-1000", "7=500-1000"
+  ]);
+});
+
 test("filters traffic payload entries to the official two-counter format", () => {
   assert.deepEqual(parseTraffic({ "1": [10, 20], token: "x", "2": [30], "3": [-5, 8] }), [
     { user_id: 1, u: 10, d: 20 }, { user_id: 3, u: 0, d: 8 }

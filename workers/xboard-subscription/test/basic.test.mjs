@@ -103,7 +103,7 @@ test("sing-box slash user agents retain their actual core version", () => {
 
 test("subscription availability follows upstream UserService semantics", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
-  assert.doesNotMatch(source, /user\.plan_id === null/);
+  assert.equal(__test.nextResetAt({ plan_id: null, expired_at: 1784520000, plan_reset_traffic_method: null }, 0, 1784000000), null);
   assert.doesNotMatch(source, /Number\(user\.u \|\| 0\) \+ Number\(user\.d \|\| 0\) >= Number\(user\.transfer_enable\)/);
   assert.match(source, /Number\(user\.transfer_enable \|\| 0\) <= 0/);
 });
@@ -445,7 +445,8 @@ test("QuantumultX user agents and disabled template fallbacks match upstream beh
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /flag\.includes\("quantumultx"\)/);
   assert.match(source, /quantumult%20x/);
-  assert.match(source, /SELECT name, COALESCE\(content, ''\) AS content FROM v2_subscribe_templates WHERE enabled = 1/);
+  assert.match(source, /SELECT name, COALESCE\(content, ''\) AS content FROM v2_subscribe_templates/);
+  assert.doesNotMatch(source, /v2_subscribe_templates WHERE enabled = 1/);
 });
 
 test("client-specific AnyTLS and Mieru output matches upstream", () => {
@@ -677,6 +678,16 @@ test("audited SOCKS, uTLS, TLS defaults and reset-day behavior match upstream", 
 
   const from = Date.UTC(2026, 6, 15, 4, 0) / 1000;
   const expiry = Date.UTC(2026, 7, 20, 4, 0) / 1000;
-  assert.equal(__test.nextResetAt({ expired_at: expiry, plan_reset_traffic_method: 1 }, 0, from), Date.UTC(2026, 6, 20, 4, 0) / 1000);
-  assert.equal(__test.nextResetAt({ expired_at: expiry, plan_reset_traffic_method: null }, 0, from), Date.UTC(2026, 6, 31, 16, 0) / 1000);
+  assert.equal(__test.nextResetAt({ plan_id: 1, expired_at: expiry, plan_reset_traffic_method: 1 }, 0, from), Date.UTC(2026, 6, 20, 4, 0) / 1000);
+  assert.equal(__test.nextResetAt({ plan_id: 1, expired_at: expiry, plan_reset_traffic_method: null }, 0, from), Date.UTC(2026, 6, 31, 16, 0) / 1000);
+});
+
+test("ClashX Meta, legacy Clash plugins and TCP HTTP choices follow upstream", () => {
+  const oldClashX = new Request("https://sub.example/s/token", { headers: { "user-agent": "ClashX Meta/1.3.4" } });
+  const newClashX = new Request("https://sub.example/s/token", { headers: { "user-agent": "ClashX Meta/1.3.5" } });
+  const hysteria = [{ type: "hysteria", protocol_settings: { version: 2 } }];
+  assert.equal(__test.filterByClientCompatibility("clashmeta", oldClashX, hysteria).length, 0);
+  assert.equal(__test.filterByClientCompatibility("clashmeta", newClashX, hysteria).length, 1);
+  const legacy = __test.clashProxy({ uuid: "u" }, { type: "shadowsocks", name: "S", host: "h", port: 1, protocol_settings: { cipher: "aes-128-gcm", plugin: "obfs-local", plugin_opts: "obfs=http" } }, "clash");
+  assert.equal(legacy.plugin, "obfs-local");
 });

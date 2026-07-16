@@ -42,14 +42,14 @@ async function cachedData<T>(key: string, ttlSeconds: number, loader: () => Prom
 
 async function ensureStorageOptimization(env: Env) {
   if (storageOptimizationReady) return;
-  const markerKey = "bootstrap:storage:v1";
+  const markerKey = "bootstrap:storage:v2";
   if (await optionalKvGet(env, markerKey)) {
     storageOptimizationReady = true;
     return;
   }
   try {
     const persisted = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = 'system_storage_optimization_version'").first<{ value: string }>();
-    if (persisted?.value === "v1") {
+    if (persisted?.value === "v2") {
       storageOptimizationReady = true;
       await optionalKvPut(env, markerKey, String(now()));
       return;
@@ -64,9 +64,11 @@ async function ensureStorageOptimization(env: Env) {
       "CREATE INDEX IF NOT EXISTS idx_v2_stat_server_record_server ON v2_stat_server(record_at, server_id, server_type)"
     ]) await runSqlIgnore(env, sql);
     const timestamp = now();
+    await runSqlIgnore(env, `UPDATE v2_mail_templates SET subject = '{{name}} - 站点通知', updated_at = ?
+      WHERE name = 'notify' AND subject = 'Notification from {{app.name}}'`, [timestamp]);
     await env.XBOARD_DB.prepare(`INSERT INTO v2_settings(name, value, created_at, updated_at)
-      VALUES ('system_storage_optimization_version', 'v1', ?, ?)
-      ON CONFLICT(name) DO UPDATE SET value = 'v1', updated_at = excluded.updated_at`).bind(timestamp, timestamp).run();
+      VALUES ('system_storage_optimization_version', 'v2', ?, ?)
+      ON CONFLICT(name) DO UPDATE SET value = 'v2', updated_at = excluded.updated_at`).bind(timestamp, timestamp).run();
     storageOptimizationReady = true;
     await optionalKvPut(env, markerKey, String(timestamp));
   } catch {
@@ -677,7 +679,7 @@ async function ensureBootstrap(env: Env) {
     await runSqlIgnore(env, "INSERT INTO v2_notice(id, title, content, show, sort, created_at, updated_at) VALUES (1, 'Welcome to XBoard CF', 'The Cloudflare-native XBoard panel is ready.', 1, 1, ?, ?) ON CONFLICT(id) DO UPDATE SET title = excluded.title, content = excluded.content, show = excluded.show, updated_at = excluded.updated_at", [ts, ts]);
     await runSqlIgnore(env, "INSERT INTO v2_knowledge(id, category, title, body, show, sort, created_at, updated_at) VALUES (1, 'Getting Started', 'First-run checklist', 'Update the default administrator password, configure app_url, and add real nodes before production use.', 1, 1, ?, ?) ON CONFLICT(id) DO UPDATE SET category = excluded.category, title = excluded.title, body = excluded.body, show = excluded.show, updated_at = excluded.updated_at", [ts, ts]);
     for (const [name, subject, content] of [
-      ["notify", "Notification from {{app.name}}", "{{content}}"],
+      ["notify", "{{name}} - 站点通知", "{{content}}"],
       ["verify", "Email verification code", "Your verification code is {{code}}."],
       ["mailLogin", "Login to {{name}}", "Use this link to log in: {{link}}"],
       ["remind_expire", "Service expiry reminder", "Your service is about to expire."],
@@ -1392,6 +1394,11 @@ function adminUserQuery(input: Record<string, any>) {
       bindings.push(...value);
       continue;
     }
+    const nullOperator = String(value).toLowerCase();
+    if (nullOperator === "null" || nullOperator === "notnull") {
+      clauses.push({ sql: `${field} IS ${nullOperator === "notnull" ? "NOT " : ""}NULL`, logic: String(filter?.logic || "and").toLowerCase() === "or" ? "OR" : "AND" });
+      continue;
+    }
     const match = String(value).match(/^(eq|neq|gt|gte|lt|lte):(.*)$/s);
     if (match) {
       const operators: Record<string, string> = { eq: "=", neq: "!=", gt: ">", gte: ">=", lt: "<", lte: "<=" };
@@ -1911,7 +1918,13 @@ async function generateAdminUsers(request: Request, env: Env) {
       expiredAt, Number(plan?.transfer_enable || 0) * 1073741824, plan?.speed_limit ?? null, plan?.device_limit ?? null,
       boolNumber(pickSetting(all, "default_remind_expire", 1), 1), boolNumber(pickSetting(all, "default_remind_traffic", 1), 1), ts, ts
     ));
-    generated.push({ email, password, expired_at: expiredAt, uuid: userUuid, created_at: ts, subscribe_url: await subscribeUrl(request, env, userToken) });
+    generated.push({
+      email, password,
+      expired_at: expiredAt ? new Date((expiredAt + EDGE_SHANGHAI_OFFSET) * 1000).toISOString().replace("T", " ").slice(0, 19) : "长期有效",
+      uuid: userUuid,
+      created_at: new Date((ts + EDGE_SHANGHAI_OFFSET) * 1000).toISOString().replace("T", " ").slice(0, 19),
+      subscribe_url: await subscribeUrl(request, env, userToken)
+    });
   }
   try {
     const results = await env.XBOARD_DB.batch(statements);
@@ -1919,7 +1932,7 @@ async function generateAdminUsers(request: Request, env: Env) {
   } catch {
     return fail("生成失败", 500, 500);
   }
-  if (input.download_csv) return csvResponse("users.csv", [["账号", "密码", "过期时间", "UUID", "创建时间", "订阅地址"], ...generated.map(user => [user.email, user.password, user.expired_at || "长期有效", user.uuid, user.created_at, user.subscribe_url])]);
+  if (input.download_csv) return csvResponse("users.csv", [["账号", "密码", "过期时间", "UUID", "创建时间", "订阅地址"], ...generated.map(user => [user.email, user.password, user.expired_at, user.uuid, user.created_at, user.subscribe_url])]);
   return json({ code: 0, message: count > 1 ? "批量生成成功" : "生成成功", data: count > 1 ? generated : true });
 }
 
@@ -2165,7 +2178,7 @@ async function trafficResetLogs(env: Env, request: Request) {
     ...row,
     old_traffic: { upload: Number(row.old_u || 0), download: Number(row.old_d || 0), total: Number(row.old_u || 0) + Number(row.old_d || 0) },
     new_traffic: { upload: 0, download: 0, total: 0 },
-    trigger_source: parseJsonObject(row.metadata).trigger_source || "manual",
+    trigger_source: row.trigger_source || parseJsonObject(row.metadata).trigger_source || "manual",
     metadata: parseJsonObject(row.metadata)
   }));
   const total = await firstNumber(env, "SELECT COUNT(*) AS c FROM v2_traffic_reset_logs");
@@ -2176,16 +2189,32 @@ async function resetUserTraffic(env: Env, request: Request, adminId: number) {
   const input = await body<Record<string, any>>(request);
   const userId = nullableNumber(input.user_id);
   if (!userId) return fail("user_id 字段是必须的", 422, 422);
-  const user = await env.XBOARD_DB.prepare("SELECT id, email, u, d, reset_count, next_reset_at FROM v2_user WHERE id = ?").bind(userId).first<Record<string, any>>();
+  const user = await env.XBOARD_DB.prepare(`SELECT u.id, u.email, u.u, u.d, u.reset_count, u.next_reset_at, u.expired_at, u.banned,
+      u.plan_id, p.reset_traffic_method AS plan_reset_traffic_method
+    FROM v2_user u LEFT JOIN v2_plan p ON p.id = u.plan_id WHERE u.id = ?`).bind(userId).first<Record<string, any>>();
   if (!user) return fail("用户不存在", 404, 404);
+  if (Number(user.banned || 0) || user.plan_id === null || user.plan_id === undefined || (user.expired_at !== null && Number(user.expired_at) <= now())) {
+    return fail("用户当前不可重置流量", 400, 400);
+  }
   const ts = now();
+  const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
+  const method = user.plan_reset_traffic_method === null || user.plan_reset_traffic_method === undefined
+    ? Number(pickSetting(all, "reset_traffic_method", 0))
+    : Number(user.plan_reset_traffic_method);
+  const resetTypes: Record<number, string> = { 0: "first_day_month", 1: "monthly", 3: "first_day_year", 4: "yearly" };
+  const resetType = resetTypes[method] || "manual";
+  const nextResetAt = edgeNextResetAt(nullableNumber(user.expired_at), method, ts);
   const metadata = JSON.stringify({ reason: input.reason || "", admin_id: adminId, trigger_source: "manual" });
   await env.XBOARD_DB.batch([
-    env.XBOARD_DB.prepare("INSERT INTO v2_traffic_reset_logs(user_id, reset_type, old_u, old_d, metadata, reset_time, created_at) VALUES (?, 'manual', ?, ?, ?, ?, ?)").bind(userId, Number(user.u || 0), Number(user.d || 0), metadata, ts, ts),
-    env.XBOARD_DB.prepare("UPDATE v2_user SET u = 0, d = 0, reset_count = COALESCE(reset_count, 0) + 1, last_reset_at = ?, updated_at = ? WHERE id = ?").bind(ts, ts, userId)
+    env.XBOARD_DB.prepare(`INSERT INTO v2_traffic_reset_logs(user_id, reset_type, old_u, old_d, old_upload, old_download, old_total,
+      new_upload, new_download, new_total, trigger_source, metadata, reset_time, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 'manual', ?, ?, ?)`).bind(
+        userId, resetType, Number(user.u || 0), Number(user.d || 0), Number(user.u || 0), Number(user.d || 0),
+        Number(user.u || 0) + Number(user.d || 0), metadata, ts, ts),
+    env.XBOARD_DB.prepare("UPDATE v2_user SET u = 0, d = 0, reset_count = COALESCE(reset_count, 0) + 1, last_reset_at = ?, next_reset_at = ?, updated_at = ? WHERE id = ?").bind(ts, nextResetAt, ts, userId)
   ]);
   await bump(env.XBOARD_KV, `user_version:${userId}`);
-  return json({ message: "重置成功", data: { user_id: userId, email: user.email, reset_time: ts, next_reset_at: user.next_reset_at } });
+  return json({ message: "重置成功", data: { user_id: userId, email: user.email, reset_time: ts, next_reset_at: nextResetAt } });
 }
 
 async function login(request: Request, env: Env, admin = false) {
@@ -2198,7 +2227,7 @@ async function login(request: Request, env: Env, admin = false) {
   if (limitEnabled && windowSeconds > 0 && attempts >= limit) return fail("登录尝试次数过多，请稍后再试", 429, 429);
   const user = await env.XBOARD_DB.prepare("SELECT * FROM v2_user WHERE email = ?").bind(email).first<any>();
   if (!user || (admin && Number(user.is_admin) !== 1) || !(await verifyPassword(password, String(user?.password || ""), user?.password_algo, user?.password_salt))) {
-    if (limitEnabled && windowSeconds > 0) await optionalKvPutTtl(env, rateKey, String(attempts + 1), windowSeconds);
+    if (user && limitEnabled && windowSeconds > 0) await optionalKvPutTtl(env, rateKey, String(attempts + 1), windowSeconds);
     return fail("账号或密码错误", 401, 401);
   }
   if (Number(user.banned || 0) === 1) return fail("账号已被封禁", 400, 400);
@@ -2294,7 +2323,7 @@ async function registerUser(request: Request, env: Env) {
   const ts = now();
   const expiredAt = plan ? ts + Math.max(0, Number(pickSetting(all, "try_out_hour", 1))) * 3600 : null;
   await env.XBOARD_DB.prepare("INSERT INTO v2_user(email,password,password_algo,password_salt,uuid,token,invite_user_id,plan_id,group_id,transfer_enable,speed_limit,device_limit,expired_at,remind_expire,remind_traffic,last_login_at,created_at,updated_at) VALUES (?,?,'bcrypt',NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-    .bind(email, await hashPassword(passwordText), uuid(), token(16), inviteUserId, plan?.id ?? null, plan?.group_id ?? null, Number(plan?.transfer_enable || 0) * 1073741824, plan?.speed_limit ?? null, plan?.device_limit ?? null, expiredAt, boolNumber(pickSetting(all, "default_remind_expire", 1), 1), boolNumber(pickSetting(all, "default_remind_traffic", 1), 1), ts, ts, ts).run();
+    .bind(email, await hashPassword(passwordText), uuid(), token(16), inviteUserId, plan?.id ?? null, plan?.group_id ?? null, Number(plan?.transfer_enable || 0) * 1073741824, plan?.speed_limit ?? null, null, expiredAt, boolNumber(pickSetting(all, "default_remind_expire", 1), 1), boolNumber(pickSetting(all, "default_remind_traffic", 1), 1), ts, ts, ts).run();
   if (Number(pickSetting(all, "email_verify", 0))) {
     try { await env.XBOARD_KV.delete(`verify:email:${email}`); } catch {}
   }
@@ -2468,11 +2497,12 @@ async function adminCoupon(request: Request, env: Env, route: string): Promise<R
     if (required.some(key => input[key] === undefined || input[key] === "")) return fail("优惠券参数不完整", 422, 422);
     const couponType = Math.trunc(Number.parseFloat(String(input.type ?? "")));
     if (![1, 2].includes(couponType)) return fail("类型格式有误", 422, 422);
-    if (id && !await env.XBOARD_DB.prepare("SELECT id FROM v2_coupon WHERE id = ?").bind(id).first()) return fail("优惠券不存在", 500, 500);
+    const existing = id ? await env.XBOARD_DB.prepare("SELECT id, code FROM v2_coupon WHERE id = ?").bind(id).first<Record<string, any>>() : null;
+    if (id && !existing) return fail("优惠券不存在", 500, 500);
     const count = id ? 1 : Math.min(500, Math.max(1, Number(input.generate_count || 1))); const ts = now();
     const generatedCoupons: Array<Record<string, any>> = [];
     const statements = Array.from({ length: count }, (_, index) => {
-      const code = count === 1 && input.code ? String(input.code) : randomString(8);
+      const code = count === 1 && input.code ? String(input.code) : id ? String(existing?.code || "") : randomString(8);
       const values = [code, String(input.name), couponType, Number(input.value), boolNumber(input.show, 1), nullableNumber(input.limit_use), nullableNumber(input.limit_use_with_user), couponValue(input, "limit_plan_ids"), couponValue(input, "limit_period"), Number(input.started_at), Number(input.ended_at), ts, ts];
       generatedCoupons.push({ ...input, code, type: couponType, created_at: ts });
       if (id && index === 0) return env.XBOARD_DB.prepare("UPDATE v2_coupon SET code=?, name=?, type=?, value=?, show=?, limit_use=?, limit_use_with_user=?, limit_plan_ids=?, limit_period=?, started_at=?, ended_at=?, updated_at=? WHERE id=?").bind(...values.slice(0, 11), ts, id);
@@ -2496,7 +2526,7 @@ async function adminCoupon(request: Request, env: Env, route: string): Promise<R
           dateTime(coupon.created_at)
         ].map(csvValue).join(","));
       }
-      return new Response(`\uFEFF${lines.join("\r\n")}\r\n`, {
+      return new Response(`${lines.join("\r\n")}\r\n`, {
         headers: {
           "content-type": "text/csv; charset=utf-8",
           "content-disposition": `attachment; filename="coupons-${ts}.csv"`
@@ -2600,6 +2630,11 @@ async function orderRows(env: Env, input: Record<string, any>) {
       continue;
     }
     const text = String(raw ?? "");
+    const nullOperator = text.toLowerCase();
+    if (nullOperator === "null" || nullOperator === "notnull") {
+      clauses.push(`${field} IS ${nullOperator === "notnull" ? "NOT " : ""}NULL`);
+      continue;
+    }
     const match = text.match(/^(eq|neq|gt|gte|lt|lte|like|notlike):(.*)$/i);
     const operator = match?.[1]?.toLowerCase(); const value = match ? match[2] : text;
     const condition = String(filter?.condition || "");
@@ -2850,7 +2885,9 @@ async function adminCoreResource(request: Request, env: Env, route: string): Pro
     for (const [period, rawPrice] of Object.entries(rawPrices)) {
       if (!allowedPeriods.has(period)) return fail(`不支持的订阅周期: ${period}`, 422, 422);
       if (rawPrice !== null && rawPrice !== "" && (!Number.isFinite(Number(rawPrice)) || Number(rawPrice) < 0)) return fail("价格必须大于等于0", 422, 422);
-      if (Number(rawPrice) > 0) prices[period] = Math.round(Number(rawPrice) * 100) / 100;
+      if (rawPrice !== null && rawPrice !== undefined && rawPrice !== "" && Number.isFinite(Number(rawPrice)) && Number(rawPrice) >= 0) {
+        prices[period] = Math.round(Number(rawPrice) * 100) / 100;
+      }
     }
     const values: Record<string, any> = {
       name,
@@ -3110,7 +3147,7 @@ async function adminApi(request: Request, env: Env, path: string) {
   }
   if (path.includes("/stat/getStats")) return ok(await adminStats(env));
   if (path.includes("/stat/getOrder")) return ok(await orderStats(env, new URL(request.url)));
-  if (path.includes("/stat/getTrafficRank")) return ok(await trafficRank(env, new URL(request.url)));
+  if (path.includes("/stat/getTrafficRank")) return json({ timestamp: new Date().toISOString(), data: await trafficRank(env, new URL(request.url)) });
   if (request.method === "GET" && (route === "/stat/getServerLastRank" || route === "/stat/getServerYesterdayRank")) {
     const start = route.endsWith("YesterdayRank") ? dayStart() - 86400 : dayStart();
     const end = route.endsWith("YesterdayRank") ? dayStart() : now();
@@ -3475,7 +3512,7 @@ async function adminApi(request: Request, env: Env, path: string) {
         "user.transfer_enable": Number(recipient.transfer_enable || 0), "user.transfer_used": Number(recipient.u || 0) + Number(recipient.d || 0),
         "user.transfer_left": Number(recipient.transfer_enable || 0) - Number(recipient.u || 0) - Number(recipient.d || 0)
       };
-      await queueMail(env, { to: String(recipient.email), subject: renderMailText(subject, vars), content: renderMailText(content, vars), template_name: "notify" });
+      await queueTemplateMail(env, "notify", String(recipient.email), vars, renderMailText(subject, vars));
     }
     return ok(true);
   }
@@ -3485,8 +3522,10 @@ async function adminApi(request: Request, env: Env, path: string) {
     const days = Math.min(365, Math.max(1, Number(new URL(request.url).searchParams.get("days") || 30)));
     const since = now() - days * 86400;
     const total = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_traffic_reset_logs WHERE reset_time >= ${since}`);
-    const manual = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_traffic_reset_logs WHERE reset_time >= ${since} AND reset_type = 'manual'`);
-    return json({ data: { total_resets: total, auto_resets: total - manual, manual_resets: manual, cron_resets: 0 } });
+    const manual = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_traffic_reset_logs WHERE reset_time >= ${since} AND trigger_source = 'manual'`);
+    const cron = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_traffic_reset_logs WHERE reset_time >= ${since} AND trigger_source = 'cron'`);
+    const auto = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_traffic_reset_logs WHERE reset_time >= ${since} AND trigger_source = 'auto'`);
+    return json({ data: { total_resets: total, auto_resets: auto, manual_resets: manual, cron_resets: cron } });
   }
   if (request.method === "POST" && route === "/traffic-reset/reset-user") return resetUserTraffic(env, request, Number((admin as any).id));
   const historyMatch = route.match(/^\/traffic-reset\/user\/(\d+)\/history$/);
@@ -3731,13 +3770,21 @@ async function userApi(request: Request, env: Env, path: string) {
   if (request.method === "GET" && route === "/getSubscribe") {
     const plan = (user as any).plan_id ? await env.XBOARD_DB.prepare("SELECT * FROM v2_plan WHERE id = ?").bind((user as any).plan_id).first<Record<string, any>>() : null;
     if ((user as any).plan_id && !plan) return fail("订阅计划不存在", 400, 400);
+    const current = now();
+    const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
+    const method = plan
+      ? (plan.reset_traffic_method === null || plan.reset_traffic_method === undefined
+        ? Number(pickSetting(all, "reset_traffic_method", 0))
+        : Number(plan.reset_traffic_method))
+      : 2;
+    const nextResetAt = plan ? edgeNextResetAt(nullableNumber((user as any).expired_at), method, current) : null;
     return ok({
       plan_id: (user as any).plan_id, token: (user as any).token, expired_at: (user as any).expired_at, u: Number((user as any).u || 0), d: Number((user as any).d || 0),
       transfer_enable: Number((user as any).transfer_enable || 0), email: (user as any).email, uuid: (user as any).uuid,
-      device_limit: (user as any).device_limit, speed_limit: (user as any).speed_limit, next_reset_at: (user as any).next_reset_at,
+      device_limit: (user as any).device_limit, speed_limit: (user as any).speed_limit, next_reset_at: nextResetAt,
       plan: plan ? { ...plan, prices: parseJsonObject(plan.prices), tags: parseJsonArray(plan.tags) } : null,
       subscribe_url: await subscribeUrl(request, env, (user as any).token),
-      reset_day: Number((user as any).next_reset_at || 0) > now() ? Math.ceil((Number((user as any).next_reset_at) - now()) / 86400) : null
+      reset_day: Number(nextResetAt || 0) > current ? Math.ceil((Number(nextResetAt) - current) / 86400) : null
     });
   }
   if (request.method === "GET" && route === "/getStat") {
@@ -3862,10 +3909,19 @@ async function userApi(request: Request, env: Env, path: string) {
       if (!period) return fail("套餐周期错误", 422, 422);
       const pending = await env.XBOARD_DB.prepare("SELECT id FROM v2_order WHERE user_id = ? AND status IN (0,1) LIMIT 1").bind(userId).first();
       if (pending) return fail("您有未支付或待处理订单，请先取消", 400, 400);
-      const plan = await env.XBOARD_DB.prepare("SELECT * FROM v2_plan WHERE id = ? AND show = 1 AND sell = 1").bind(planId).first<Record<string, any>>();
+      const plan = await env.XBOARD_DB.prepare("SELECT * FROM v2_plan WHERE id = ?").bind(planId).first<Record<string, any>>();
       if (!plan) return fail("订阅计划不存在", 400, 400);
       const prices = parseJsonObject(plan.prices); const price = Number(prices[period] ?? prices[legacyPeriod]);
       if (!Number.isFinite(price) || price < 0) return fail("该付款周期未启用", 400, 400);
+      const samePlan = Number((user as any).plan_id) === planId;
+      const activeUser = userIsAvailable(user as Record<string, any>);
+      if (period === "reset_traffic") {
+        if (!samePlan || !activeUser) return fail("订阅已过期或无有效订阅，无法购买流量重置包", 400, 400);
+      } else {
+        if ((!Number(plan.show) && !Number(plan.renew)) || (!Number(plan.show) && !samePlan)) return fail("该订阅已售罄，请选择其他订阅", 400, 400);
+        if (!Number(plan.renew) && samePlan) return fail("该订阅无法续费，请更换其他订阅", 400, 400);
+        if (!Number(plan.show) && Number(plan.renew) && !activeUser) return fail("该订阅已过期，请更换其他订阅", 400, 400);
+      }
       if (plan.capacity_limit !== null && plan.capacity_limit !== undefined) {
         const count = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE plan_id = ${planId} AND (expired_at IS NULL OR expired_at >= ${now()})`);
         if (count >= Number(plan.capacity_limit) && Number((user as any).plan_id) !== planId) return fail("该订阅已售罄", 400, 400);
@@ -3899,8 +3955,9 @@ async function userApi(request: Request, env: Env, path: string) {
       discountAmount = Math.min(totalAmount, discountAmount);
       totalAmount -= discountAmount;
       const tradeNo = token(16); const ts = now();
+      const hasPlan = (user as any).plan_id !== null && (user as any).plan_id !== undefined;
       const type = period === "reset_traffic" ? 4
-        : Number((user as any).plan_id) > 0 && Number((user as any).plan_id) !== planId && ((user as any).expired_at === null || Number((user as any).expired_at) > ts) ? 3
+        : hasPlan && Number((user as any).plan_id) !== planId && ((user as any).expired_at === null || Number((user as any).expired_at) > ts) ? 3
         : Number((user as any).plan_id) === planId && ((user as any).expired_at === null || Number((user as any).expired_at) > ts) ? 2 : 1;
       const allSettings = await settings(env.XBOARD_DB, env.XBOARD_KV);
       if (type === 3 && !Number(pickSetting(allSettings, "plan_change_enable", 1))) return fail("目前不允许更改订阅，请联系客服或提交工单操作", 400, 400);
@@ -3972,7 +4029,7 @@ async function userApi(request: Request, env: Env, path: string) {
   }
   if (path.includes("/notice/fetch")) {
     const url = new URL(request.url);
-    const page = Math.max(1, Number(url.searchParams.get("page") || 1));
+    const page = Math.max(1, Number(url.searchParams.get("current") || 1));
     const pageSize = 5;
     const result = await env.XBOARD_DB.prepare("SELECT * FROM v2_notice WHERE show = 1 ORDER BY sort ASC, id DESC LIMIT ? OFFSET ?").bind(pageSize, (page - 1) * pageSize).all();
     const total = await firstNumber(env, "SELECT COUNT(*) AS c FROM v2_notice WHERE show = 1");

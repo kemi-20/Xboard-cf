@@ -921,3 +921,21 @@ test("bootstrap defaults never overwrite customized mail templates", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /ON CONFLICT\(name\) DO UPDATE SET subject = excluded\.subject, content = excluded\.content[\s\S]*WHERE v2_mail_templates\.content IS NULL OR v2_mail_templates\.content = ''/);
 });
+
+test("GLM compatibility audit fixes preserve upstream mutations and envelopes", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const schema = fs.readFileSync("../../schema/d1.sql", "utf8");
+  assert.match(source, /id \? String\(existing\?\.code \|\| ""\) : randomString\(8\)/);
+  assert.doesNotMatch(source, /new Response\(`\\uFEFF\$\{lines/);
+  assert.match(source, /trigger_source: row\.trigger_source/);
+  assert.match(source, /next_reset_at = \?, updated_at = \? WHERE id = \?/);
+  assert.match(source, /trigger_source = 'cron'/);
+  assert.match(source, /queueTemplateMail\(env, "notify"/);
+  assert.match(source, /rawPrice !== null[\s\S]*Number\(rawPrice\) >= 0/);
+  assert.match(source, /url\.searchParams\.get\("current"\)/);
+  assert.match(source, /const nextResetAt = plan \? edgeNextResetAt/);
+  assert.match(source, /const hasPlan = \(user as any\)\.plan_id !== null/);
+  assert.match(source, /user && limitEnabled/);
+  assert.match(source, /timestamp: new Date\(\)\.toISOString\(\), data: await trafficRank/);
+  assert.match(schema, /CREATE TABLE IF NOT EXISTS v2_stat_server[\s\S]*record_type TEXT NOT NULL DEFAULT 'd'/);
+});

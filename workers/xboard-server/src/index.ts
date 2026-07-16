@@ -231,9 +231,8 @@ function currentRate(node: Row) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-async function enqueueTraffic(env: Env, node: Row, raw: unknown, reportRuntime = true) {
+async function enqueueTraffic(env: Env, node: Row, raw: unknown, reportRuntime = true, onlineCount?: number) {
   const payload = parseTraffic(raw);
-  if (!payload.length) return;
   const ts = now();
   const rate = currentRate(node);
   const billable = billableTraffic(payload);
@@ -252,7 +251,7 @@ async function enqueueTraffic(env: Env, node: Row, raw: unknown, reportRuntime =
     await reportStatus(env, "node", Number(node.id), {
       machine_id: Number(node.machine_id || 0) || null,
       last_push_at: ts,
-      online: payload.length
+      online: onlineCount ?? payload.length
     });
   }
 }
@@ -289,8 +288,8 @@ async function processAlive(env: Env, nodeId: number, data: unknown) {
   return true;
 }
 
-async function aggregateDevices(env: Env, users: Row[]) {
-  const userIds = users.filter(user => Number(user.device_limit || 0) > 0).map(user => Number(user.id)).filter(Boolean);
+async function aggregateDevices(env: Env, users: Row[], limitedOnly = false) {
+  const userIds = users.filter(user => !limitedOnly || Number(user.device_limit || 0) > 0).map(user => Number(user.id)).filter(Boolean);
   if (!userIds.length) return {};
   const response = await statusHub(env).fetch("https://status-hub.internal/devices/list", {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ user_ids: userIds, timestamp: now() })
@@ -301,7 +300,7 @@ async function aggregateDevices(env: Env, users: Row[]) {
 }
 
 async function aggregateDeviceCounts(env: Env, users: Row[]) {
-  const devices = await aggregateDevices(env, users);
+  const devices = await aggregateDevices(env, users, true);
   return Object.fromEntries(Object.entries(devices).map(([userId, ips]) => [userId, Array.isArray(ips) ? ips.length : 0]));
 }
 
@@ -415,7 +414,7 @@ async function handleTidalab(request: Request, env: Env, family: string, action:
       const raw = Array.isArray(auth.input.__raw) ? auth.input.__raw : [];
       const traffic: Row = {};
       for (const item of raw as any[]) if (item?.user_id !== undefined) traffic[String(item.user_id)] = [item.u, item.d];
-      await enqueueTraffic(env, node, traffic);
+      await enqueueTraffic(env, node, traffic, true, raw.length);
       return json({ ret: 1, msg: "ok" });
     }
   }
@@ -431,7 +430,7 @@ async function handleTidalab(request: Request, env: Env, family: string, action:
       const raw = Array.isArray(auth.input.__raw) ? auth.input.__raw : [];
       const traffic: Row = {};
       for (const item of raw as any[]) if (item?.user_id !== undefined) traffic[String(item.user_id)] = [item.u, item.d];
-      await enqueueTraffic(env, node, traffic);
+      await enqueueTraffic(env, node, traffic, true, raw.length);
       return json({ ret: 1, msg: "ok" });
     }
     if (action === "config") {
@@ -726,7 +725,14 @@ export class StatusHub {
       if (!nodeId || !input.devices || typeof input.devices !== "object") return json({ message: "Invalid device report" }, 422);
       await this.loadDevices();
       const previous = this.devices.get(nodeId) || {};
-      const next = input.devices;
+      const next: Row = {};
+      for (const [userId, value] of Object.entries(previous)) next[userId] = { ...(value as Row) };
+      for (const [userId, value] of Object.entries(input.devices)) next[userId] = { ...(next[userId] || {}), ...(value as Row) };
+      for (const [userId, value] of Object.entries(next)) {
+        const active = Object.fromEntries(Object.entries(value as Row).filter(([, seenAt]) => Number(seenAt || 0) > timestamp - 300));
+        if (Object.keys(active).length) next[userId] = active;
+        else delete next[userId];
+      }
       const affected = new Set([...Object.keys(previous), ...Object.keys(next)]);
       const changed = !this.sameDeviceMembers(previous, next);
       this.devices.set(nodeId, next);
@@ -1037,13 +1043,14 @@ routes.set("POST /api/v2/server/report", async (_request, env, input) => {
   const auth = await authenticateV2(env, input);
   if (auth instanceof Response) return auth;
   const node = auth.node!;
-  if (input.traffic && typeof input.traffic === "object") await enqueueTraffic(env, node, input.traffic, false);
-  if (input.alive && typeof input.alive === "object") await processAlive(env, Number(node.id), input.alive);
+  const nonEmptyObject = (value: unknown) => Boolean(value && typeof value === "object" && !Array.isArray(value) && Object.keys(value as Row).length);
+  if (nonEmptyObject(input.traffic)) await enqueueTraffic(env, node, input.traffic, false);
+  if (nonEmptyObject(input.alive)) await processAlive(env, Number(node.id), input.alive);
   const runtime: Row = { machine_id: Number(node.machine_id || 0) || null, last_check_at: now() };
-  if (input.traffic && typeof input.traffic === "object") runtime.last_push_at = runtime.last_check_at;
-  if (input.online && typeof input.online === "object") runtime.connections = input.online;
-  const load = statusState(input.status);
-  const metricValues = metricsState(input.metrics);
+  if (nonEmptyObject(input.traffic)) runtime.last_push_at = runtime.last_check_at;
+  if (nonEmptyObject(input.online)) runtime.connections = input.online;
+  const load = nonEmptyObject(input.status) ? statusState(input.status) : null;
+  const metricValues = nonEmptyObject(input.metrics) ? metricsState(input.metrics) : null;
   if (load) runtime.load_status = load;
   if (metricValues) runtime.metrics = metricValues;
   await reportStatus(env, "node", Number(node.id), runtime);

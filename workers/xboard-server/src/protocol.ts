@@ -137,7 +137,7 @@ export function buildNodeConfig(node: Row, routeRows: Row[] = []): Row {
       response = { ...base, tls: int(get(settings, "tls", 0)), tls_settings: get(settings, "tls_settings", null), multiplex: get(settings, "multiplex", null) };
       break;
     case "trojan": {
-      const tls = int(get(settings, "tls", 0));
+      const tls = int(get(settings, "tls", 1));
       response = { ...base, host: node.host, server_name: get(settings, "tls_settings.server_name", null), multiplex: get(settings, "multiplex", null), tls, tls_settings: tls === 2 ? get(settings, "reality_settings", null) : get(settings, "tls_settings", null) };
       break;
     }
@@ -147,7 +147,7 @@ export function buildNodeConfig(node: Row, routeRows: Row[] = []): Row {
       break;
     }
     case "hysteria": {
-      const version = int(get(settings, "version", 0));
+      const version = int(get(settings, "version", 2));
       response = { ...base, server_port: int(node.server_port), version, host: node.host, server_name: get(settings, "tls.server_name", null), tls_settings: get(settings, "tls", null), up_mbps: int(get(settings, "bandwidth.up", 0)), down_mbps: int(get(settings, "bandwidth.down", 0)) };
       if (version === 1) response.obfs = get(settings, "obfs.password", null);
       if (version === 2) {
@@ -157,10 +157,13 @@ export function buildNodeConfig(node: Row, routeRows: Row[] = []): Row {
       break;
     }
     case "tuic":
-      response = { ...base, version: int(get(settings, "version", 0)), server_port: int(node.server_port), server_name: get(settings, "tls.server_name", null), congestion_control: get(settings, "congestion_control", null), tls_settings: get(settings, "tls", null), auth_timeout: "3s", zero_rtt_handshake: false, heartbeat: "3s" };
+      response = { ...base, version: int(get(settings, "version", 5)), server_port: int(node.server_port), server_name: get(settings, "tls.server_name", null), congestion_control: get(settings, "congestion_control", "cubic"), tls_settings: get(settings, "tls", null), auth_timeout: "3s", zero_rtt_handshake: false, heartbeat: "3s" };
       break;
     case "anytls":
-      response = { ...base, server_port: int(node.server_port), server_name: get(settings, "tls.server_name", null), tls_settings: get(settings, "tls", null), padding_scheme: get(settings, "padding_scheme", null) };
+      response = { ...base, server_port: int(node.server_port), server_name: get(settings, "tls.server_name", null), tls_settings: get(settings, "tls", null), padding_scheme: get(settings, "padding_scheme", [
+        "stop=8", "0=30-30", "1=100-400", "2=400-500,c,500-1000,c,500-1000,c,500-1000,c,500-1000",
+        "3=9-9,500-1000", "4=500-1000", "5=500-1000", "6=500-1000", "7=500-1000"
+      ]) };
       break;
     case "socks":
       response = { ...base, server_port: int(node.server_port), tls: int(get(settings, "tls", 0)), tls_settings: get(settings, "tls_settings", null) };

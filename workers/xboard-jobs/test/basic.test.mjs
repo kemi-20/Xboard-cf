@@ -47,7 +47,7 @@ test("traffic statistics persist the official server_rate field", () => {
 test("mail templates override fallbacks and provider credentials stay protocol-specific", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.doesNotMatch(source, /if \(payload\.html \|\| payload\.text\) return payload/);
-  assert.match(source, /render\(String\(template\.subject \|\| ""\), renderVars\) \|\| render\(String\(payload\.subject \|\| ""\), renderVars\)/);
+  assert.match(source, /const subjectTemplate = row \? template\.subject : payload\.subject \|\| template\.subject/);
   assert.match(source, /setting\(env, "email_password"\)/);
   assert.doesNotMatch(source, /resend_api_key/);
   assert.match(source, /replace\(\/\[<>\]\/g, ""\)/);
@@ -203,5 +203,7 @@ test("database mail templates use safe variables and preserve text line breaks",
   assert.match(source, /mailLogin:/);
   assert.match(source, /const target = payload\.to \?\? payload\.email/);
   assert.match(source, /INSERT INTO v2_mail_log\(email, subject, template_name, error/);
-  assert.match(source, /if \(parseMode\) telegramBody\.parse_mode = parseMode/);
+  assert.match(source, /payload\.parse_mode \|\| "Markdown"/);
+  assert.match(source, /telegramBody\.parse_mode = parseMode === "markdown" \? "Markdown"/);
+  assert.match(source, /escapeHtml\(content\)\.replace/);
 });

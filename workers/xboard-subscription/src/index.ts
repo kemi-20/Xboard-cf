@@ -136,7 +136,7 @@ function daysInMonth(year: number, month: number) {
 }
 
 function nextResetAt(user: any, systemMethod: number, from = now()) {
-  if (user.expired_at === null || user.expired_at === undefined || user.plan_reset_traffic_method === undefined) return null;
+  if (user.plan_id === null || user.plan_id === undefined || user.expired_at === null || user.expired_at === undefined || user.plan_reset_traffic_method === undefined) return null;
   const method = user.plan_reset_traffic_method === null ? systemMethod : Number(user.plan_reset_traffic_method);
   if (method === 2) return null;
   const current = shanghaiParts(from);
@@ -182,10 +182,10 @@ function clientOf(request: Request): Client {
 function clientDetails(request: Request, fallbackType?: Client) {
   const raw = (new URL(request.url).searchParams.get("flag") || request.headers.get("user-agent") || "").toLowerCase();
   const flags = ["clashmetaforandroid", "quantumult%20x", "quantumult-x", "quantumultx", "shadowrocket", "shadowsocks", "surfboard", "sing-box", "hiddify", "v2rayng", "v2rayn", "passwall", "ssrplus", "sagernet", "flclash", "nekobox", "nekoray", "mihomo", "verge", "stash", "surge", "loon", "meta", "sfm", "clash"];
-  let name: string | null = null;
+  let name: string | null = raw.includes("clashx meta") ? "clashx meta" : null;
   let version: string | null = null;
   const direct = raw.match(/([a-z0-9_-]+)[/\s]+v?(\d+(?:\.\d+){0,2})/i);
-  if (direct && flags.includes(direct[1])) { name = direct[1]; version = direct[2]; }
+  if (!name && direct && flags.includes(direct[1])) { name = direct[1]; version = direct[2]; }
   if (!name) name = flags.find(flag => raw.includes(flag)) || null;
   if (!version && name) version = raw.match(new RegExp(`${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[/\\s]+v?(\\d+(?:\\.\\d+){0,2})`, "i"))?.[1] || null;
   if (!version) version = raw.match(/\/v?(\d+(?:\.\d+){0,2})/)?.[1] || null;
@@ -224,7 +224,7 @@ function filterByClientCompatibility(client: Client, request: Request, servers: 
         trojan: ["tcp", "ws", "grpc", "httpupgrade"]
       };
       if (networks[server.type] && !networks[server.type].includes(String(serverValue(server, "protocol_settings.network") || "tcp"))) return false;
-      const hysteriaVersions: Record<string, [string, string]> = { nekobox: ["2", "1.2.7"], clashmetaforandroid: ["2", "2.9.0"], nekoray: ["2", "3.24"], verge: ["2", "1.3.8"], flclash: ["2", "0.8.0"] };
+      const hysteriaVersions: Record<string, [string, string]> = { nekobox: ["2", "1.2.7"], clashmetaforandroid: ["2", "2.9.0"], nekoray: ["2", "3.24"], verge: ["2", "1.3.8"], flclash: ["2", "0.8.0"], "clashx meta": ["2", "1.3.5"] };
       const requirement = hysteriaVersions[name];
       if (info.version && server.type === "hysteria" && requirement && String(serverValue(server, "protocol_settings.version")) === requirement[0] && !versionAtLeast(info.version, requirement[1])) return false;
       if (info.version && ["meta", "verge", "flclash", "nekobox", "clashmetaforandroid"].includes(name)) {
@@ -493,7 +493,7 @@ function clashPluginOptions(ps: any, client: Client) {
     return index < 0 ? [item, true] : [item.slice(0, index).trim(), item.slice(index + 1).trim()];
   }));
   if (plugin === "obfs" || plugin === "obfs-local") return {
-    plugin: "obfs",
+    plugin: client === "clash" ? plugin : "obfs",
     "plugin-opts": Object.fromEntries(Object.entries({ mode: parsed.obfs || parsed.mode || "http", host: parsed["obfs-host"] || parsed.host || (client === "stash" || client === "clash" ? "" : "www.bing.com"), path: client === "stash" || client === "clash" ? parsed.path : undefined }).filter(([, value]) => value !== undefined && (client === "stash" || value !== "")))
   };
   if (plugin === "v2ray-plugin") return {
@@ -615,7 +615,8 @@ function singboxOutbound(user: any, server: any) {
   const ns = ps.network_settings || {};
   if (ps.network === "tcp" && ns.header?.type === "http") {
     const paths = Array.isArray(ns.header?.request?.path) && ns.header.request.path.length ? ns.header.request.path : ["/"];
-    outbound.transport = { type: "http", path: paths[Math.floor(Math.random() * paths.length)], host: ns.header?.request?.headers?.Host || [] };
+    const hosts = Array.isArray(ns.header?.request?.headers?.Host) ? ns.header.request.headers.Host : ns.header?.request?.headers?.Host ? [ns.header.request.headers.Host] : [];
+    outbound.transport = { type: "http", path: paths[Math.floor(Math.random() * paths.length)], host: hosts.length ? [hosts[Math.floor(Math.random() * hosts.length)]] : [] };
   }
   else if (ps.network === "ws") outbound.transport = { type: "ws", path: ns.path, headers: ns.headers?.Host ? { Host: ns.headers.Host } : undefined, max_early_data: 0 };
   else if (ps.network === "grpc") outbound.transport = { type: "grpc", service_name: ns.serviceName };
@@ -1009,10 +1010,10 @@ function textTemplateProfile(client: "surge" | "surfboard", template: string, co
 
 async function templates(env: Env) {
   try {
-    const result = await env.XBOARD_DB.prepare("SELECT name, COALESCE(content, template, '') AS content FROM v2_subscribe_templates WHERE enabled = 1").all<{ name: string; content: string }>();
+    const result = await env.XBOARD_DB.prepare("SELECT name, COALESCE(content, template, '') AS content FROM v2_subscribe_templates").all<{ name: string; content: string }>();
     return Object.fromEntries((result.results || []).map(row => [row.name, row.content]));
   } catch {
-    const result = await env.XBOARD_DB.prepare("SELECT name, COALESCE(content, '') AS content FROM v2_subscribe_templates WHERE enabled = 1").all<{ name: string; content: string }>();
+    const result = await env.XBOARD_DB.prepare("SELECT name, COALESCE(content, '') AS content FROM v2_subscribe_templates").all<{ name: string; content: string }>();
     return Object.fromEntries((result.results || []).map(row => [row.name, row.content]));
   }
 }

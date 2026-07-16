@@ -127,13 +127,17 @@ test("StatusHub coalesces heartbeat storage while preserving device expiry and h
     const deviceReport = (timestamp, devices) => hub.fetch(new Request("https://status-hub.internal/devices/report", {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ node_id: 1, timestamp, devices })
     }));
-    await deviceReport(1000, { 7: { "1.1.1.1": 1000 } });
+    await deviceReport(1000, { 7: { "1.1.1.1": 1000, "2.2.2.2": 1000 } });
     await deviceReport(1060, { 7: { "1.1.1.1": 1060 } });
     assert.equal(storage.writes.filter(key => key === "devices:1").length, 1);
-    await deviceReport(1241, { 7: { "1.1.1.1": 1241 } });
+    let listed = await hub.fetch(new Request("https://status-hub.internal/devices/list", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ user_ids: [7], timestamp: 1060 })
+    }));
+    assert.deepEqual((await listed.json()).data.users, { 7: ["1.1.1.1", "2.2.2.2"] });
+    await deviceReport(1301, { 7: { "1.1.1.1": 1301 } });
     assert.equal(storage.writes.filter(key => key === "devices:1").length, 2);
-    const listed = await hub.fetch(new Request("https://status-hub.internal/devices/list", {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ user_ids: [7], timestamp: 1241 })
+    listed = await hub.fetch(new Request("https://status-hub.internal/devices/list", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ user_ids: [7], timestamp: 1301 })
     }));
     assert.deepEqual((await listed.json()).data.users, { 7: ["1.1.1.1"] });
 
@@ -236,6 +240,10 @@ test("websocket device state follows the official per-IP contract", () => {
   assert.doesNotMatch(source, /event === "pong"[\s\S]{0,400}optionalKvPut/);
   assert.match(source, /Internal sync token is not configured/);
   assert.match(source, /event === "report\.devices"[\s\S]*socket\.send\(wsMessage\("sync\.devices"/);
+  assert.match(source, /Number\(seenAt \|\| 0\) > timestamp - 300/);
+  assert.match(source, /aggregateDevices\(env, users, true\)/);
+  assert.match(source, /enqueueTraffic\(env, node, traffic, true, raw\.length\)/);
+  assert.match(source, /const nonEmptyObject =/);
 });
 
 test("traffic-exceeded user removals are batched per node", () => {

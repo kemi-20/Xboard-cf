@@ -328,7 +328,7 @@ CREATE TABLE IF NOT EXISTS v2_stat_server (
   u INTEGER NOT NULL DEFAULT 0,
   d INTEGER NOT NULL DEFAULT 0,
   record_at INTEGER NOT NULL,
-  record_type TEXT,
+  record_type TEXT NOT NULL DEFAULT 'd',
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   UNIQUE(server_id, server_type, record_at)

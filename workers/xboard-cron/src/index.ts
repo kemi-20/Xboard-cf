@@ -1,4 +1,4 @@
-import type { D1Database, Fetcher, KVNamespace, Queue } from "./types.ts";
+import type { D1Database, D1PreparedStatement, Fetcher, KVNamespace, Queue } from "./types.ts";
 import { json, now, ok } from "./compat.ts";
 import { settings as loadSettings } from "./db.ts";
 
@@ -177,6 +177,32 @@ async function resetTraffic(env: Env, ts: number) {
       await optionalKvPut(env, `user_version:${user.id}`, String(Date.now()));
     }
   }
+}
+
+let nextResetBackfillDone = false;
+
+async function repairMissingNextResetAt(env: Env, ts: number) {
+  if (nextResetBackfillDone) return;
+  const markerName = "system_next_reset_backfill_v1";
+  const marker = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = ?").bind(markerName).first<{ value: string }>();
+  if (marker?.value === "done") { nextResetBackfillDone = true; return; }
+  const cursor = Math.max(0, Number(marker?.value || 0));
+  const systemMethod = Number(await setting(env, "reset_traffic_method", "1"));
+  const result = await env.XBOARD_DB.prepare(`SELECT u.id, u.expired_at, p.reset_traffic_method
+    FROM v2_user u JOIN v2_plan p ON p.id = u.plan_id
+    WHERE u.id > ? AND u.next_reset_at IS NULL
+    ORDER BY u.id ASC LIMIT 100`).bind(cursor).all<Record<string, any>>();
+  const users = result.results || [];
+  const statements: D1PreparedStatement[] = [];
+  for (const user of users) {
+    const next = nextResetAt(user, systemMethod, ts);
+    if (next !== null) statements.push(env.XBOARD_DB.prepare("UPDATE v2_user SET next_reset_at = ?, updated_at = ? WHERE id = ? AND next_reset_at IS NULL").bind(next, ts, user.id));
+  }
+  const value = users.length < 100 ? "done" : String(users[users.length - 1].id);
+  statements.push(env.XBOARD_DB.prepare(`INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES (?, ?, ?, ?)
+    ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`).bind(markerName, value, ts, ts));
+  await env.XBOARD_DB.batch(statements);
+  if (value === "done") nextResetBackfillDone = true;
 }
 
 async function statistics(env: Env, ts: number, day: number) {
@@ -396,6 +422,7 @@ async function run(env: Env, task = "scheduled") {
   const scheduledClaim = task === "scheduled" ? await acquireTaskLock(env, "scheduled", ts) : null;
   if (task === "scheduled" && !scheduledClaim) return;
   try {
+    if (task === "scheduled" || task === "all" || task === "reset:traffic") await repairMissingNextResetAt(env, ts);
     for (const current of tasks) {
       const claim = task === "scheduled" ? null : await acquireTaskLock(env, current, now());
       if (task !== "scheduled" && !claim) continue;
