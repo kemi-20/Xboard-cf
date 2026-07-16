@@ -2383,7 +2383,7 @@ function ticketLocation(request: Request) {
 async function ticketTelegramText(env: Env, request: Request, user: Record<string, any>, ticketId: number, subject: string, message: string) {
   const plan = user.plan_id ? await env.XBOARD_DB.prepare("SELECT name FROM v2_plan WHERE id = ?").bind(user.plan_id).first<{ name: string }>() : null;
   const total = Number(user.transfer_enable || 0); const upload = Number(user.u || 0); const download = Number(user.d || 0);
-  const expires = user.expired_at ? new Date(Number(user.expired_at) * 1000).toISOString().replace("T", " ").slice(0, 19) : "长期有效";
+  const expires = user.expired_at ? edgeShanghaiDateTime(user.expired_at) : "长期有效";
   const lines = [
     `工单提醒 #${ticketId}`,
     "━━━━━━━━━━━━━━━━━━━━",
@@ -2924,7 +2924,6 @@ async function adminCoupon(request: Request, env: Env, route: string): Promise<R
     });
     try { await env.XBOARD_DB.batch(statements); } catch { return fail("优惠券代码已存在或参数无效", 400, 400); }
     if (!id && input.generate_count) {
-      const dateTime = (value: unknown) => new Date(Number(value || 0) * 1000).toISOString().replace("T", " ").slice(0, 19);
       const csvValue = (value: unknown) => `"${String(value ?? "").replaceAll('"', '""')}"`;
       const lines = ["名称,类型,金额或比例,开始时间,结束时间,可用次数,可用于订阅,券码,生成时间"];
       for (const coupon of generatedCoupons) {
@@ -2932,12 +2931,12 @@ async function adminCoupon(request: Request, env: Env, route: string): Promise<R
           coupon.name,
           coupon.type === 1 ? "金额" : "比例",
           coupon.type === 1 ? Number(coupon.value || 0) / 100 : Number(coupon.value || 0),
-          dateTime(coupon.started_at),
-          dateTime(coupon.ended_at),
+          edgeShanghaiDateTime(coupon.started_at),
+          edgeShanghaiDateTime(coupon.ended_at),
           coupon.limit_use ?? "不限制",
           parseJsonArray(coupon.limit_plan_ids).join("/") || "不限制",
           coupon.code,
-          dateTime(coupon.created_at)
+          edgeShanghaiDateTime(coupon.created_at)
         ].map(csvValue).join(","));
       }
       return new Response(`${lines.join("\r\n")}\r\n`, {
@@ -3097,6 +3096,12 @@ async function orderDetail(env: Env, id: number) {
 }
 
 const EDGE_SHANGHAI_OFFSET = 8 * 3600;
+
+function edgeShanghaiDateTime(value: unknown) {
+  const timestamp = Number(value || 0);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return "";
+  return new Date((timestamp + EDGE_SHANGHAI_OFFSET) * 1000).toISOString().replace("T", " ").slice(0, 19);
+}
 
 function addOrderMonths(timestamp: number, months: number) {
   const date = new Date((timestamp + EDGE_SHANGHAI_OFFSET) * 1000);

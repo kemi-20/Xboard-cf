@@ -1096,3 +1096,13 @@ test("current audit findings preserve upstream admin, plan, reset and Telegram c
   assert.match(source, /系统繁忙，请稍后重试/);
   assert.match(source, /telegramGb\(total - used\)/);
 });
+
+test("Telegram ticket alerts and coupon CSV use the upstream Shanghai timezone", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /const expires = user\.expired_at \? edgeShanghaiDateTime\(user\.expired_at\) : "长期有效"/);
+  assert.match(source, /edgeShanghaiDateTime\(coupon\.started_at\)/);
+  assert.match(source, /edgeShanghaiDateTime\(coupon\.ended_at\)/);
+  assert.match(source, /edgeShanghaiDateTime\(coupon\.created_at\)/);
+  assert.match(source, /new Date\(\(timestamp \+ EDGE_SHANGHAI_OFFSET\) \* 1000\)\.toISOString\(\)/);
+  assert.doesNotMatch(source, /const expires = user\.expired_at \? new Date\(Number\(user\.expired_at\) \* 1000\)\.toISOString\(\)/);
+});
