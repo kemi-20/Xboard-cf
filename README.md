@@ -76,7 +76,7 @@ Worker 之间没有依赖仓库根目录的共享运行时代码，因此 Cloudf
 
 | 资源 | 名称或绑定 | 用途 |
 | --- | --- | --- |
-| D1 | `xboard-db` / `XBOARD_DB` | 用户、套餐、节点、订单、设置、流量和统计等正式业务数据 |
+| D1 | `xboard-db` / `XBOARD_DB` | 用户、套餐、节点、订单、设置、流量和统计等正式业务数据；新建数据库默认位于 APAC 并开启读取复制 |
 | KV | `xboard-kv` / `XBOARD_KV` | Session、验证码、限流、缓存和版本标记 |
 | Queue | `traffic-events` | 节点流量异步入库，由 `xboard-jobs` 消费 |
 | Queue | `mail-events` | 邮件任务，由 `xboard-jobs` 消费 |
@@ -94,6 +94,8 @@ Worker 之间没有依赖仓库根目录的共享运行时代码，因此 Cloudf
 | Cron Trigger | `* * * * *` | `xboard-cron` 每分钟调度周期检查、统计和清理任务 |
 
 五个 Worker 都绑定同一个 D1 和 KV。D1 是正式业务数据的唯一权威来源；KV 只保存可重新生成的短期数据。高频机器心跳不写入 D1，而是进入 `StatusHub`。设置读取使用 Worker 内存、KV 版本快照和 D1 三级缓存，各 Worker 只加载自身需要的设置字段。KV 不可用或超过额度时会直接跳过 KV 并回源 D1，不会因为缓存故障阻断登录、订阅、节点上报或定时任务。
+
+所有业务 D1 请求都通过 Sessions API 执行。当前采用保守一致性策略：HTTP、订阅、节点协议、WebSocket 事件、Queue、Cron 和迁移均从 `first-primary` 开始；只有未来能够严格证明允许副本延迟的公开展示接口才可加入 `first-unconstrained` 白名单。数据库未开启读取复制时 Sessions API 会自动使用主实例，不需要两套代码，也不会导致接口异常。读取复制用于降低远距离读取延迟和扩展读取吞吐量，不会减少 D1 的 `rows_read` 或 `rows_written` 计费。
 
 ```mermaid
 flowchart TB
@@ -205,7 +207,7 @@ flowchart TB
 
 ### 存储与流量写入
 
-- **D1**：用户、套餐、权限组、节点配置、订单、余额、最终流量、统计和系统设置的权威数据。
+- **D1**：用户、套餐、权限组、节点配置、订单、余额、最终流量、统计和系统设置的权威数据。所有逻辑请求使用单个 `first-primary` Session，确保同一请求内顺序一致且能够读取自己的写入。
 - **KV**：Session、验证码、限流、版本号和可重建缓存；不是 Redis 数据的逐键永久替代品。
 - **Worker isolate 内存缓存**：每个 Worker 实例独立保存设置热缓存并合并并发回源请求；`xboard-edge` 还用它作为 Queue 统计和流量排行的第一级短缓存。实例回收后缓存自然消失，不能保存权威数据。
 - **Cloudflare Cache API**：保存后台 Queue 统计 60 秒、流量排行 30 秒等可重新计算的短时结果，跨请求复用但不增加 KV 写入；未命中或过期时直接重新查询 D1。
@@ -265,7 +267,7 @@ Maileroo 免费层通常为每月 3,000 封，Brevo 免费层通常为每天 300
 CLOUDFLARE_API_TOKEN
 ```
 
-然后打开 `Actions -> Bootstrap XBoard on Cloudflare -> Run workflow`。workflow 会自动识别 Token 所属账号，创建或复用 `xboard-db`、`xboard-kv`、三个业务 Queue 及对应的三个死信队列，把当前账号、D1 和 KV 的资源 ID 写入五个 Worker 的 `wrangler.toml`，使用 GitHub 自动提供的 `GITHUB_TOKEN` 提交回当前分支，再自动执行 D1 schema 与 seed，创建 Durable Objects、Cron Trigger、Static Assets 和 Service Bindings，并按依赖顺序创建或更新五个 Worker。它只配置了 `workflow_dispatch`，不会在每次 push 时运行。
+然后打开 `Actions -> Bootstrap XBoard on Cloudflare -> Run workflow`。workflow 会自动识别 Token 所属账号，创建或复用 `xboard-db`、`xboard-kv`、三个业务 Queue 及对应的三个死信队列，把当前账号、D1 和 KV 的资源 ID 写入五个 Worker 的 `wrangler.toml`，使用 GitHub 自动提供的 `GITHUB_TOKEN` 提交回当前分支，再自动执行 D1 schema 与 seed，创建 Durable Objects、Cron Trigger、Static Assets 和 Service Bindings，并按依赖顺序创建或更新五个 Worker。新建的 `xboard-db` 使用 `APAC` 位置提示，并自动尝试开启 D1 Read Replication；开启失败只会在 Action 中显示警告，不会阻断部署。已存在的同名数据库会原样复用，不修改主库位置或读取复制开关。它只配置了 `workflow_dispatch`，不会在每次 push 时运行。
 
 资源 ID 不是 API Token 或数据库密码，必须随部署仓库保存，Cloudflare Workers Builds 后续检出代码时才能继续绑定同一套资源。workflow 只提交五个 `workers/xboard-*/wrangler.toml`，不会提交 `CLOUDFLARE_API_TOKEN`。如果仓库禁止 GitHub Actions 写入内容，或 `master` 分支保护规则禁止 workflow 直接推送，首次部署会在“Persist Cloudflare resource bindings”步骤明确失败；请允许该 workflow 写入仓库后重新手动运行。
 

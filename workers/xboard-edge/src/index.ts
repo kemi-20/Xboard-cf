@@ -1,7 +1,7 @@
 import type { D1Database, D1PreparedStatement, ExecutionContext, Fetcher, KVNamespace, Queue } from "./types";
 import { body, fail, json, now, ok, randomString, token, uuid } from "./compat";
 import { createSession, currentUser, hashPassword, sessionTokenDigest, verifyPassword } from "./auth";
-import { invalidateSettingsCache, list, rows, settings } from "./db";
+import { invalidateSettingsCache, list, primaryDatabase, rows, settings } from "./db";
 import { bump } from "./kv";
 import { handleAdminGiftCard, handleUserGiftCard } from "./gift-card";
 import { authorizeMigration, handleAdminMigration } from "./migration";
@@ -4394,7 +4394,8 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const apiRequest = new URL(request.url).pathname.startsWith("/api/");
     if (apiRequest && request.method === "OPTIONS") return corsResponse(new Response(null, { status: 204 }));
-    const response = await edgeFetch(request, env, ctx);
+    const sessionEnv = { ...env, XBOARD_DB: primaryDatabase(env.XBOARD_DB) };
+    const response = await edgeFetch(request, sessionEnv, ctx);
     return apiRequest ? corsResponse(response) : response;
   }
 };

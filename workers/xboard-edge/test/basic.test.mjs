@@ -315,7 +315,12 @@ test("bootstrap persists generated Cloudflare bindings for Workers Builds", () =
   assert.match(workflow, /git add workers\/\*\/wrangler\.toml/);
   assert.match(workflow, /git commit -m "Configure Cloudflare resource bindings"/);
   assert.match(workflow, /git push origin "HEAD:\$\{GITHUB_REF_NAME\}"/);
-  assert.match(bootstrap, /patchWrangler\(worker, account\.id, database\.uuid \|\| database\.id, kv\.id\)/);
+  assert.match(bootstrap, /body: JSON\.stringify\(\{ name, primary_location_hint: "apac" \}\)/);
+  assert.match(bootstrap, /read_replication: \{ mode: "auto" \}/);
+  assert.match(bootstrap, /if \(existing\) return \{ database: existing, created: false \}/);
+  assert.match(bootstrap, /if \(databaseCreated\) await enableReadReplication\(account\.id, databaseId\)/);
+  assert.match(bootstrap, /Warning: xboard-db was created successfully, but read replication could not be enabled/);
+  assert.match(bootstrap, /patchWrangler\(worker, account\.id, databaseId, kv\.id\)/);
   assert.match(bootstrap, /"telegram-events"/);
   assert.match(bootstrap, /"telegram-events-dlq"/);
 });
@@ -455,6 +460,14 @@ test("storage optimization removes write-heavy unused traffic indexes", () => {
   assert.match(source, /DROP INDEX IF EXISTS idx_v2_job_logs_status_time/);
   assert.doesNotMatch(schema, /CREATE INDEX IF NOT EXISTS idx_v2_job_logs_status_time/);
   assert.match(schema, /idx_v2_job_logs_failed_time ON v2_job_logs\(updated_at, created_at\) WHERE status = 'failed'/);
+});
+
+test("edge database requests use a first-primary D1 session", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const db = fs.readFileSync("src/db.ts", "utf8");
+  assert.match(db, /db\.withSession\("first-primary"\)/);
+  assert.match(source, /XBOARD_DB: primaryDatabase\(env\.XBOARD_DB\)/);
+  assert.doesNotMatch(source, /withSession\("first-unconstrained"\)/);
 });
 
 test("revenue overview reads the migrated daily statistics table", () => {

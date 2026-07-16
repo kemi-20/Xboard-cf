@@ -1,4 +1,7 @@
 import type { D1Database, KVNamespace } from "./types";
+export function primaryDatabase(db: D1Database) {
+  return db.withSession("first-primary");
+}
 const SETTINGS_CACHE_TTL_MS = 300_000;
 const SETTINGS_VERSION_CHECK_MS = 30_000;
 const SETTINGS_SNAPSHOT_TTL_SECONDS = 86_400;

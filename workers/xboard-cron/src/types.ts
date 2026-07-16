@@ -13,6 +13,8 @@ export interface D1PreparedStatement {
 export interface D1Database {
   prepare(query: string): D1PreparedStatement;
   batch<T = unknown>(statements: D1PreparedStatement[]): Promise<D1Result<T>[]>;
+  withSession(constraint?: "first-primary" | "first-unconstrained" | string): D1Database;
+  getBookmark?(): string | null;
 }
 export interface Queue<T = unknown> { send(message: T): Promise<void>; sendBatch(messages: { body: T }[]): Promise<void>; }
 export interface Fetcher { fetch(input: RequestInfo, init?: RequestInit): Promise<Response>; }

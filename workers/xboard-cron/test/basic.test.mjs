@@ -172,6 +172,14 @@ test("scheduled cron keeps one trigger and one shared minute lock", () => {
   assert.match(source, /ts - previous >= 480/);
 });
 
+test("scheduled maintenance uses one first-primary D1 session", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const db = fs.readFileSync("src/db.ts", "utf8");
+  assert.match(db, /db\.withSession\("first-primary"\)/);
+  assert.match(source, /await run\(\{ \.\.\.env, XBOARD_DB: primaryDatabase\(env\.XBOARD_DB\) \}, "scheduled"\)/);
+  assert.doesNotMatch(source, /withSession\("first-unconstrained"\)/);
+});
+
 test("settings read D1 when KV fails after the memory cache is warm", async () => {
   const { settings } = await import(`../src/db.ts?kv-outage=${Date.now()}`);
   const originalNow = Date.now;

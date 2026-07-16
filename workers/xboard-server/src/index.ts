@@ -1,6 +1,6 @@
 import type { D1Database, KVNamespace, Queue, DurableObjectState, ExecutionContext } from "./types.ts";
 import { now } from "./compat.ts";
-import { invalidateSettingsCache, settings as loadSettings } from "./db.ts";
+import { invalidateSettingsCache, primaryDatabase, settings as loadSettings } from "./db.ts";
 import {
   availableUser, billableTraffic, buildNodeConfig, isValidNodeType, normalizeNodeType,
   parseJson, parseTraffic, responseEtag, type Row
@@ -853,13 +853,14 @@ export class NodeHub {
     try { return (socket as any).deserializeAttachment?.() || {}; } catch { return {}; }
   }
 
-  private async fullSync(socket: WebSocket, node: Row, machineMode = false) {
+  private async fullSync(env: Env, socket: WebSocket, node: Row, machineMode = false) {
     const suffix = machineMode ? { node_id: Number(node.id) } : {};
-    socket.send(wsMessage("sync.config", { config: await nodeConfig(this.env, node), ...suffix }));
-    socket.send(wsMessage("sync.users", { users: await nodeUsers(this.env, node), ...suffix }));
+    socket.send(wsMessage("sync.config", { config: await nodeConfig(env, node), ...suffix }));
+    socket.send(wsMessage("sync.users", { users: await nodeUsers(env, node), ...suffix }));
   }
 
   async fetch(request: Request): Promise<Response> {
+    const env = { ...this.env, XBOARD_DB: primaryDatabase(this.env.XBOARD_DB) };
     const url = new URL(request.url);
     if (url.pathname === "/disconnect" && request.method === "POST") {
       for (const socket of this.sockets()) {
@@ -881,7 +882,7 @@ export class NodeHub {
           (socket as any).serializeAttachment?.(updated);
           const removedIds = previousNodeIds.filter(nodeId => !nodeIds.includes(nodeId));
           for (const removedId of removedIds) {
-            await clearNodeDevices(this.env, removedId);
+            await clearNodeDevices(env, removedId);
           }
         }
         socket.send(wsMessage(event, data));
@@ -896,27 +897,27 @@ export class NodeHub {
     const [client, server] = Object.values(pair) as [WebSocket, WebSocket];
     let identity: Row;
     if (input.machine_id) {
-      const machine = await getMachine(this.env, input.machine_id, input.token);
+      const machine = await getMachine(env, input.machine_id, input.token);
       if (!machine || !Number(machine.is_active ?? machine.enabled ?? 1)) {
         this.accept(server, ["invalid"]); server.send(wsMessage("error", { message: "invalid machine credentials" })); server.close(1008, "invalid machine credentials");
         return new Response(null, { status: 101, webSocket: client } as any);
       }
-      const nodesResult = await this.env.XBOARD_DB.prepare("SELECT * FROM v2_server WHERE machine_id = ? AND enabled = 1 ORDER BY sort ASC").bind(machine.id).all<Row>();
+      const nodesResult = await env.XBOARD_DB.prepare("SELECT * FROM v2_server WHERE machine_id = ? AND enabled = 1 ORDER BY sort ASC").bind(machine.id).all<Row>();
       const nodes = nodesResult.results || [];
       identity = { mode: "machine", machine_id: Number(machine.id), node_ids: nodes.map(node => Number(node.id)) };
       this.replaceConnections();
       this.accept(server, [`machine:${machine.id}`]);
       (server as any).serializeAttachment?.(identity);
       server.send(wsMessage("auth.success", { machine_id: Number(machine.id), node_ids: identity.node_ids }));
-      await reportStatus(this.env, "machine", Number(machine.id), { last_seen_at: now(), connected: true });
+      await reportStatus(env, "machine", Number(machine.id), { last_seen_at: now(), connected: true });
       for (const node of nodes) {
-        await clearNodeDevices(this.env, Number(node.id));
-        await this.fullSync(server, node, true);
+        await clearNodeDevices(env, Number(node.id));
+        await this.fullSync(env, server, node, true);
       }
     } else {
-      const configured = await setting(this.env, "server_token");
+      const configured = await setting(env, "server_token");
       const tokenValid = equalText(String(input.token || ""), configured);
-      const node = tokenValid ? await getNode(this.env, input.node_id) : null;
+      const node = tokenValid ? await getNode(env, input.node_id) : null;
       if (!node) {
         this.accept(server, ["invalid"]); server.send(wsMessage("error", { message: tokenValid ? "node not found" : "invalid token" })); server.close(1008, "authentication failed");
         return new Response(null, { status: 101, webSocket: client } as any);
@@ -926,14 +927,15 @@ export class NodeHub {
       this.accept(server, [`node:${node.id}`]);
       (server as any).serializeAttachment?.(identity);
       server.send(wsMessage("auth.success", { node_id: Number(node.id) }));
-      await clearNodeDevices(this.env, Number(node.id));
-      await this.fullSync(server, node, false);
+      await clearNodeDevices(env, Number(node.id));
+      await this.fullSync(env, server, node, false);
     }
     await this.state.storage.setAlarm(Date.now() + 55000);
     return new Response(null, { status: 101, webSocket: client } as any);
   }
 
   async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer) {
+    const env = { ...this.env, XBOARD_DB: primaryDatabase(this.env.XBOARD_DB) };
     let input: Row;
     try { input = JSON.parse(typeof message === "string" ? message : new TextDecoder().decode(message)); } catch { return; }
     const identity = this.attachment(socket);
@@ -945,7 +947,7 @@ export class NodeHub {
     }
     const nodeId = identity.mode === "machine" ? Number(data.node_id) : Number(identity.node_id);
     if (!nodeId || !nodeIds.includes(nodeId)) return;
-    const node = await getNode(this.env, nodeId);
+    const node = await getNode(env, nodeId);
     if (!node) return;
     if (event === "node.status") {
       const status = data.status ?? (data.mem && data.disk ? data : null);
@@ -955,26 +957,27 @@ export class NodeHub {
       const metricValues = metricsState(metrics);
       if (load) runtime.load_status = load;
       if (metricValues) runtime.metrics = metricValues;
-      await reportStatus(this.env, "node", Number(node.id), runtime);
+      await reportStatus(env, "node", Number(node.id), runtime);
     }
     if (event === "report.devices") {
-      await processAlive(this.env, nodeId, data.devices ?? data, true);
-      socket.send(wsMessage("sync.devices", { users: await aggregateDevices(this.env, await nodeUsers(this.env, node)), ...(identity.mode === "machine" ? { node_id: nodeId } : {}) }));
+      await processAlive(env, nodeId, data.devices ?? data, true);
+      socket.send(wsMessage("sync.devices", { users: await aggregateDevices(env, await nodeUsers(env, node)), ...(identity.mode === "machine" ? { node_id: nodeId } : {}) }));
     }
-    if (event === "request.devices") socket.send(wsMessage("sync.devices", { users: await aggregateDevices(this.env, await nodeUsers(this.env, node)), ...(identity.mode === "machine" ? { node_id: nodeId } : {}) }));
+    if (event === "request.devices") socket.send(wsMessage("sync.devices", { users: await aggregateDevices(env, await nodeUsers(env, node)), ...(identity.mode === "machine" ? { node_id: nodeId } : {}) }));
   }
 
   async webSocketClose(socket: WebSocket) {
+    const env = { ...this.env, XBOARD_DB: primaryDatabase(this.env.XBOARD_DB) };
     this.localSockets.delete(socket);
     const identity = this.attachment(socket);
     if (this.sockets().some(candidate => candidate !== socket)) return;
     const nodeIds: number[] = Array.isArray(identity.node_ids) ? identity.node_ids.map(Number) : [];
     for (const nodeId of nodeIds) {
-      await clearNodeDevices(this.env, nodeId);
-      await reportStatus(this.env, "node", nodeId, { connected: false, disconnected_at: now() });
+      await clearNodeDevices(env, nodeId);
+      await reportStatus(env, "node", nodeId, { connected: false, disconnected_at: now() });
     }
     if (identity.mode === "machine" && Number(identity.machine_id) > 0) {
-      await reportStatus(this.env, "machine", Number(identity.machine_id), { connected: false, disconnected_at: now() });
+      await reportStatus(env, "machine", Number(identity.machine_id), { connected: false, disconnected_at: now() });
     }
   }
 
@@ -1076,6 +1079,7 @@ export const REGISTERED_HTTP_ROUTES = [...routes.keys()];
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    env = { ...env, XBOARD_DB: primaryDatabase(env.XBOARD_DB) };
     const url = new URL(request.url);
     if (url.pathname === "/health") return json({ data: { service: "xboard-server", time: now() } });
     if (url.pathname === "/internal/settings/invalidate" && request.method === "POST") {

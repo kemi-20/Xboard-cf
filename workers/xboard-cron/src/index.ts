@@ -1,6 +1,6 @@
 import type { D1Database, D1PreparedStatement, Fetcher, KVNamespace, Queue } from "./types.ts";
 import { json, now, ok } from "./compat.ts";
-import { settings as loadSettings } from "./db.ts";
+import { primaryDatabase, settings as loadSettings } from "./db.ts";
 
 export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; MAIL_EVENTS: Queue; XBOARD_SERVER: Fetcher; }
 
@@ -488,6 +488,6 @@ export default {
     return json({ message: "Not Found" }, 404);
   },
   async scheduled(_event: unknown, env: Env) {
-    await run(env, "scheduled");
+    await run({ ...env, XBOARD_DB: primaryDatabase(env.XBOARD_DB) }, "scheduled");
   }
 };

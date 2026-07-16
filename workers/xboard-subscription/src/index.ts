@@ -2,7 +2,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import type { D1Database, KVNamespace } from "./types.ts";
 import { fail, now } from "./compat.ts";
 import { cached } from "./kv.ts";
-import { settings as loadSettings } from "./db.ts";
+import { primaryDatabase, settings as loadSettings } from "./db.ts";
 
 export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; }
 
@@ -1150,6 +1150,7 @@ export const __test = { clientOf, clientDetails, versionAtLeast, filterByClientC
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    env = { ...env, XBOARD_DB: primaryDatabase(env.XBOARD_DB) };
     const url = new URL(request.url);
     if (url.pathname === "/health") return new Response(JSON.stringify({ data: { service: "xboard-subscription", time: now() } }), { headers: { "content-type": "application/json" } });
     if (url.pathname !== "/api/v1/client/subscribe") {

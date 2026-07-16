@@ -56,7 +56,7 @@ test("node status accepts official flat metrics and nested status payloads", () 
   assert.match(source, /const metrics = data\.metrics \?\? data/);
   assert.match(source, /const load = statusState\(status\)/);
   assert.match(source, /const metricValues = metricsState\(metrics\)/);
-  assert.match(source, /await reportStatus\(this\.env, "node", Number\(node\.id\), runtime\)/);
+  assert.match(source, /await reportStatus\(env, "node", Number\(node\.id\), runtime\)/);
 });
 
 test("node and machine runtime status persist in the global StatusHub", () => {
@@ -256,7 +256,7 @@ test("websocket device state follows the official per-IP contract", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /next\[userId\] = Object\.fromEntries/);
   assert.match(source, /deviceSnapshot\(Number\(input\.timestamp \|\| now\(\)\)/);
-  assert.match(source, /await clearNodeDevices\(this\.env, Number\(node\.id\)\)/);
+  assert.match(source, /await clearNodeDevices\(env, Number\(node\.id\)\)/);
   assert.match(source, /async function pushNodeEvent/);
   assert.match(source, /pushDo\(env, `machine:\$\{machineId\}`/);
   assert.match(source, /pushDo\(env, `node:\$\{nodeId\}`/);
@@ -264,7 +264,7 @@ test("websocket device state follows the official per-IP contract", () => {
   assert.doesNotMatch(source, /event === "pong"[\s\S]{0,400}optionalKvPut/);
   assert.match(source, /Internal sync token is not configured/);
   assert.match(source, /event === "report\.devices"[\s\S]*socket\.send\(wsMessage\("sync\.devices"/);
-  assert.match(source, /processAlive\(this\.env, nodeId, data\.devices \?\? data, true\)/);
+  assert.match(source, /processAlive\(env, nodeId, data\.devices \?\? data, true\)/);
   assert.match(source, /action === "alivelist"[\s\S]{0,160}aggregateDeviceCounts\(env, await nodeUsers\(env, node\), true\)/);
   assert.match(source, /Number\(seenAt \|\| 0\) > timestamp - 300/);
   assert.match(source, /aggregateDevices\(env, users, limitedOnly\)/);
@@ -275,6 +275,16 @@ test("websocket device state follows the official per-IP contract", () => {
   assert.match(source, /offset < ids\.length; offset \+= 100/);
   assert.doesNotMatch(source, /this\.env\.XBOARD_KV\.put\(`node:ws:/);
   assert.doesNotMatch(source, /node:ws:(?:target|alive)/);
+});
+
+test("HTTP and websocket database work use request-scoped first-primary sessions", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const db = fs.readFileSync("src/db.ts", "utf8");
+  assert.match(db, /db\.withSession\("first-primary"\)/);
+  assert.match(source, /async fetch\(request: Request, env: Env,[\s\S]*XBOARD_DB: primaryDatabase\(env\.XBOARD_DB\)/);
+  assert.match(source, /async webSocketMessage[\s\S]*XBOARD_DB: primaryDatabase\(this\.env\.XBOARD_DB\)/);
+  assert.match(source, /async webSocketClose[\s\S]*XBOARD_DB: primaryDatabase\(this\.env\.XBOARD_DB\)/);
+  assert.doesNotMatch(source, /withSession\("first-unconstrained"\)/);
 });
 
 test("traffic-exceeded user removals are batched per node", () => {

@@ -29,8 +29,24 @@ async function discoverAccount() {
 async function ensureD1(accountId, name) {
   const databases = await api(`/accounts/${accountId}/d1/database?per_page=100`);
   const existing = databases.find(database => database.name === name);
-  if (existing) return existing;
-  return api(`/accounts/${accountId}/d1/database`, { method: "POST", body: JSON.stringify({ name }) });
+  if (existing) return { database: existing, created: false };
+  const database = await api(`/accounts/${accountId}/d1/database`, {
+    method: "POST",
+    body: JSON.stringify({ name, primary_location_hint: "apac" })
+  });
+  return { database, created: true };
+}
+
+async function enableReadReplication(accountId, databaseId) {
+  try {
+    await api(`/accounts/${accountId}/d1/database/${databaseId}`, {
+      method: "PUT",
+      body: JSON.stringify({ read_replication: { mode: "auto" } })
+    });
+    process.stdout.write("D1 read replication enabled for the new xboard-db database.\n");
+  } catch (error) {
+    process.stderr.write(`Warning: xboard-db was created successfully, but read replication could not be enabled: ${error instanceof Error ? error.message : String(error)}\n`);
+  }
 }
 
 async function ensureKv(accountId, title) {
@@ -57,7 +73,9 @@ async function patchWrangler(worker, accountId, databaseId, kvId) {
 }
 
 const account = await discoverAccount();
-const database = await ensureD1(account.id, "xboard-db");
+const { database, created: databaseCreated } = await ensureD1(account.id, "xboard-db");
+const databaseId = database.uuid || database.id;
+if (databaseCreated) await enableReadReplication(account.id, databaseId);
 const kv = await ensureKv(account.id, "xboard-kv");
 const queueNames = [
   "traffic-events",
@@ -70,11 +88,11 @@ const queueNames = [
 for (const queueName of queueNames) await ensureQueue(account.id, queueName);
 
 for (const worker of ["xboard-edge", "xboard-subscription", "xboard-server", "xboard-jobs", "xboard-cron"]) {
-  await patchWrangler(worker, account.id, database.uuid || database.id, kv.id);
+  await patchWrangler(worker, account.id, databaseId, kv.id);
 }
 
 const output = process.env.GITHUB_OUTPUT;
 if (output) {
-  await writeFile(output, `account_id=${account.id}\ndatabase_id=${database.uuid || database.id}\nkv_id=${kv.id}\n`, { flag: "a" });
+  await writeFile(output, `account_id=${account.id}\ndatabase_id=${databaseId}\nkv_id=${kv.id}\n`, { flag: "a" });
 }
 process.stdout.write(`Cloudflare resources ready for account ${account.name} (${account.id}).\n`);

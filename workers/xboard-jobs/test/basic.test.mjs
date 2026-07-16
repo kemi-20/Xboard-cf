@@ -114,6 +114,14 @@ test("traffic batches aggregate users and servers while preserving rate semantic
   assert.ok(__test.trafficEventGroups(oversized).every(group => group.reduce((total, event) => total + event.payload.length, 0) <= 250));
 });
 
+test("queue batches use one first-primary D1 session", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const db = fs.readFileSync("src/db.ts", "utf8");
+  assert.match(db, /db\.withSession\("first-primary"\)/);
+  assert.match(source, /async queue\(batch: MessageBatch, env: Env\)[\s\S]*XBOARD_DB: primaryDatabase\(env\.XBOARD_DB\)/);
+  assert.doesNotMatch(source, /withSession\("first-unconstrained"\)/);
+});
+
 test("traffic candidate selection skips completed and active duplicate deliveries", async () => {
   const current = Math.floor(Date.now() / 1000);
   const env = {

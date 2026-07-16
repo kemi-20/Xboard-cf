@@ -1,6 +1,6 @@
 import type { D1Database, D1PreparedStatement, KVNamespace, MessageBatch } from "./types.ts";
 import { now, ok } from "./compat.ts";
-import { settings as loadSettings } from "./db.ts";
+import { primaryDatabase, settings as loadSettings } from "./db.ts";
 
 export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; MAILEROO_API_KEY?: string; BREVO_API_KEY?: string; TELEGRAM_BOT_TOKEN?: string; }
 
@@ -413,6 +413,7 @@ export const __test = { dayStart, render, claimEvent, completeClaim, failClaim, 
 export default {
   async fetch() { return ok({ service: "xboard-jobs", time: now() }); },
   async queue(batch: MessageBatch, env: Env) {
+    env = { ...env, XBOARD_DB: primaryDatabase(env.XBOARD_DB) };
     const trafficMessages = batch.messages.filter(message => (message.body as any)?.type === "traffic");
     if (trafficMessages.length) {
       try {

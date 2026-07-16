@@ -682,6 +682,14 @@ test("audited SOCKS, uTLS, TLS defaults and reset-day behavior match upstream", 
   assert.equal(__test.nextResetAt({ plan_id: 1, expired_at: expiry, plan_reset_traffic_method: null }, 0, from), Date.UTC(2026, 6, 31, 16, 0) / 1000);
 });
 
+test("subscription validation and generation use a first-primary D1 session", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const db = fs.readFileSync("src/db.ts", "utf8");
+  assert.match(db, /db\.withSession\("first-primary"\)/);
+  assert.match(source, /XBOARD_DB: primaryDatabase\(env\.XBOARD_DB\)/);
+  assert.doesNotMatch(source, /withSession\("first-unconstrained"\)/);
+});
+
 test("ClashX Meta, legacy Clash plugins and TCP HTTP choices follow upstream", () => {
   const oldClashX = new Request("https://sub.example/s/token", { headers: { "user-agent": "ClashX Meta/1.3.4" } });
   const newClashX = new Request("https://sub.example/s/token", { headers: { "user-agent": "ClashX Meta/1.3.5" } });
