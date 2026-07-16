@@ -1811,17 +1811,31 @@ async function adminMachineHistory(env: Env, url: URL) {
   const aeRows = await analyticsData<Record<string, unknown>[]>(env, "/internal/runtime/load", {
     entity_id: machineId, start: end - (rangeHours || 24) * 3600, end, limit
   });
-  if (aeRows?.length) return ok(aeRows.slice(-limit));
   const params = new URLSearchParams({ machine_id: String(machineId), limit: String(limit) });
   if (rangeHours !== null) params.set("range_hours", String(rangeHours));
+  let statusRows: Record<string, unknown>[] | null = null;
   try {
     const response = await statusHubRequest(env, `history?${params}`);
-    if (!response.ok) return fail("获取服务器负载历史失败", 500, 500);
-    const payload = await response.json() as { data?: Record<string, unknown>[] };
-    return ok(payload.data || []);
-  } catch {
-    return fail("获取服务器负载历史失败", 500, 500);
+    if (response.ok) {
+      const payload = await response.json() as { data?: Record<string, unknown>[] };
+      statusRows = Array.isArray(payload.data) ? payload.data : [];
+    }
+  } catch {}
+  if (!statusRows && !aeRows) return fail("获取服务器负载历史失败", 500, 500);
+
+  const merged = new Map<number, Record<string, unknown>>();
+  for (const row of statusRows || []) {
+    const recordedAt = Number(row.recorded_at || 0);
+    if (recordedAt) merged.set(recordedAt, row);
   }
+  // AE contains the post-cutover copy, so prefer it when both stores contain the same sample.
+  for (const row of aeRows || []) {
+    const recordedAt = Number(row.recorded_at || 0);
+    if (recordedAt) merged.set(recordedAt, row);
+  }
+  return ok([...merged.values()]
+    .sort((left, right) => Number(left.recorded_at || 0) - Number(right.recorded_at || 0))
+    .slice(-limit));
 }
 
 function shellQuote(value: string) {

@@ -398,7 +398,9 @@ test("machine load history matches the upstream chart contract", () => {
   assert.match(source, /rangeHours < 1 \|\| rangeHours > 24/);
   assert.match(source, /statusHubRequest\(env, `history\?\$\{params\}`\)/);
   assert.match(source, /new URLSearchParams\(\{ machine_id: String\(machineId\), limit: String\(limit\) \}\)/);
-  assert.match(source, /return ok\(payload\.data \|\| \[\]\)/);
+  assert.match(source, /for \(const row of statusRows \|\| \[\]\)/);
+  assert.match(source, /for \(const row of aeRows \|\| \[\]\)/);
+  assert.match(source, /\.sort\(\(left, right\) => Number\(left\.recorded_at \|\| 0\) - Number\(right\.recorded_at \|\| 0\)\)/);
   assert.match(source, /return adminMachineHistory\(env, new URL\(request\.url\)\)/);
 });
 

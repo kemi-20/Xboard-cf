@@ -42,7 +42,7 @@ function queryFor(kind: QueryKind, input: JsonRow) {
     const filter = entityId ? ` AND index1 = '${index}'` : "";
     return `SELECT intDiv(toUInt32(${timeField}), ${interval}) * ${interval} AS bucket, SUM(double1) AS u, SUM(double2) AS d FROM ${dataset} WHERE ${timeField} >= ${start} AND ${timeField} < ${end}${filter} GROUP BY bucket ORDER BY bucket ASC`;
   }
-  if (kind === "runtime-load") return `SELECT double9 AS recorded_at, double1 AS cpu, double10 AS mem_total, double2 AS mem_used, double11 AS disk_total, double3 AS disk_used, double4 AS net_in_speed, double5 AS net_out_speed, double6 AS connections, double7 AS online_users, double8 AS latency FROM ${DATASETS.runtime} WHERE index1 = 'machine:${entityId}' AND blob1 = 'load' AND double9 >= ${start} AND double9 < ${end} ORDER BY recorded_at ASC LIMIT ${Math.min(1000, limit)}`;
+  if (kind === "runtime-load") return `SELECT double9 AS recorded_at, double1 AS cpu, double10 AS mem_total, double2 AS mem_used, double11 AS disk_total, double3 AS disk_used, double4 AS net_in_speed, double5 AS net_out_speed, double6 AS connections, double7 AS online_users, double8 AS latency FROM ${DATASETS.runtime} WHERE index1 = 'machine:${entityId}' AND blob1 = 'load' AND double9 >= ${start} AND double9 < ${end} ORDER BY recorded_at DESC LIMIT ${Math.min(1000, limit)}`;
   return `SELECT index1 AS entity, blob1 AS metric_type, double6 AS connections, double7 AS online_users, double8 AS latency, double9 AS recorded_at FROM ${DATASETS.runtime} WHERE double9 >= ${start} AND double9 < ${end} ORDER BY recorded_at DESC LIMIT ${limit}`;
 }
 
@@ -118,7 +118,10 @@ async function cachedQuery(env: Env, kind: QueryKind, input: JsonRow, ttl: numbe
 function normalize(kind: QueryKind, rows: JsonRow[]) {
   if (kind === "user-rank") return rows.map(row => ({ user_id: Number(String(row.entity || "").replace(/^user:/, "")), u: Number(row.u || 0), d: Number(row.d || 0), total: Number(row.total || 0), previous_total: Number(row.previous_total || 0) }));
   if (kind === "server-rank") return rows.map(row => ({ server_id: Number(row.server_id || 0), server_type: String(row.server_type || ""), u: Number(row.u || 0), d: Number(row.d || 0), total: Number(row.total || 0), previous_total: Number(row.previous_total || 0) }));
-  return rows.map(row => Object.fromEntries(Object.entries(row).map(([key, value]) => [key, typeof value === "string" && /^-?\d+(\.\d+)?$/.test(value) ? Number(value) : value])));
+  const normalized = rows.map(row => Object.fromEntries(Object.entries(row).map(([key, value]) => [key, typeof value === "string" && /^-?\d+(\.\d+)?$/.test(value) ? Number(value) : value])));
+  return kind === "runtime-load"
+    ? normalized.sort((left, right) => Number(left.recorded_at || 0) - Number(right.recorded_at || 0))
+    : normalized;
 }
 
 export default {
