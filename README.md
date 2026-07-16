@@ -95,7 +95,7 @@ Worker 之间没有依赖仓库根目录的共享运行时代码，因此 Cloudf
 
 五个 Worker 都绑定同一个 D1 和 KV。D1 是正式业务数据的唯一权威来源；KV 只保存可重新生成的短期数据。高频机器心跳不写入 D1，而是进入 `StatusHub`。设置读取使用 Worker 内存、KV 版本快照和 D1 三级缓存，各 Worker 只加载自身需要的设置字段。KV 不可用或超过额度时会直接跳过 KV 并回源 D1，不会因为缓存故障阻断登录、订阅、节点上报或定时任务。
 
-所有业务 D1 请求都通过 Sessions API 执行。当前采用保守一致性策略：后台、用户私有接口、订阅、节点协议、WebSocket 事件、Queue、Cron 和迁移均从 `first-primary` 开始。只有 `GET /api/v1/guest/plan/fetch` 与 `GET /api/v1/guest/comm/config` 两个匿名纯展示接口使用 `first-unconstrained`；实际注册、下单、鉴权和容量检查仍在主库重新校验。数据库未开启读取复制时 Sessions API 会自动使用主实例，不需要两套代码，也不会导致接口异常。读取复制用于降低远距离读取延迟和扩展读取吞吐量，不会减少 D1 的 `rows_read` 或 `rows_written` 计费。
+所有业务 D1 请求都通过 Sessions API 执行。后台、用户 API、节点协议、WebSocket 事件、Queue、Cron 和迁移从 `first-primary` 开始。`xboard-subscription` 的订阅鉴权与生成，以及 `GET /api/v1/guest/plan/fetch`、`GET /api/v1/guest/comm/config` 两个匿名展示接口使用 `first-unconstrained`。这会让订阅读取优先分散到可用副本，代价是封禁、Token、流量、权限组和节点配置变更可能在副本追上主库前短暂延迟生效。数据库未开启读取复制时 Sessions API 会自动使用主实例，不需要两套代码，也不会导致接口异常。读取复制用于降低远距离读取延迟和扩展读取吞吐量，不会减少 D1 的 `rows_read` 或 `rows_written` 计费。
 
 ```mermaid
 flowchart TB
@@ -207,7 +207,7 @@ flowchart TB
 
 ### 存储与流量写入
 
-- **D1**：用户、套餐、权限组、节点配置、订单、余额、最终流量、统计和系统设置的权威数据。业务请求默认使用 `first-primary` Session，确保同一请求内顺序一致且能够读取自己的写入；仅两个经过审计的匿名展示接口允许从读取副本开始。
+- **D1**：用户、套餐、权限组、节点配置、订单、余额、最终流量、统计和系统设置的权威数据。业务请求默认使用 `first-primary` Session，确保同一请求内顺序一致且能够读取自己的写入；订阅 Worker 和两个经过审计的匿名展示接口从可用读取副本开始。
 - **KV**：Session、验证码、限流、版本号和可重建缓存；不是 Redis 数据的逐键永久替代品。
 - **Worker isolate 内存缓存**：每个 Worker 实例独立保存设置热缓存并合并并发回源请求；`xboard-edge` 还用它作为 Queue 统计和流量排行的第一级短缓存。实例回收后缓存自然消失，不能保存权威数据。
 - **Cloudflare Cache API**：保存后台 Queue 统计 60 秒、流量排行 30 秒等可重新计算的短时结果，跨请求复用但不增加 KV 写入；未命中或过期时直接重新查询 D1。

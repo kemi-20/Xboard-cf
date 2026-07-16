@@ -1,6 +1,6 @@
 import type { D1Database, KVNamespace } from "./types.ts";
-export function primaryDatabase(db: D1Database) {
-  return db.withSession("first-primary");
+export function replicaDatabase(db: D1Database) {
+  return db.withSession("first-unconstrained");
 }
 const SETTINGS_CACHE_TTL_MS = 300_000;
 const SETTINGS_VERSION_CHECK_MS = 30_000;
