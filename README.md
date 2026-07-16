@@ -154,7 +154,8 @@ flowchart TB
   TelegramQ -. "连续失败" .-> TelegramDLQ
 
   subgraph Data["数据与缓存层"]
-    Memory["各 Worker isolate 内存<br/>设置缓存 + 并发请求合并"]
+    Memory["Worker isolate 内存缓存<br/>设置热缓存 / 并发请求合并<br/>Queue 统计与流量排行一级缓存"]
+    CacheAPI["Cloudflare Cache API<br/>Queue 统计 60 秒<br/>流量排行 30 秒"]
     KV["KV: xboard-kv<br/>Session / 验证码 / 限流<br/>版本号 / 设置快照 / 订阅短缓存"]
     D1["D1: xboard-db<br/>用户 / 套餐 / 节点 / 订单 / 余额<br/>设置 / 最终流量 / 统计 / 审计"]
     Pending["v2_traffic_pending_check<br/>仅保存真正需要复查的用户"]
@@ -166,6 +167,8 @@ flowchart TB
   Jobs -. "内存 -> KV -> D1" .-> Memory
   Cron -. "内存 -> KV -> D1" .-> Memory
   Memory -. "版本快照；失败时跳过" .-> KV
+  Edge -. "统计与排行短缓存" .-> CacheAPI
+  CacheAPI -. "未命中或过期" .-> D1
   KV -. "缓存未命中或不可用" .-> D1
   Edge <-->|"正式业务读写"| D1
   Subscription -->|"只读业务数据"| D1
@@ -204,6 +207,8 @@ flowchart TB
 
 - **D1**：用户、套餐、权限组、节点配置、订单、余额、最终流量、统计和系统设置的权威数据。
 - **KV**：Session、验证码、限流、版本号和可重建缓存；不是 Redis 数据的逐键永久替代品。
+- **Worker isolate 内存缓存**：每个 Worker 实例独立保存设置热缓存并合并并发回源请求；`xboard-edge` 还用它作为 Queue 统计和流量排行的第一级短缓存。实例回收后缓存自然消失，不能保存权威数据。
+- **Cloudflare Cache API**：保存后台 Queue 统计 60 秒、流量排行 30 秒等可重新计算的短时结果，跨请求复用但不增加 KV 写入；未命中或过期时直接重新查询 D1。
 - **NodeHub**：维护节点或机器的 WebSocket 连接及配置、用户热同步。
 - **StatusHub**：保存高频在线状态、设备状态、机器心跳和滚动 24 小时负载采样；运行状态最多每 60 秒持久化一次，设备成员最多每 240 秒持久化一次，负载历史每 300 秒采样一次。
 - **Queues**：把高频流量、邮件和 Telegram 任务与 HTTP 请求解耦；连续失败超过重试上限后进入对应 DLQ。
