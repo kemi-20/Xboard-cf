@@ -714,6 +714,7 @@ test("Stash transport and Trojan Reality fields match protocol-specific upstream
 
   const vmessH2 = __test.clashProxy(user, { type: "vmess", name: "VMess H2", host: "node.example", port: 443, protocol_settings: { network: "h2", network_settings: { path: "/h2", host: "cdn.example" } } }, "stash");
   assert.equal(vmessH2.network, "h2");
+  assert.equal(vmessH2.tls, true);
   assert.equal(vmessH2["h2-opts"].path, "/h2");
 
   const vlessXhttp = __test.clashProxy(user, { type: "vless", name: "VLESS XHTTP", host: "node.example", port: 443, protocol_settings: { network: "xhttp", network_settings: { path: "/x" } } }, "stash");
@@ -723,6 +724,41 @@ test("Stash transport and Trojan Reality fields match protocol-specific upstream
   const trojanH2 = __test.clashProxy(user, { type: "trojan", name: "Trojan H2", host: "node.example", port: 443, protocol_settings: { network: "h2", tls_settings: {}, network_settings: { path: "/h2" } } }, "stash");
   assert.equal(trojanH2.network, "tcp");
   assert.equal(trojanH2["h2-opts"], undefined);
+});
+
+test("QuantumultX transport host overrides TLS SNI without duplicate host keys", () => {
+  const line = __test.quantumultXLine({ uuid: "uuid" }, {
+    type: "vmess", name: "VMess WS", host: "node.example", port: 443,
+    protocol_settings: {
+      network: "ws", tls: 1,
+      network_settings: { path: "/ws", headers: { Host: "edge.example" } },
+      tls_settings: { server_name: "sni.example", allow_insecure: false }
+    }
+  });
+  assert.equal((line.match(/obfs-host=/g) || []).length, 1);
+  assert.match(line, /obfs-host=edge\.example/);
+  assert.doesNotMatch(line, /obfs-host=sni\.example/);
+
+  const trojan = __test.quantumultXLine({ uuid: "uuid" }, {
+    type: "trojan", name: "Trojan WS", host: "node.example", port: 443,
+    protocol_settings: {
+      network: "ws", tls: 1,
+      network_settings: { path: "/ws", headers: { Host: "edge.example" } },
+      tls_settings: { server_name: "sni.example", allow_insecure: false }
+    }
+  });
+  assert.match(trojan, /obfs-host=edge\.example/);
+  assert.doesNotMatch(trojan, /tls-host=/);
+});
+
+test("subscription banners preserve upstream overdraft and Asia Shanghai expiry", () => {
+  const expiredAt = Date.UTC(2026, 6, 15, 16, 30, 0) / 1000;
+  const user = { uuid: "uuid", u: 6 * 1073741824, d: 4 * 1073741824, transfer_enable: 8 * 1073741824, expired_at: expiredAt };
+  const banner = __test.textTemplateProfile("surge", "$subscribe_info", { app_name: "XBoard" }, user, [], new Request("https://sub.example/s/token"), "token");
+  assert.match(banner, /剩余流量：-2GB/);
+  assert.match(banner, /到期时间：2026-07-16 00:30:00/);
+  const shadowrocket = Buffer.from(__test.output("shadowrocket", {}, {}, user, [], new Request("https://sub.example/s/token"), "token"), "base64").toString("utf8");
+  assert.match(shadowrocket, /Expires:2026-07-16/);
 });
 
 test("subscription validation and generation use a first-unconstrained D1 session", () => {

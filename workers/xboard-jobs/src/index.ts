@@ -225,6 +225,19 @@ async function recordFailure(env: Env, event: any, error: unknown) {
     .bind(event.event_id, event.type || "unknown", JSON.stringify(event), String((error as any)?.message || error), ts, ts).run();
 }
 
+type EventClaim =
+  | { state: "claimed"; token: string }
+  | { state: "done" }
+  | { state: "busy"; retryAfter: number };
+
+class EventClaimBusyError extends Error {
+  readonly retryAfter: number;
+  constructor(retryAfter: number) {
+    super("Queue event is already being processed");
+    this.retryAfter = retryAfter;
+  }
+}
+
 async function claimEvent(env: Env, eventId: string, type: string, payload: unknown) {
   const ts = now();
   const claim = `processing:${crypto.randomUUID()}`;
@@ -235,7 +248,18 @@ async function claimEvent(env: Env, eventId: string, type: string, payload: unkn
     WHERE v2_job_logs.status = 'failed'
       OR (v2_job_logs.status LIKE 'processing:%' AND v2_job_logs.updated_at < ?)`)
     .bind(eventId, type, claim, JSON.stringify(payload), ts, ts, ts - 120).run();
-  return Number((result.meta as any)?.changes || 0) === 1 ? claim : null;
+  if (Number((result.meta as any)?.changes || 0) === 1) return { state: "claimed", token: claim } satisfies EventClaim;
+  const existing = await env.XBOARD_DB.prepare("SELECT status, updated_at FROM v2_job_logs WHERE event_id = ?")
+    .bind(eventId).first<{ status: string; updated_at: number }>();
+  if (existing?.status === "done") return { state: "done" } satisfies EventClaim;
+  const age = Math.max(0, ts - Number(existing?.updated_at || ts));
+  return { state: "busy", retryAfter: Math.max(1, 121 - age) } satisfies EventClaim;
+}
+
+async function claimedToken(env: Env, eventId: string, type: string, payload: unknown) {
+  const result = await claimEvent(env, eventId, type, payload);
+  if (result.state === "busy") throw new EventClaimBusyError(result.retryAfter);
+  return result.state === "claimed" ? result.token : null;
 }
 
 async function failClaim(env: Env, eventId: string, claim: string, error: unknown) {
@@ -254,7 +278,7 @@ async function completeClaim(env: Env, eventId: string, claim: string, statement
 }
 
 async function runOnce(env: Env, eventId: string, type: string, payload: unknown, statements: D1PreparedStatement[]) {
-  const claim = await claimEvent(env, eventId, type, payload);
+  const claim = await claimedToken(env, eventId, type, payload);
   if (!claim) return null;
   try {
     return await completeClaim(env, eventId, claim, statements);
@@ -421,7 +445,7 @@ async function traffic(env: Env, event: any) {
 }
 
 async function mail(env: Env, event: any) {
-  const claim = await claimEvent(env, event.event_id, "mail", event);
+  const claim = await claimedToken(env, event.event_id, "mail", event);
   if (!claim) return;
   let payload = event.payload || {};
   try {
@@ -486,7 +510,7 @@ async function mail(env: Env, event: any) {
 }
 
 async function telegram(env: Env, event: any) {
-  const claim = await claimEvent(env, event.event_id, "telegram", event);
+  const claim = await claimedToken(env, event.event_id, "telegram", event);
   if (!claim) return;
   try {
   const payload = event.payload || {};
@@ -538,7 +562,7 @@ async function handle(env: Env, event: any) {
   else throw new Error(`Unsupported queue event type: ${String(event.type || "unknown")}`);
 }
 
-export const __test = { dayStart, render, claimEvent, completeClaim, failClaim, ensureTrafficDedupSchema, stableBatchId, aggregateTrafficEvents, splitTrafficEvents, trafficEventGroups, traffic, trafficBatch, trafficCandidates };
+export const __test = { dayStart, render, claimEvent, claimedToken, EventClaimBusyError, completeClaim, failClaim, ensureTrafficDedupSchema, stableBatchId, aggregateTrafficEvents, splitTrafficEvents, trafficEventGroups, traffic, trafficBatch, trafficCandidates };
 
 export default {
   async fetch(request: Request, env: Env) {
@@ -585,6 +609,10 @@ export default {
         await handle(env, message.body);
         message.ack();
       } catch (error) {
+        if (error instanceof EventClaimBusyError) {
+          message.retry({ delaySeconds: error.retryAfter });
+          continue;
+        }
         try { await recordFailure(env, message.body, error); }
         catch (logError) { console.error("Failed to record queue error", { error, logError }); }
         message.retry();

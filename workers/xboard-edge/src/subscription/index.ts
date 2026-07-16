@@ -532,7 +532,7 @@ function applyClashTransport(base: Config, ps: any, server: any, client: Client,
   if (network === "tcp" && ns.header?.type === "http") Object.assign(base, { network: "http", "http-opts": { headers: ns.header?.request?.headers, path: ns.header?.request?.path || ["/"] } });
   else if (network === "ws") Object.assign(base, { network: "ws", "ws-opts": { path: ns.path, headers: ns.headers?.Host ? { Host: ns.headers.Host } : undefined } });
   else if (network === "grpc") Object.assign(base, { network: "grpc", "grpc-opts": { "grpc-service-name": ns.serviceName } });
-  else if (network === "h2") Object.assign(base, { network: "h2", "h2-opts": { path: ns.path, host: Array.isArray(ns.host) ? ns.host : ns.host ? [ns.host] : undefined } });
+  else if (network === "h2") Object.assign(base, { network: "h2", tls: client === "stash" && protocol === "vmess" ? true : base.tls, "h2-opts": { path: ns.path, host: Array.isArray(ns.host) ? ns.host : ns.host ? [ns.host] : undefined } });
   else if (network === "httpupgrade") Object.assign(base, { network: "ws", "ws-opts": { "v2ray-http-upgrade": true, path: ns.path, headers: ns.host ? { Host: ns.host } : undefined } });
   else if (network === "xhttp") Object.assign(base, { network: "xhttp", "xhttp-opts": { path: ns.path, host: ns.host, mode: ns.mode } });
   else base.network = "tcp";
@@ -915,23 +915,26 @@ function quantumultXLine(user: any, server: any) {
     else parts.push(`password=${password}`);
     const network = ps.network || "tcp";
     const tlsMode = Number(ps.tls || 0);
+    const nativeTls = ["trojan", "socks", "http"].includes(server.type);
+    let transportHost: unknown;
     if (network === "ws") {
       parts.push(tlsMode ? "obfs=wss" : "obfs=ws");
       if (ps.network_settings?.path) parts.push(`obfs-uri=${ps.network_settings.path}`);
-      if (ps.network_settings?.headers?.Host) parts.push(`obfs-host=${ps.network_settings.headers.Host}`);
+      transportHost = ps.network_settings?.headers?.Host;
     } else if (network === "tcp" && ps.network_settings?.header?.type === "http") {
       parts.push("obfs=http", `obfs-uri=${ps.network_settings?.header?.request?.path?.[0] || "/"}`);
       const host = ps.network_settings?.header?.request?.headers?.Host;
-      if (host) parts.push(`obfs-host=${Array.isArray(host) ? host[0] : host}`);
-    } else if (tlsMode) parts.push(["trojan", "socks", "http"].includes(server.type) ? "over-tls=true" : "obfs=over-tls");
+      transportHost = Array.isArray(host) ? host[0] : host;
+    } else if (tlsMode) parts.push(nativeTls ? "over-tls=true" : "obfs=over-tls");
     if (tlsMode === 2) {
       if (ps.reality_settings?.public_key) parts.push(`reality-base64-pubkey=${ps.reality_settings.public_key}`);
       if (ps.reality_settings?.short_id) parts.push(`reality-hex-shortid=${ps.reality_settings.short_id}`);
-      if (ps.reality_settings?.server_name) parts.push(`${["trojan", "socks", "http"].includes(server.type) ? "tls-host" : "obfs-host"}=${ps.reality_settings.server_name}`);
+      transportHost ??= ps.reality_settings?.server_name;
     } else if (tlsMode === 1) {
       parts.push(`tls-verification=${ps.tls_settings?.allow_insecure ? "false" : "true"}`);
-      if (ps.tls_settings?.server_name) parts.push(`${["trojan", "socks", "http"].includes(server.type) ? "tls-host" : "obfs-host"}=${ps.tls_settings.server_name}`);
+      transportHost ??= ps.tls_settings?.server_name;
     }
+    if (transportHost) parts.push(`${nativeTls && network !== "ws" ? "tls-host" : "obfs-host"}=${transportHost}`);
     if (server.type === "vless" && ps.flow) parts.push(`vless-flow=${ps.flow}`);
     return [...parts, ...common].filter(Boolean).join(",") + "\r\n";
   }
@@ -1014,8 +1017,13 @@ function subscriptionUrl(request: Request, config: Config, token: string, reques
 function subscribeInfo(config: Config, user: any) {
   const gb = (value: number) => Math.round(value / 1073741824 * 100) / 100;
   const upload = gb(Number(user.u || 0)), download = gb(Number(user.d || 0)), total = gb(Number(user.transfer_enable || 0));
-  const expire = user.expired_at ? new Date(Number(user.expired_at) * 1000).toISOString().replace("T", " ").slice(0, 19) : "长期有效";
-  return `title=${config.app_name || "XBoard"}订阅信息, content=上传流量：${upload}GB\\n下载流量：${download}GB\\n剩余流量：${Math.max(0, total - upload - download)}GB\\n套餐流量：${total}GB\\n到期时间：${expire}`;
+  const expire = user.expired_at ? shanghaiDate(Number(user.expired_at), true) : "长期有效";
+  return `title=${config.app_name || "XBoard"}订阅信息, content=上传流量：${upload}GB\\n下载流量：${download}GB\\n剩余流量：${total - upload - download}GB\\n套餐流量：${total}GB\\n到期时间：${expire}`;
+}
+
+function shanghaiDate(timestamp: number, withTime = false) {
+  const value = new Date((timestamp + 8 * 3600) * 1000).toISOString();
+  return withTime ? value.replace("T", " ").slice(0, 19) : value.slice(0, 10);
 }
 
 function textTemplateProfile(client: "surge" | "surfboard", template: string, config: Config, user: any, servers: any[], request: Request, token: string) {
@@ -1067,7 +1075,7 @@ function output(client: Client, config: Config, templateMap: Config, user: any, 
   if (client === "shadowsocks") return shadowsocksProfile(user, servers);
   if (client === "surge" || client === "surfboard") return textTemplateProfile(client, String(templateMap[client] || ""), config, user, servers, request, token);
   if (client === "shadowrocket") {
-    const status = `STATUS=🚀↑:${Math.round(Number(user.u || 0) / 1073741824 * 100) / 100}GB,↓:${Math.round(Number(user.d || 0) / 1073741824 * 100) / 100}GB,TOT:${Math.round(Number(user.transfer_enable || 0) / 1073741824 * 100) / 100}GB💡Expires:${user.expired_at === null ? "N/A" : new Date(Number(user.expired_at) * 1000).toISOString().slice(0, 10)}\r\n`;
+    const status = `STATUS=🚀↑:${Math.round(Number(user.u || 0) / 1073741824 * 100) / 100}GB,↓:${Math.round(Number(user.d || 0) / 1073741824 * 100) / 100}GB,TOT:${Math.round(Number(user.transfer_enable || 0) / 1073741824 * 100) / 100}GB💡Expires:${user.expired_at === null ? "N/A" : shanghaiDate(Number(user.expired_at))}\r\n`;
     return b64(status + servers.map(server => shadowrocketLine(user, server)).join(""));
   }
   if (client === "loon") return servers.map(server => loonLine(user, server)).join("");

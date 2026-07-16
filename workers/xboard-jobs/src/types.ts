@@ -18,7 +18,7 @@ export interface D1Database {
 }
 export interface Queue<T = unknown> { send(message: T): Promise<void>; sendBatch(messages: { body: T }[]): Promise<void>; }
 export interface Fetcher { fetch(input: RequestInfo, init?: RequestInit): Promise<Response>; }
-export interface Message<T = unknown> { body: T; ack(): void; retry(): void; }
+export interface Message<T = unknown> { body: T; ack(): void; retry(options?: { delaySeconds?: number }): void; }
 export interface MessageBatch<T = unknown> { messages: Message<T>[]; queue: string; }
 export interface DurableObjectStorage {
   get<T = unknown>(key: string): Promise<T | undefined>;

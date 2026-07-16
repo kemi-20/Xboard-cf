@@ -375,6 +375,12 @@ test("passport, guest and client routes are separated from authenticated user ro
   assert.doesNotMatch(source, /startsWith\("\/api\/v1"\).*return userApi/);
 });
 
+test("guest email whitelist suffixes preserve the upstream array contract", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /function emailSuffixes\(value: unknown\)/);
+  assert.match(source, /email_whitelist_suffix: pickSetting\(all, "email_whitelist_enable", 0\) \? emailSuffixes/);
+});
+
 test("route fetch returns match rules as an array", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /function routeMatchArray\(value: unknown\): string\[\]/);

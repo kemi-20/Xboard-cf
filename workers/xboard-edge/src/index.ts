@@ -771,6 +771,10 @@ function pickSetting(all: Record<string, any>, key: string, fallback: any = "") 
   return all[key] ?? fallback;
 }
 
+function emailSuffixes(value: unknown) {
+  return Array.isArray(value) ? value : String(value ?? "").split(",");
+}
+
 function firstNonEmpty(...values: unknown[]) {
   for (const value of values) {
     if (value !== undefined && value !== null && String(value).trim() !== "") return value;
@@ -1085,7 +1089,7 @@ async function guestApi(request: Request, env: Env, path: string) {
       tos_url: pickSetting(all, "tos_url", ""),
       is_email_verify: Number(Boolean(pickSetting(all, "email_verify", 0))),
       is_invite_force: Number(Boolean(pickSetting(all, "invite_force", 0))),
-      email_whitelist_suffix: pickSetting(all, "email_whitelist_enable", 0) ? pickSetting(all, "email_whitelist_suffix", []) : 0,
+      email_whitelist_suffix: pickSetting(all, "email_whitelist_enable", 0) ? emailSuffixes(pickSetting(all, "email_whitelist_suffix", [])) : 0,
       is_captcha: Number(Boolean(pickSetting(all, "captcha_enable", 0))),
       captcha_type: pickSetting(all, "captcha_type", "recaptcha"),
       recaptcha_site_key: pickSetting(all, "recaptcha_site_key", ""),

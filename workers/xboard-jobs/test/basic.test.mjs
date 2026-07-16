@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { __test } from "../src/index.ts";
+import jobsWorker, { __test } from "../src/index.ts";
 import { TrafficStatsHub } from "../src/traffic-stats.ts";
 
 test("xboard-jobs has an entrypoint", () => {
@@ -244,10 +244,15 @@ function jobLogDb() {
   const rows = new Map();
   return {
     rows,
+    withSession() { return this; },
     prepare(sql) {
       let values = [];
       return {
         bind(...next) { values = next; return this; },
+        async first() {
+          if (sql.startsWith("SELECT status, updated_at FROM v2_job_logs")) return rows.get(values[0]) || null;
+          throw new Error(`Unexpected SQL: ${sql}`);
+        },
         async run() {
           if (sql.startsWith("INSERT INTO v2_job_logs")) {
             const [eventId, type, status, payload, createdAt, updatedAt, staleAt] = values;
@@ -284,10 +289,37 @@ test("concurrent duplicate queue deliveries have exactly one claimant", async ()
   const db = jobLogDb();
   const env = { XBOARD_DB: db };
   const claims = await Promise.all(Array.from({ length: 20 }, () => __test.claimEvent(env, "traffic:duplicate", "traffic", {})));
-  assert.equal(claims.filter(Boolean).length, 1);
-  await __test.completeClaim(env, "traffic:duplicate", claims.find(Boolean), []);
+  const claimed = claims.filter(result => result.state === "claimed");
+  assert.equal(claimed.length, 1);
+  assert.equal(claims.filter(result => result.state === "busy").length, 19);
+  await __test.completeClaim(env, "traffic:duplicate", claimed[0].token, []);
   assert.equal(db.rows.get("traffic:duplicate").status, "done");
-  assert.equal(await __test.claimEvent(env, "traffic:duplicate", "traffic", {}), null);
+  assert.deepEqual(await __test.claimEvent(env, "traffic:duplicate", "traffic", {}), { state: "done" });
+});
+
+test("fresh notification claims are delayed instead of acknowledged as complete", async () => {
+  const db = jobLogDb();
+  const env = { XBOARD_DB: db };
+  const first = await __test.claimEvent(env, "mail:busy", "mail", {});
+  assert.equal(first.state, "claimed");
+  const second = await __test.claimEvent(env, "mail:busy", "mail", {});
+  assert.equal(second.state, "busy");
+  assert.ok(second.retryAfter >= 120 && second.retryAfter <= 121);
+  await assert.rejects(() => __test.claimedToken(env, "mail:busy", "mail", {}), error =>
+    error instanceof __test.EventClaimBusyError && error.retryAfter >= 120
+  );
+  let acknowledged = false;
+  let retryOptions = null;
+  await jobsWorker.queue({
+    queue: "notification-events",
+    messages: [{
+      body: { event_id: "mail:busy", type: "mail", payload: {} },
+      ack() { acknowledged = true; },
+      retry(options) { retryOptions = options; }
+    }]
+  }, env);
+  assert.equal(acknowledged, false);
+  assert.ok(retryOptions.delaySeconds >= 120 && retryOptions.delaySeconds <= 121);
 });
 
 test("settings read D1 when KV fails after the memory cache is warm", async () => {
