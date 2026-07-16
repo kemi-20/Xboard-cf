@@ -3,6 +3,9 @@ main = "src/index.ts"
 compatibility_date = "2026-06-26"
 account_id = "CLOUDFLARE_ACCOUNT_ID"
 
+[cache]
+enabled = true
+
 [[d1_databases]]
 binding = "XBOARD_DB"
 database_name = "xboard-db"
