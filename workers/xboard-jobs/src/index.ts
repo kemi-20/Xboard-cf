@@ -203,6 +203,27 @@ function trafficEventSize(event: any) {
   return Math.max(1, rows.length);
 }
 
+function splitTrafficEvents(events: any[], maxRows = 250) {
+  const normalized: any[] = [];
+  for (const event of events) {
+    const payload = event?.payload;
+    const rows = Array.isArray(payload) ? payload : Array.isArray(payload?.data) ? payload.data : null;
+    if (!rows || rows.length <= maxRows) {
+      normalized.push(event);
+      continue;
+    }
+    for (let offset = 0, chunk = 0; offset < rows.length; offset += maxRows, chunk++) {
+      normalized.push({
+        ...event,
+        event_id: `${String(event.event_id)}:chunk:${chunk}`,
+        parent_event_id: String(event.event_id),
+        payload: rows.slice(offset, offset + maxRows)
+      });
+    }
+  }
+  return normalized;
+}
+
 function trafficEventGroups(events: any[], maxRows = 250, maxEvents = 25) {
   const groups: any[][] = [];
   let current: any[] = [];
@@ -387,7 +408,7 @@ async function handle(env: Env, event: any) {
   else throw new Error(`Unsupported queue event type: ${String(event.type || "unknown")}`);
 }
 
-export const __test = { dayStart, render, claimEvent, completeClaim, failClaim, ensureTrafficDedupSchema, aggregateTrafficEvents, trafficEventGroups, traffic, trafficBatch, trafficCandidates };
+export const __test = { dayStart, render, claimEvent, completeClaim, failClaim, ensureTrafficDedupSchema, aggregateTrafficEvents, splitTrafficEvents, trafficEventGroups, traffic, trafficBatch, trafficCandidates };
 
 export default {
   async fetch() { return ok({ service: "xboard-jobs", time: now() }); },
@@ -395,7 +416,7 @@ export default {
     const trafficMessages = batch.messages.filter(message => (message.body as any)?.type === "traffic");
     if (trafficMessages.length) {
       try {
-        for (const events of trafficEventGroups(trafficMessages.map(message => message.body as any))) {
+        for (const events of trafficEventGroups(splitTrafficEvents(trafficMessages.map(message => message.body as any)))) {
           await trafficBatch(env, events);
         }
         for (const message of trafficMessages) message.ack();

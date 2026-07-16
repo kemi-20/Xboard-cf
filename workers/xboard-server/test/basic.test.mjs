@@ -129,17 +129,22 @@ test("StatusHub coalesces heartbeat storage while preserving device expiry and h
     }));
     await deviceReport(1000, { 7: { "1.1.1.1": 1000, "2.2.2.2": 1000 } });
     await deviceReport(1060, { 7: { "1.1.1.1": 1060 } });
-    assert.equal(storage.writes.filter(key => key === "devices:1").length, 1);
+    assert.equal(storage.writes.filter(key => key === "devices:1").length, 2);
     let listed = await hub.fetch(new Request("https://status-hub.internal/devices/list", {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ user_ids: [7], timestamp: 1060 })
     }));
-    assert.deepEqual((await listed.json()).data.users, { 7: ["1.1.1.1", "2.2.2.2"] });
-    await deviceReport(1301, { 7: { "1.1.1.1": 1301 } });
-    assert.equal(storage.writes.filter(key => key === "devices:1").length, 2);
-    listed = await hub.fetch(new Request("https://status-hub.internal/devices/list", {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ user_ids: [7], timestamp: 1301 })
-    }));
     assert.deepEqual((await listed.json()).data.users, { 7: ["1.1.1.1"] });
+    await deviceReport(1100, { 8: { "3.3.3.3": 1100 } });
+    assert.equal(storage.writes.filter(key => key === "devices:1").length, 3);
+    listed = await hub.fetch(new Request("https://status-hub.internal/devices/list", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ user_ids: [7, 8], timestamp: 1100 })
+    }));
+    assert.deepEqual((await listed.json()).data.users, { 7: ["1.1.1.1"], 8: ["3.3.3.3"] });
+    await deviceReport(1120, { 7: {} });
+    listed = await hub.fetch(new Request("https://status-hub.internal/devices/list", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ user_ids: [7, 8], timestamp: 1120 })
+    }));
+    assert.deepEqual((await listed.json()).data.users, { 8: ["3.3.3.3"] });
 
     const machineReport = () => hub.fetch(new Request("https://status-hub.internal/report", {
       method: "POST", headers: { "content-type": "application/json" },
@@ -255,9 +260,9 @@ test("websocket device state follows the official per-IP contract", () => {
   assert.match(source, /Internal sync token is not configured/);
   assert.match(source, /event === "report\.devices"[\s\S]*socket\.send\(wsMessage\("sync\.devices"/);
   assert.match(source, /Number\(seenAt \|\| 0\) > timestamp - 300/);
-  assert.match(source, /aggregateDevices\(env, users, true\)/);
-  assert.match(source, /enqueueTraffic\(env, node, traffic, true, raw\.length\)/);
-  assert.match(source, /const nonEmptyObject =/);
+  assert.match(source, /aggregateDevices\(env, users\)/);
+  assert.match(source, /enqueueTraffic\(env, node, traffic\)/);
+  assert.match(source, /const nonEmptyArrayLike =/);
   assert.match(source, /catch \{ return false; \}/);
   assert.match(source, /catch \{ return \{\}; \}/);
   assert.match(source, /offset < ids\.length; offset \+= 100/);

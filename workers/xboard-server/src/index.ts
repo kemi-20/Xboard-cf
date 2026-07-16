@@ -219,8 +219,9 @@ function currentRate(node: Row) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-async function enqueueTraffic(env: Env, node: Row, raw: unknown, reportRuntime = true, onlineCount?: number) {
+async function enqueueTraffic(env: Env, node: Row, raw: unknown, reportRuntime = true) {
   const payload = parseTraffic(raw);
+  if (!payload.length) return 0;
   const ts = now();
   const rate = currentRate(node);
   const billable = billableTraffic(payload);
@@ -239,9 +240,10 @@ async function enqueueTraffic(env: Env, node: Row, raw: unknown, reportRuntime =
     await reportStatus(env, "node", Number(node.id), {
       machine_id: Number(node.machine_id || 0) || null,
       last_push_at: ts,
-      online: onlineCount ?? payload.length
+      online: payload.length
     });
   }
+  return payload.length;
 }
 
 function normalizeDeviceIp(value: unknown) {
@@ -294,8 +296,10 @@ async function aggregateDevices(env: Env, users: Row[], limitedOnly = false) {
 }
 
 async function aggregateDeviceCounts(env: Env, users: Row[]) {
-  const devices = await aggregateDevices(env, users, true);
-  return Object.fromEntries(Object.entries(devices).map(([userId, ips]) => [userId, Array.isArray(ips) ? ips.length : 0]));
+  const devices = await aggregateDevices(env, users);
+  return Object.fromEntries(Object.entries(devices)
+    .map(([userId, ips]) => [userId, Array.isArray(ips) ? ips.length : 0])
+    .filter(([, count]) => Number(count) > 0));
 }
 
 async function clearNodeDevices(env: Env, nodeId: number) {
@@ -411,7 +415,7 @@ async function handleTidalab(request: Request, env: Env, family: string, action:
       const raw = Array.isArray(auth.input.__raw) ? auth.input.__raw : [];
       const traffic: Row = {};
       for (const item of raw as any[]) if (item?.user_id !== undefined) traffic[String(item.user_id)] = [item.u, item.d];
-      await enqueueTraffic(env, node, traffic, true, raw.length);
+      await enqueueTraffic(env, node, traffic);
       return json({ ret: 1, msg: "ok" });
     }
   }
@@ -427,7 +431,7 @@ async function handleTidalab(request: Request, env: Env, family: string, action:
       const raw = Array.isArray(auth.input.__raw) ? auth.input.__raw : [];
       const traffic: Row = {};
       for (const item of raw as any[]) if (item?.user_id !== undefined) traffic[String(item.user_id)] = [item.u, item.d];
-      await enqueueTraffic(env, node, traffic, true, raw.length);
+      await enqueueTraffic(env, node, traffic);
       return json({ ret: 1, msg: "ok" });
     }
     if (action === "config") {
@@ -720,7 +724,11 @@ export class StatusHub {
       const previous = this.devices.get(nodeId) || {};
       const next: Row = {};
       for (const [userId, value] of Object.entries(previous)) next[userId] = { ...(value as Row) };
-      for (const [userId, value] of Object.entries(input.devices)) next[userId] = { ...(next[userId] || {}), ...(value as Row) };
+      for (const [userId, value] of Object.entries(input.devices)) {
+        const reported = value && typeof value === "object" && !Array.isArray(value) ? value as Row : {};
+        if (Object.keys(reported).length) next[userId] = { ...reported };
+        else delete next[userId];
+      }
       for (const [userId, value] of Object.entries(next)) {
         const active = Object.fromEntries(Object.entries(value as Row).filter(([, seenAt]) => Number(seenAt || 0) > timestamp - 300));
         if (Object.keys(active).length) next[userId] = active;
@@ -1030,14 +1038,18 @@ routes.set("POST /api/v2/server/report", async (_request, env, input) => {
   const auth = await authenticateV2(env, input);
   if (auth instanceof Response) return auth;
   const node = auth.node!;
-  const nonEmptyObject = (value: unknown) => Boolean(value && typeof value === "object" && !Array.isArray(value) && Object.keys(value as Row).length);
-  if (nonEmptyObject(input.traffic)) await enqueueTraffic(env, node, input.traffic, false);
-  if (nonEmptyObject(input.alive)) await processAlive(env, Number(node.id), input.alive);
-  const runtime: Row = { machine_id: Number(node.machine_id || 0) || null, last_check_at: now() };
-  if (nonEmptyObject(input.traffic)) runtime.last_push_at = runtime.last_check_at;
-  if (nonEmptyObject(input.online)) runtime.connections = input.online;
-  const load = nonEmptyObject(input.status) ? statusState(input.status) : null;
-  const metricValues = nonEmptyObject(input.metrics) ? metricsState(input.metrics) : null;
+  const nonEmptyArrayLike = (value: unknown) => Boolean(value && typeof value === "object" && Object.keys(value as Row).length);
+  await touchNode(env, node);
+  const trafficCount = nonEmptyArrayLike(input.traffic) ? await enqueueTraffic(env, node, input.traffic, false) : 0;
+  if (nonEmptyArrayLike(input.alive)) await processAlive(env, Number(node.id), input.alive);
+  const runtime: Row = { machine_id: Number(node.machine_id || 0) || null };
+  if (trafficCount > 0) {
+    runtime.last_push_at = now();
+    runtime.online = trafficCount;
+  }
+  if (nonEmptyArrayLike(input.online)) runtime.connections = input.online;
+  const load = nonEmptyArrayLike(input.status) ? statusState(input.status) : null;
+  const metricValues = nonEmptyArrayLike(input.metrics) ? metricsState(input.metrics) : null;
   if (load) runtime.load_status = load;
   if (metricValues) runtime.metrics = metricValues;
   await reportStatus(env, "node", Number(node.id), runtime);

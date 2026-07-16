@@ -190,8 +190,9 @@ async function repairMissingNextResetAt(env: Env, ts: number) {
   const systemMethod = Number(await setting(env, "reset_traffic_method", "1"));
   const result = await env.XBOARD_DB.prepare(`SELECT u.id, u.expired_at, p.reset_traffic_method
     FROM v2_user u JOIN v2_plan p ON p.id = u.plan_id
-    WHERE u.id > ? AND u.next_reset_at IS NULL
-    ORDER BY u.id ASC LIMIT 100`).bind(cursor).all<Record<string, any>>();
+    WHERE u.id > ? AND u.next_reset_at IS NULL AND u.banned = 0
+      AND (u.expired_at IS NULL OR u.expired_at > ?)
+    ORDER BY u.id ASC LIMIT 100`).bind(cursor, ts).all<Record<string, any>>();
   const users = result.results || [];
   const statements: D1PreparedStatement[] = [];
   for (const user of users) {
@@ -400,7 +401,7 @@ async function acquireTaskLock(env: Env, task: string, ts: number) {
     }
   } catch { /* Fall back to D1 so scheduled business tasks remain available. */ }
   const eventId = `schedule:lock:${task}`;
-  const claim = `d1:${crypto.randomUUID()}`;
+  const claim = `running:d1:${crypto.randomUUID()}`;
   const result = await env.XBOARD_DB.prepare(`INSERT INTO v2_job_logs(event_id, type, status, payload, created_at, updated_at)
     VALUES (?, 'schedule', ?, '{}', ?, ?)
     ON CONFLICT(event_id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at

@@ -141,6 +141,7 @@ test("a stale cron owner cannot release its replacement's lock", async () => {
   const env = { XBOARD_DB: db };
   const first = await __test.acquireTaskLock(env, "check:order", 1_000);
   assert.ok(first);
+  assert.equal(await __test.acquireTaskLock(env, "check:order", 1_001), null);
   const replacement = await __test.acquireTaskLock(env, "check:order", 2_801);
   assert.ok(replacement);
   assert.notEqual(replacement, first);
@@ -203,6 +204,8 @@ test("missing next reset timestamps are repaired once in bounded pages", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /system_next_reset_backfill_v1/);
   assert.match(source, /u\.id > \? AND u\.next_reset_at IS NULL/);
+  assert.match(source, /u\.banned = 0/);
+  assert.match(source, /u\.expired_at IS NULL OR u\.expired_at > \?/);
   assert.match(source, /ORDER BY u\.id ASC LIMIT 100/);
   assert.match(source, /value = users\.length < 100 \? "done"/);
 });
