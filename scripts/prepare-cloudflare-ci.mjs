@@ -85,7 +85,7 @@ const queueNames = [
 ];
 for (const queueName of queueNames) await ensureQueue(account.id, queueName);
 
-for (const worker of ["xboard-edge", "xboard-server", "xboard-jobs", "xboard-cron", "xboard-analytics"]) {
+for (const worker of ["xboard-edge", "xboard-server", "xboard-jobs", "xboard-analytics"]) {
   await patchWrangler(worker, account.id, databaseId, kv.id);
 }
 

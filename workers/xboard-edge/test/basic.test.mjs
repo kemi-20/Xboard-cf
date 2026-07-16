@@ -230,8 +230,7 @@ test("worker settings use memory, versioned KV snapshots and D1 fallback", () =>
     "src/db.ts",
     "../xboard-server/src/db.ts",
     "src/subscription/db.ts",
-    "../xboard-jobs/src/db.ts",
-    "../xboard-cron/src/db.ts"
+    "../xboard-jobs/src/db.ts"
   ]) {
     const source = fs.readFileSync(file, "utf8");
     assert.match(source, /const SETTINGS_CACHE_TTL_MS = 300_000/);

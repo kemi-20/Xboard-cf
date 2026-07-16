@@ -1,8 +1,8 @@
 import type { D1Database, D1PreparedStatement, Fetcher, KVNamespace, Queue } from "./types.ts";
-import { json, now, ok } from "./compat.ts";
+import { now } from "./compat.ts";
 import { primaryDatabase, settings as loadSettings } from "./db.ts";
 
-export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; NOTIFICATION_EVENTS: Queue; XBOARD_SERVER: Fetcher; XBOARD_JOBS: Fetcher; }
+export interface CronEnv { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; NOTIFICATION_EVENTS: Queue; XBOARD_SERVER: Fetcher; }
 
 const SHANGHAI_OFFSET = 8 * 3600;
 
@@ -55,20 +55,20 @@ function nextResetAt(user: any, systemMethod: number, from = now()) {
   return null;
 }
 
-async function optionalKvGet(env: Env, key: string) {
+async function optionalKvGet(env: CronEnv, key: string) {
   try { return await env.XBOARD_KV.get(key); } catch { return null; }
 }
 
-async function optionalKvPut(env: Env, key: string, value: string, expirationTtl?: number) {
+async function optionalKvPut(env: CronEnv, key: string, value: string, expirationTtl?: number) {
   try { await env.XBOARD_KV.put(key, value, expirationTtl ? { expirationTtl } : undefined); } catch {}
 }
 
-async function updateScheduleHeartbeat(env: Env, ts: number) {
+async function updateScheduleHeartbeat(env: CronEnv, ts: number) {
   const previous = Number(await optionalKvGet(env, "schedule:last_check_at") || 0);
   if (!previous || ts - previous >= 480) await optionalKvPut(env, "schedule:last_check_at", String(ts), 900);
 }
 
-async function setting(env: Env, name: string, fallback = "") {
+async function setting(env: CronEnv, name: string, fallback = "") {
   const values = await loadSettings(env.XBOARD_DB, env.XBOARD_KV);
   return values[name] ?? fallback;
 }
@@ -79,7 +79,7 @@ function booleanSetting(value: unknown, fallback = false) {
   return value === 1 || value === "1" || String(value).toLowerCase() === "true";
 }
 
-async function sendReminders(env: Env, ts: number, day: number) {
+async function sendReminders(env: CronEnv, ts: number, day: number) {
   const config = await loadSettings(env.XBOARD_DB, env.XBOARD_KV);
   if (!booleanSetting(config.remind_mail_enable)) return;
   let cursor = 0;
@@ -109,7 +109,7 @@ async function sendReminders(env: Env, ts: number, day: number) {
   }
 }
 
-async function checkCommission(env: Env, ts: number) {
+async function checkCommission(env: CronEnv, ts: number) {
   if (booleanSetting(await setting(env, "commission_auto_check_enable", "1"), true)) {
     await env.XBOARD_DB.prepare("UPDATE v2_order SET commission_status = 1 WHERE commission_status = 0 AND invite_user_id IS NOT NULL AND status = 3 AND updated_at <= ?")
       .bind(ts - 3 * 86400).run();
@@ -150,7 +150,7 @@ async function checkCommission(env: Env, ts: number) {
   }
 }
 
-async function resetTraffic(env: Env, ts: number) {
+async function resetTraffic(env: CronEnv, ts: number) {
   const systemMethod = Number(await setting(env, "reset_traffic_method", "1"));
   while (true) {
     const users = await env.XBOARD_DB.prepare(`SELECT u.id, u.u, u.d, u.expired_at, u.next_reset_at, u.reset_count, p.id AS plan_exists, p.reset_traffic_method
@@ -181,7 +181,7 @@ async function resetTraffic(env: Env, ts: number) {
 
 let nextResetBackfillDone = false;
 
-async function repairMissingNextResetAt(env: Env, ts: number) {
+async function repairMissingNextResetAt(env: CronEnv, ts: number) {
   if (nextResetBackfillDone) return;
   const markerName = "system_next_reset_backfill_v1";
   const marker = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = ?").bind(markerName).first<{ value: string }>();
@@ -206,7 +206,7 @@ async function repairMissingNextResetAt(env: Env, ts: number) {
   if (value === "done") nextResetBackfillDone = true;
 }
 
-async function statistics(env: Env, ts: number, day: number) {
+async function statistics(env: CronEnv, ts: number, day: number) {
   const recordDay = day - 86400;
   const markerId = `schedule:statistics:${recordDay}`;
   const marker = await env.XBOARD_DB.prepare("SELECT status FROM v2_job_logs WHERE event_id = ?").bind(markerId).first<{ status: string }>();
@@ -233,13 +233,13 @@ async function statistics(env: Env, ts: number, day: number) {
     .bind(markerId, ts, ts).run();
 }
 
-async function cleanupOnlineStatus(env: Env, ts: number) {
+async function cleanupOnlineStatus(env: CronEnv, ts: number) {
   try {
     await env.XBOARD_DB.prepare("UPDATE v2_user SET online_count = 0 WHERE online_count > 0 AND (last_online_at IS NULL OR last_online_at < ?)").bind(ts - 600).run();
   } catch {}
 }
 
-async function checkTickets(env: Env, ts: number) {
+async function checkTickets(env: CronEnv, ts: number) {
   await env.XBOARD_DB.prepare(`UPDATE v2_ticket SET status = 1, updated_at = ?
     WHERE status = 0 AND reply_status = 1 AND updated_at <= ? AND (last_reply_user_id IS NULL OR last_reply_user_id != user_id)`)
     .bind(ts, ts - 86400).run();
@@ -251,7 +251,7 @@ function addOrderMonths(timestamp: number, months: number) {
   return Math.floor(date.getTime() / 1000) - SHANGHAI_OFFSET;
 }
 
-async function openProcessingOrder(env: Env, order: Record<string, any>, ts: number) {
+async function openProcessingOrder(env: CronEnv, order: Record<string, any>, ts: number) {
   const plan = await env.XBOARD_DB.prepare("SELECT * FROM v2_plan WHERE id = ?").bind(order.plan_id).first<Record<string, any>>();
   const user = await env.XBOARD_DB.prepare("SELECT * FROM v2_user WHERE id = ?").bind(order.user_id).first<Record<string, any>>();
   if (!plan || !user) throw new Error(`Order ${order.trade_no} references a missing user or plan`);
@@ -312,7 +312,7 @@ async function openProcessingOrder(env: Env, order: Record<string, any>, ts: num
   }
 }
 
-async function checkOrders(env: Env, ts: number) {
+async function checkOrders(env: CronEnv, ts: number) {
   while (true) {
     const expired = await env.XBOARD_DB.prepare("SELECT id, user_id, balance_amount FROM v2_order WHERE status = 0 AND created_at <= ? ORDER BY id ASC LIMIT 200")
       .bind(ts - 7200).all<Record<string, any>>();
@@ -345,7 +345,7 @@ async function checkOrders(env: Env, ts: number) {
   }
 }
 
-async function checkTrafficExceeded(env: Env, ts: number) {
+async function checkTrafficExceeded(env: CronEnv, ts: number) {
   const token = await setting(env, "internal_sync_token", await setting(env, "server_token"));
   while (true) {
     const pending = await env.XBOARD_DB.prepare("SELECT u.id, u.banned, u.transfer_enable, u.u, u.d FROM v2_traffic_pending_check p JOIN v2_user u ON u.id = p.user_id ORDER BY p.updated_at ASC LIMIT 1000").all<any>();
@@ -366,7 +366,7 @@ async function checkTrafficExceeded(env: Env, ts: number) {
   }
 }
 
-async function resetLogs(env: Env, ts: number) {
+async function resetLogs(env: CronEnv, ts: number) {
   const monthThreshold = (months: number) => {
     const date = new Date((ts + SHANGHAI_OFFSET) * 1000);
     date.setUTCMonth(date.getUTCMonth() - months);
@@ -382,7 +382,7 @@ async function resetLogs(env: Env, ts: number) {
   ]);
 }
 
-async function acquireTaskLock(env: Env, task: string, ts: number) {
+async function acquireTaskLock(env: CronEnv, task: string, ts: number) {
   const doClaim = `do:${crypto.randomUUID()}`;
   try {
     const token = (await setting(env, "internal_sync_token", "")).trim() || (await setting(env, "server_token", "")).trim();
@@ -408,7 +408,7 @@ async function acquireTaskLock(env: Env, task: string, ts: number) {
   return Number((result.meta as any)?.changes || 0) === 1 ? claim : null;
 }
 
-async function releaseTaskLock(env: Env, task: string, claim: string, ts: number) {
+async function releaseTaskLock(env: CronEnv, task: string, claim: string, ts: number) {
   if (claim.startsWith("do:")) {
     try {
       const token = (await setting(env, "internal_sync_token", "")).trim() || (await setting(env, "server_token", "")).trim();
@@ -439,13 +439,12 @@ function scheduledTasks(ts: number) {
   ];
 }
 
-async function run(env: Env, task = "scheduled") {
+async function run(env: CronEnv, replayOutbox: () => Promise<number>, task = "scheduled") {
   const ts = now();
   await updateScheduleHeartbeat(env, ts);
   if (task === "scheduled" || task === "all") {
     try {
-      const response = await env.XBOARD_JOBS.fetch("https://xboard-jobs.internal/internal/traffic/replay", { method: "POST" });
-      if (!response.ok) throw new Error(`Outbox replay returned ${response.status}`);
+      await replayOutbox();
     } catch (error) {
       console.warn("Traffic statistics Outbox replay deferred", { error: String((error as Error)?.message || error) });
     }
@@ -485,17 +484,9 @@ async function run(env: Env, task = "scheduled") {
   }
 }
 
-export const __test = { dayStart, nextResetAt, addOrderMonths, acquireTaskLock, releaseTaskLock, scheduledTasks, checkTrafficExceeded };
+export const cronTest = { dayStart, nextResetAt, addOrderMonths, acquireTaskLock, releaseTaskLock, scheduledTasks, checkTrafficExceeded };
 
-export default {
-  async fetch(request: Request) {
-    const url = new URL(request.url);
-    if (request.method === "GET" && url.pathname === "/health") {
-      return ok({ service: "xboard-cron", time: now() });
-    }
-    return json({ message: "Not Found" }, 404);
-  },
-  async scheduled(_event: unknown, env: Env) {
-    await run({ ...env, XBOARD_DB: primaryDatabase(env.XBOARD_DB) }, "scheduled");
-  }
-};
+export async function runScheduled<T extends CronEnv>(env: T, replayOutbox: (sessionEnv: T) => Promise<number>) {
+  const sessionEnv = { ...env, XBOARD_DB: primaryDatabase(env.XBOARD_DB) } as T;
+  await run(sessionEnv, () => replayOutbox(sessionEnv), "scheduled");
+}

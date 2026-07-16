@@ -29,6 +29,14 @@ dataset = "xboard_user_traffic"
 binding = "SERVER_TRAFFIC_ANALYTICS"
 dataset = "xboard_server_traffic"
 
+[[queues.producers]]
+binding = "NOTIFICATION_EVENTS"
+queue = "notification-events"
+
+[[services]]
+binding = "XBOARD_SERVER"
+service = "xboard-server"
+
 [[queues.consumers]]
 queue = "traffic-events"
 max_batch_size = 100
@@ -42,3 +50,6 @@ max_batch_size = 10
 max_batch_timeout = 5
 max_retries = 5
 dead_letter_queue = "notification-events-dlq"
+
+[triggers]
+crons = ["* * * * *"]

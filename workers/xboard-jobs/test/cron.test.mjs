@@ -1,32 +1,31 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import cronWorker, { __test } from "../src/index.ts";
+import jobsWorker from "../src/index.ts";
+import { cronTest as __test } from "../src/cron.ts";
 
-test("xboard-cron has an entrypoint", () => {
-  assert.ok(fs.existsSync("src/index.ts"));
-  assert.match(fs.readFileSync("src/index.ts", "utf8"), /export default/);
+test("xboard-jobs owns the scheduled maintenance entrypoint", () => {
+  assert.ok(fs.existsSync("src/cron.ts"));
+  assert.match(fs.readFileSync("src/index.ts", "utf8"), /async scheduled\(_event: unknown, env: Env\)/);
   const wrangler = fs.readFileSync("wrangler.toml", "utf8");
   assert.match(wrangler, /crons = \["\* \* \* \* \*"\]/);
   assert.doesNotMatch(wrangler, /10 0 \* \* \*/);
 });
 
 test("public HTTP requests cannot execute cron maintenance", async () => {
-  const forbiddenEnv = new Proxy({}, {
-    get() { throw new Error("The public HTTP handler accessed a runtime binding"); }
-  });
+  const forbiddenEnv = { XBOARD_DB: { withSession() { return this; } } };
   for (const url of [
     "https://audit.invalid/",
     "https://audit.invalid/?task=all",
     "https://audit.invalid/?task=check:order"
   ]) {
-    const response = await cronWorker.fetch(new Request(url), forbiddenEnv);
-    assert.equal(response.status, 404);
-    assert.deepEqual(await response.json(), { message: "Not Found" });
+    const response = await jobsWorker.fetch(new Request(url), forbiddenEnv);
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).data.service, "xboard-jobs");
   }
-  const health = await cronWorker.fetch(new Request("https://audit.invalid/health"), forbiddenEnv);
+  const health = await jobsWorker.fetch(new Request("https://audit.invalid/health"), forbiddenEnv);
   assert.equal(health.status, 200);
-  assert.equal((await health.json()).data.service, "xboard-cron");
+  assert.equal((await health.json()).data.service, "xboard-jobs");
 });
 
 test("order month arithmetic uses the Asia/Shanghai calendar", () => {
@@ -36,7 +35,7 @@ test("order month arithmetic uses the Asia/Shanghai calendar", () => {
 });
 
 test("migrated boolean settings accept true/false and one/zero strings", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = fs.readFileSync("src/cron.ts", "utf8");
   assert.match(source, /function booleanSetting\(value: unknown, fallback = false\)/);
   assert.match(source, /String\(value\)\.toLowerCase\(\) === "true"/);
   assert.match(source, /booleanSetting\(config\.remind_mail_enable\)/);
@@ -44,7 +43,7 @@ test("migrated boolean settings accept true/false and one/zero strings", () => {
 });
 
 test("scheduled reminders enqueue the official expiry and traffic notifications", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = fs.readFileSync("src/cron.ts", "utf8");
   assert.match(source, /remind_mail_enable/);
   assert.match(source, /remind_expire/);
   assert.match(source, /remind_traffic/);
@@ -57,7 +56,7 @@ test("scheduled reminders enqueue the official expiry and traffic notifications"
 });
 
 test("cron implements the official order, ticket, commission and traffic checks", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = fs.readFileSync("src/cron.ts", "utf8");
   assert.match(source, /check:order/);
   assert.match(source, /check:ticket/);
   assert.match(source, /check:commission/);
@@ -96,7 +95,7 @@ test("cron implements the official order, ticket, commission and traffic checks"
 });
 
 test("order and commission retries cannot credit balances twice", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = fs.readFileSync("src/cron.ts", "utf8");
   assert.match(source, /EXISTS \(SELECT 1 FROM v2_order WHERE id = \? AND commission_status = 1\)/);
   assert.match(source, /SELECT \?, \?, \?, \?, \?, \?, \?, \?, \? WHERE EXISTS/);
   assert.match(source, /balance = COALESCE\(balance, 0\) \+ \?/);
@@ -159,7 +158,7 @@ test("scheduled cron keeps one trigger and one shared minute lock", () => {
   assert.deepEqual(__test.scheduledTasks(hourlyMinute), [
     "check:order", "check:ticket", "check:commission", "check:traffic-exceeded", "reset:traffic", "cleanup:online-status"
   ]);
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = fs.readFileSync("src/cron.ts", "utf8");
   assert.match(source, /acquireTaskLock\(env, "scheduled", ts\)/);
   assert.match(source, /releaseTaskLock\(env, "scheduled", scheduledClaim/);
   assert.match(source, /Scheduled task failed/);
@@ -173,10 +172,11 @@ test("scheduled cron keeps one trigger and one shared minute lock", () => {
 });
 
 test("scheduled maintenance uses one first-primary D1 session", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = fs.readFileSync("src/cron.ts", "utf8");
   const db = fs.readFileSync("src/db.ts", "utf8");
   assert.match(db, /db\.withSession\("first-primary"\)/);
-  assert.match(source, /await run\(\{ \.\.\.env, XBOARD_DB: primaryDatabase\(env\.XBOARD_DB\) \}, "scheduled"\)/);
+  assert.match(source, /const sessionEnv = \{ \.\.\.env, XBOARD_DB: primaryDatabase\(env\.XBOARD_DB\) \}/);
+  assert.match(source, /await run\(sessionEnv, \(\) => replayOutbox\(sessionEnv\), "scheduled"\)/);
   assert.doesNotMatch(source, /withSession\("first-unconstrained"\)/);
 });
 
@@ -210,7 +210,7 @@ test("settings read D1 when KV fails after the memory cache is warm", async () =
 });
 
 test("missing next reset timestamps are repaired once in bounded pages", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = fs.readFileSync("src/cron.ts", "utf8");
   assert.match(source, /system_next_reset_backfill_v1/);
   assert.match(source, /u\.id > \? AND u\.next_reset_at IS NULL/);
   assert.match(source, /u\.banned = 0/);

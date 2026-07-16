@@ -27,7 +27,6 @@ jobs:
             workers/xboard-edge/package-lock.json
             workers/xboard-server/package-lock.json
             workers/xboard-jobs/package-lock.json
-            workers/xboard-cron/package-lock.json
             workers/xboard-analytics/package-lock.json
 
       - name: Validate token
@@ -59,7 +58,7 @@ jobs:
       - name: Install Worker dependencies
         shell: bash
         run: |
-          for worker in xboard-edge xboard-server xboard-jobs xboard-cron xboard-analytics; do
+          for worker in xboard-edge xboard-server xboard-jobs xboard-analytics; do
             npm ci --prefix "workers/$worker"
           done
 
@@ -92,10 +91,6 @@ jobs:
         working-directory: workers/xboard-jobs
         run: npx wrangler deploy
 
-      - name: Deploy xboard-cron
-        working-directory: workers/xboard-cron
-        run: npx wrangler deploy
-
       - name: Deploy xboard-edge
         working-directory: workers/xboard-edge
         run: npx wrangler deploy
@@ -114,7 +109,7 @@ jobs:
             echo
             echo "> Before running the connection steps, install/authorize the [Cloudflare Workers & Pages GitHub App](https://github.com/apps/cloudflare-workers-and-pages) for this repository. Git repository access cannot be granted by a Cloudflare API token; this GitHub security boundary has no supported Wrangler or Cloudflare REST API equivalent."
             echo
-            echo "Use the same repository and branch for all five connections:"
+            echo "Use the same repository and branch for all four connections:"
             echo
             echo "- Repository: \`${GITHUB_REPOSITORY}\`"
             echo "- Production branch: \`${GITHUB_REF_NAME}\`"
@@ -123,9 +118,9 @@ jobs:
             echo
             echo "| Worker | Root directory | Builds settings |"
             echo "| --- | --- | --- |"
-            for worker in xboard-edge xboard-server xboard-jobs xboard-cron xboard-analytics; do
+            for worker in xboard-edge xboard-server xboard-jobs xboard-analytics; do
               echo "| \`$worker\` | \`workers/$worker\` | [Open settings](https://dash.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/workers/services/view/$worker/production/settings/builds) |"
             done
             echo
-            echo "After these five one-time connections, pushes to \`${GITHUB_REF_NAME}\` are built and deployed by Cloudflare Workers Builds. This workflow remains manual and is not the push deployment mechanism."
+            echo "After these four one-time connections, pushes to \`${GITHUB_REF_NAME}\` are built and deployed by Cloudflare Workers Builds. This workflow remains manual and is not the push deployment mechanism."
           } >> "$GITHUB_STEP_SUMMARY"

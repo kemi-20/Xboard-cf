@@ -1,6 +1,7 @@
-import type { AnalyticsEngineDataset, D1Database, D1PreparedStatement, DurableObjectNamespace, KVNamespace, MessageBatch } from "./types.ts";
+import type { AnalyticsEngineDataset, D1Database, D1PreparedStatement, DurableObjectNamespace, Fetcher, KVNamespace, MessageBatch, Queue } from "./types.ts";
 import { now, ok } from "./compat.ts";
 import { primaryDatabase, settings as loadSettings } from "./db.ts";
+import { runScheduled } from "./cron.ts";
 export { TrafficStatsHub } from "./traffic-stats.ts";
 
 export interface Env {
@@ -9,6 +10,8 @@ export interface Env {
   TRAFFIC_STATS_HUB: DurableObjectNamespace;
   USER_TRAFFIC_ANALYTICS: AnalyticsEngineDataset;
   SERVER_TRAFFIC_ANALYTICS: AnalyticsEngineDataset;
+  NOTIFICATION_EVENTS: Queue;
+  XBOARD_SERVER: Fetcher;
   MAILEROO_API_KEY?: string;
   BREVO_API_KEY?: string;
   TELEGRAM_BOT_TOKEN?: string;
@@ -587,5 +590,8 @@ export default {
         message.retry();
       }
     }
+  },
+  async scheduled(_event: unknown, env: Env) {
+    await runScheduled(env, sessionEnv => replayOutbox(sessionEnv, 500));
   }
 };
