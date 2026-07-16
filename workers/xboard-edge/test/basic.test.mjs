@@ -963,6 +963,11 @@ test("admin ticket, coupon and audit handlers preserve upstream behavior", () =>
   assert.match(source, /const ticketFields:/);
   assert.match(source, /const couponFields = new Set/);
   assert.match(source, /return json\(paginated\(\(result\.results \|\| \[\]\)\.map/);
+  assert.match(source, /function canonicalCouponPeriods/);
+  assert.match(source, /limit_period: canonicalCouponPeriods\(row\.limit_period\)/);
+  assert.match(source, /const limitedPeriods = canonicalCouponPeriods\(coupon\.limit_period\)/);
+  assert.equal((source.match(/const limitedPeriods = canonicalCouponPeriods\(coupon\.limit_period\)/g) || []).length, 2);
+  assert.match(source, /return ok\(couponResource\(coupon\)\)/);
   assert.match(source, /route === "\/server\/group\/save"/);
   assert.match(source, /if \(!name\) return fail\("组名不能为空"/);
   assert.match(source, /INSERT INTO v2_admin_audit_log\(admin_id, action, target, metadata, ip, method, uri, request_data/);

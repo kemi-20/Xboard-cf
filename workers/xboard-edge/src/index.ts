@@ -2670,6 +2670,23 @@ function couponValue(input: Record<string, any>, key: string) {
   return ["limit_plan_ids", "limit_period"].includes(key) ? JSON.stringify(parseJsonArray(input[key])) : input[key];
 }
 
+function canonicalCouponPeriods(value: unknown) {
+  return parseJsonArray(value).map(item => {
+    const period = String(item || "");
+    return orderPeriods[period] || period;
+  });
+}
+
+function couponResource(row: Record<string, any>) {
+  const planIds = parseJsonArray(row.limit_plan_ids).map(String);
+  const periods = canonicalCouponPeriods(row.limit_period).map(legacyOrderPeriod);
+  return {
+    ...row,
+    limit_plan_ids: planIds.length ? planIds : null,
+    limit_period: periods.length ? periods : null
+  };
+}
+
 async function adminCoupon(request: Request, env: Env, route: string): Promise<Response | null> {
   if (!route.startsWith("/coupon/")) return null;
   const input = request.method === "POST" ? await body<Record<string, any>>(request.clone()) : {};
@@ -2696,7 +2713,7 @@ async function adminCoupon(request: Request, env: Env, route: string): Promise<R
         value: Number(row.value ?? 0),
         show: !!row.show,
         limit_plan_ids: parseJsonArray(row.limit_plan_ids),
-        limit_period: parseJsonArray(row.limit_period)
+        limit_period: canonicalCouponPeriods(row.limit_period)
       })), total, current, pageSize));
   }
   const id = nullableNumber(input.id);
@@ -4089,17 +4106,17 @@ async function userApi(request: Request, env: Env, path: string) {
     if (!coupon) return fail("优惠券无效", 400, 400);
     const ts = now();
     if (Number(coupon.started_at || 0) > ts || Number(coupon.ended_at || 0) < ts) return fail("优惠券无效", 400, 400);
-    const planId = nullableNumber(input.plan_id); const period = String(input.period || "");
+    const planId = nullableNumber(input.plan_id); const period = normalizeOrderPeriod(input.period);
     const limitedPlans = parseJsonArray(coupon.limit_plan_ids).map(Number);
     if (limitedPlans.length && (!planId || !limitedPlans.includes(planId))) return fail("优惠券不适用于该套餐", 400, 400);
-    const limitedPeriods = parseJsonArray(coupon.limit_period).map(String);
-    if (limitedPeriods.length && (!period || !limitedPeriods.includes(period) && !limitedPeriods.includes(orderPeriods[period]))) return fail("优惠券不适用于该周期", 400, 400);
+    const limitedPeriods = canonicalCouponPeriods(coupon.limit_period);
+    if (limitedPeriods.length && (!period || !limitedPeriods.includes(period))) return fail("优惠券不适用于该周期", 400, 400);
     if (coupon.limit_use !== null && coupon.limit_use !== undefined && Number(coupon.limit_use) <= 0) return fail("优惠券已用完", 400, 400);
     if (Number(coupon.limit_use_with_user || 0) > 0) {
       const used = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_order WHERE coupon_id = ${Number(coupon.id)} AND user_id = ${Number((user as any).id)} AND status NOT IN (0,2)`);
       if (used >= Number(coupon.limit_use_with_user)) return fail("优惠券已达到个人使用次数限制", 400, 400);
     }
-    return ok(coupon);
+    return ok(couponResource(coupon));
   }
   if (route.startsWith("/order/")) {
     const url = new URL(request.url); const input = request.method === "POST" ? await body<Record<string, any>>(request.clone()) : {};
@@ -4177,8 +4194,8 @@ async function userApi(request: Request, env: Env, path: string) {
         if (Number(coupon.started_at || 0) > ts || Number(coupon.ended_at || 0) < ts) return fail("优惠券不在有效期内", 400, 400);
         const limitedPlans = parseJsonArray(coupon.limit_plan_ids).map(Number);
         if (limitedPlans.length && !limitedPlans.includes(planId)) return fail("优惠券不适用于该套餐", 400, 400);
-        const limitedPeriods = parseJsonArray(coupon.limit_period).map(String);
-        if (limitedPeriods.length && !limitedPeriods.includes(period) && !limitedPeriods.includes(legacyPeriod)) return fail("优惠券不适用于该周期", 400, 400);
+        const limitedPeriods = canonicalCouponPeriods(coupon.limit_period);
+        if (limitedPeriods.length && !limitedPeriods.includes(period)) return fail("优惠券不适用于该周期", 400, 400);
         if (coupon.limit_use_with_user !== null) {
           const used = await env.XBOARD_DB.prepare("SELECT COUNT(*) AS count FROM v2_order WHERE coupon_id = ? AND user_id = ? AND status NOT IN (0,2)").bind(coupon.id, userId).first<{ count: number }>();
           if (Number(used?.count || 0) >= Number(coupon.limit_use_with_user)) return fail("优惠券已达到个人使用次数限制", 400, 400);
