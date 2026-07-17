@@ -1,8 +1,8 @@
-import { cachedData } from "../cache";
-import { fail, now, ok } from "../compat";
-import { rows } from "../db";
-import type { StatusSnapshot } from "../internal/status-client";
-import type { D1Database } from "../types";
+import { cachedData } from "../cache.ts";
+import { fail, now, ok } from "../compat.ts";
+import { rows } from "../db.ts";
+import type { StatusSnapshot } from "../internal/status-client.ts";
+import type { D1Database } from "../types.ts";
 
 type ServerEnv = { XBOARD_DB: D1Database };
 
@@ -53,9 +53,14 @@ export async function adminRouteRows<E extends ServerEnv>(env: E, deps: ServerDe
   }, 900);
 }
 
-export function nodeAvailableStatus(lastCheckAt: number | null, lastPushAt: number | null, timestamp = now()) {
-  if (!lastCheckAt || timestamp - 300 >= lastCheckAt) return 0;
-  if (!lastPushAt || timestamp - 300 >= lastPushAt) return 1;
+export function statusTimeout(interval: unknown) {
+  const seconds = Math.max(60, Math.min(3600, Number(interval) || 300));
+  return Math.max(360, Math.ceil(seconds * 1.5), seconds + 60);
+}
+
+export function nodeAvailableStatus(lastCheckAt: number | null, lastPushAt: number | null, timestamp = now(), pullInterval: unknown = 300, pushInterval: unknown = 300) {
+  if (!lastCheckAt || timestamp - statusTimeout(pullInterval) >= lastCheckAt) return 0;
+  if (!lastPushAt || timestamp - statusTimeout(pushInterval) >= lastPushAt) return 1;
   return 2;
 }
 
@@ -68,16 +73,18 @@ export async function adminServerRows<E extends ServerEnv>(env: E, deps: ServerD
   const version = await deps.optionalKvGet(env, "servers_version") || "0";
   const [base, live] = await Promise.all([
     cachedData(`admin-server-base:${version}`, 300, async () => {
-      const [serverResult, machineResult, groupResult] = await Promise.all([
+      const [serverResult, machineResult, groupResult, intervalResult] = await Promise.all([
         env.XBOARD_DB.prepare("SELECT * FROM v2_server ORDER BY sort ASC, id ASC LIMIT 1000").all<Record<string, any>>(),
         env.XBOARD_DB.prepare("SELECT * FROM v2_server_machine ORDER BY id ASC LIMIT 1000").all<Record<string, any>>(),
-        env.XBOARD_DB.prepare("SELECT * FROM v2_server_group ORDER BY id ASC LIMIT 1000").all<Record<string, any>>()
+        env.XBOARD_DB.prepare("SELECT * FROM v2_server_group ORDER BY id ASC LIMIT 1000").all<Record<string, any>>(),
+        env.XBOARD_DB.prepare("SELECT name, value FROM v2_settings WHERE name IN ('server_pull_interval', 'server_push_interval')").all<{ name: string; value: string }>()
       ]);
-      return { servers: serverResult.results || [], machines: machineResult.results || [], groups: groupResult.results || [] };
+      const intervals = Object.fromEntries((intervalResult.results || []).map(row => [row.name, row.value]));
+      return { servers: serverResult.results || [], machines: machineResult.results || [], groups: groupResult.results || [], intervals };
     }, 900),
     deps.statusSnapshot(env)
   ]);
-  const { servers, machines, groups: groupRows } = base;
+  const { servers, machines, groups: groupRows, intervals } = base;
   const groupMap = new Map(groupRows.map(group => [Number(group.id), group]));
   const out = [];
   for (const server of servers) {
@@ -90,12 +97,19 @@ export async function adminServerRows<E extends ServerEnv>(env: E, deps: ServerD
     const disconnectedAt = Number(machineState.disconnected_at || 0);
     const machineDisconnected = machineState.connected === false && disconnectedAt >= reportedAt;
     const machineSeenAt = machine && Number(machine.is_active ?? machine.enabled ?? 1) === 1 && !machineDisconnected ? reportedAt : 0;
-    const machineOnline = machineSeenAt > 0 && now() - 300 < machineSeenAt;
+    const machineOnline = machineSeenAt > 0 && now() - Math.max(statusTimeout(intervals.server_pull_interval), statusTimeout(intervals.server_push_interval)) < machineSeenAt;
     const lastCheckAt = Math.max(Number(nodeState.last_check_at || 0), machineOnline ? machineSeenAt : 0) || null;
     const lastPushAt = Math.max(Number(nodeState.last_push_at || 0), machineOnline ? machineSeenAt : 0) || null;
-    const availableStatus = nodeAvailableStatus(lastCheckAt, lastPushAt);
-    const loadStatus = nodeState.load_status || machineState.load_status || null;
-    const metrics = nodeState.metrics || (loadStatus?.metrics && typeof loadStatus.metrics === "object" ? loadStatus.metrics : null);
+    const availableStatus = nodeAvailableStatus(lastCheckAt, lastPushAt, now(), intervals.server_pull_interval, intervals.server_push_interval);
+    const rawLoadStatus = nodeState.load_status || machineState.load_status || null;
+    const loadStatus = rawLoadStatus && typeof rawLoadStatus === "object" && !Array.isArray(rawLoadStatus)
+      ? rawLoadStatus as Record<string, unknown>
+      : null;
+    const embeddedMetrics = loadStatus?.metrics;
+    const rawMetrics = nodeState.metrics || (embeddedMetrics && typeof embeddedMetrics === "object" && !Array.isArray(embeddedMetrics) ? embeddedMetrics : null);
+    const metrics = rawMetrics && typeof rawMetrics === "object" && !Array.isArray(rawMetrics)
+      ? rawMetrics as Record<string, unknown>
+      : null;
     const groupIds = deps.parseJsonArray(server.group_ids);
     const groups = groupIds.map(id => groupMap.get(Number(id))).filter(Boolean);
     out.push({

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import jobsWorker, { __test } from "../src/index.ts";
+import { cronTest } from "../src/cron.ts";
 import { TrafficStatsHub } from "../src/traffic-stats.ts";
 
 test("xboard-jobs has an entrypoint", () => {
@@ -107,7 +108,7 @@ test("TrafficStatsHub deduplicates a retried batch and updates only involved use
 test("mail templates override fallbacks and provider credentials stay protocol-specific", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.doesNotMatch(source, /if \(payload\.html \|\| payload\.text\) return payload/);
-  assert.match(source, /const subjectTemplate = row \? template\.subject : payload\.subject \|\| template\.subject/);
+  assert.match(source, /const subjectTemplate = payload\.subject_override \|\| \(row \? template\.subject : payload\.subject \|\| template\.subject\)/);
   assert.match(source, /setting\(env, "email_password"\)/);
   assert.doesNotMatch(source, /resend_api_key/);
   assert.match(source, /replace\(\/\[<>\]\/g, ""\)/);
@@ -340,4 +341,66 @@ test("database mail templates use safe variables and preserve text line breaks",
   assert.match(source, /payload\.parse_mode \|\| "Markdown"/);
   assert.match(source, /telegramBody\.parse_mode = parseMode === "markdown" \? "Markdown"/);
   assert.match(source, /escapeHtml\(content\)\.replace/);
+});
+
+test("test mail returns the upstream mail log contract when the provider rejects the request", async () => {
+  const originalFetch = globalThis.fetch;
+  const statements = [];
+  const settings = [
+    { name: "app_name", value: "XBoard" },
+    { name: "app_url", value: "https://example.com" },
+    { name: "email_driver", value: "maileroo" },
+    { name: "email_password", value: "test-key" },
+    { name: "email_from_address", value: "sender@example.com" },
+    { name: "email_username", value: "XBoard" }
+  ];
+  const db = {
+    withSession() { return this; },
+    prepare(sql) {
+      let values = [];
+      const statement = {
+        bind(...input) { values = input; return this; },
+        async all() { return { results: sql.includes("FROM v2_settings") ? settings : [] }; },
+        async first() {
+          if (sql.includes("FROM v2_mail_templates")) return { subject: "{{name}} notice", content: "{{content}}\n{{url}}" };
+          return null;
+        },
+        async run() { statements.push({ sql, values }); return { success: true, meta: { changes: 1 } }; }
+      };
+      return statement;
+    },
+    async batch(batch) { return Promise.all(batch.map(statement => statement.run())); }
+  };
+  globalThis.fetch = async () => new Response("provider unavailable", { status: 503 });
+  try {
+    const response = await jobsWorker.fetch(new Request("https://jobs.internal/internal/mail/test", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-xboard-internal-token": "internal-secret" },
+      body: JSON.stringify({ email: "admin@example.com" })
+    }), { XBOARD_DB: db, INTERNAL_SYNC_TOKEN: "internal-secret" });
+    assert.equal(response.status, 200);
+    const payload = await response.json();
+    assert.equal(payload.data.email, "admin@example.com");
+    assert.equal(payload.data.subject, "This is xboard test email");
+    assert.equal(payload.data.template_name, "db:notify");
+    assert.match(payload.data.error, /Maileroo 503/);
+    assert.ok(statements.some(item => item.sql.includes("INSERT INTO v2_mail_log")));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("online cleanup failures are visible without writing a database job log", async () => {
+  const originalWarn = console.warn;
+  const warnings = [];
+  console.warn = (...args) => warnings.push(args);
+  try {
+    await cronTest.cleanupOnlineStatus({
+      XBOARD_DB: { prepare() { return { bind() { return this; }, async run() { throw new Error("D1 unavailable"); } }; } }
+    }, Math.floor(Date.now() / 1000));
+    assert.equal(warnings.length, 1);
+    assert.match(String(warnings[0][0]), /online status/i);
+  } finally {
+    console.warn = originalWarn;
+  }
 });

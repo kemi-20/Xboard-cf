@@ -11,6 +11,9 @@ const edgeSource = () => [
   "src/admin/servers.ts",
   "src/admin/plans.ts",
   "src/admin/statistics.ts",
+  "src/internal/auth.ts",
+  "src/internal/jobs-client.ts",
+  "src/internal/sync-client.ts",
   "src/internal/status-client.ts",
   "src/user/orders.ts",
   "src/user/tickets.ts",
@@ -243,7 +246,7 @@ test("runtime status bypasses platform caches while retaining a short Edge snaps
   assert.match(source, /"cache-control": "no-store, no-cache, must-revalidate"/);
   assert.match(source, /statusHubRequest\(env, loadToken, "snapshot", \{ method: "POST" \}\)/);
   assert.match(source, /statusHubRequest\(env, loadToken, `history\?\$\{params\}`, \{ method: "POST" \}\)/);
-  assert.match(source, /cachedData\(`status-snapshot:\$\{statusSnapshotVersion\}`, 10/);
+  assert.match(source, /cachedData\(`status-snapshot:v2:\$\{statusSnapshotVersion\}`, 10/);
 });
 
 test("machine saves invalidate versioned machine and server list caches", () => {
@@ -348,9 +351,9 @@ test("missing settings version bypasses stale version-zero snapshots in every wo
 test("settings saves invalidate the xboard-server instance cache", () => {
   const source = edgeSource();
   const migration = fs.readFileSync("src/migration.ts", "utf8");
-  assert.match(source, /async function invalidateServerSettings\(env: Env\)/);
+  assert.match(source, /async function invalidateServerSettings\(env: SyncEnv\)/);
   assert.match(source, /internal\/settings\/invalidate/);
-  assert.match(source, /invalidateSettingsCache\(\);\s*await invalidateServerSettings\(env\)/);
+  assert.match(source, /invalidateSettingsCache\(\);[\s\S]*invalidateInternalTokenCache\(\);[\s\S]*await invalidateServerSettings\(env\)/);
   assert.match(migration, /async function resetServerRuntime\(env: MigrationEnv\)/);
   assert.match(migration, /internal\/settings\/invalidate/);
   assert.match(migration, /await resetServerRuntime\(env\)/);
@@ -500,7 +503,7 @@ test("route fetch returns match rules as an array", () => {
 test("node list exposes upstream-compatible health and load fields", () => {
   const source = edgeSource();
   assert.match(source, /function nodeAvailableStatus\(lastCheckAt: number \| null, lastPushAt: number \| null/);
-  assert.match(source, /timestamp - 300 >= lastCheckAt/);
+  assert.match(source, /timestamp - statusTimeout\(pullInterval\) >= lastCheckAt/);
   assert.match(source, /statusSnapshot\(env\)/);
   assert.match(source, /live\.nodes/);
   assert.match(source, /live\.machines/);
@@ -510,7 +513,7 @@ test("node list exposes upstream-compatible health and load fields", () => {
   assert.match(source, /machines\.find\(item => Number\(item\.id\) === Number\(server\.machine_id\)\)/);
   assert.match(source, /machineState\.connected === false && disconnectedAt >= reportedAt/);
   assert.match(source, /machineOnline \? machineSeenAt : 0/);
-  assert.match(source, /const loadStatus = nodeState\.load_status \|\| machineState\.load_status \|\| null/);
+  assert.match(source, /const rawLoadStatus = nodeState\.load_status \|\| machineState\.load_status \|\| null/);
 });
 
 test("machine load history matches the upstream chart contract", () => {
@@ -834,7 +837,7 @@ test("traffic history exposes the official server_rate field", () => {
 
 test("node metrics use StatusHub as the realtime source", () => {
   const source = edgeSource() + fs.readFileSync("src/internal/status-client.ts", "utf8");
-  assert.match(source, /const metrics = nodeState\.metrics \|\| \(loadStatus\?\.metrics/);
+  assert.match(source, /const rawMetrics = nodeState\.metrics \|\| \(embeddedMetrics/);
   assert.match(source, /async function statusHubRequest/);
   assert.doesNotMatch(source, /parseKvObject\(kvMetrics\) \|\| parseKvObject\(server\.metrics\)/);
 });
@@ -843,7 +846,6 @@ test("node sync and error handling avoid unrelated work and SQL disclosure", () 
   const source = edgeSource();
   const giftCards = fs.readFileSync("src/gift-card.ts", "utf8");
   assert.match(source, /pathname\.endsWith\(suffix\)/);
-  assert.doesNotMatch(source.slice(source.indexOf("function shouldNotifyNodeSync"), source.indexOf("async function runSqlIgnore")), /pathname\.includes\(part\)/);
   assert.match(source, /pendingCommission[\s\S]*SUM\(commission_balance\)/);
   assert.match(source, /保存服务器失败，请检查字段后重试/);
   assert.doesNotMatch(source, /保存服务器失败: \$\{fallbackError/);
@@ -894,18 +896,19 @@ test("fresh D1 schema follows upstream visibility and expiry defaults", () => {
 
 test("mail APIs support Maileroo and Brevo without SMTP fields", () => {
   const source = edgeSource();
+  const jobsSource = fs.readFileSync("../xboard-jobs/src/index.ts", "utf8");
+  const jobsClient = fs.readFileSync("src/internal/jobs-client.ts", "utf8");
   const adminBundle = fs.readFileSync("public/assets/index-CF20260713.js", "utf8");
   const wrangler = fs.readFileSync("wrangler.toml", "utf8");
   assert.match(source, /NOTIFICATION_EVENTS: Queue/);
   assert.match(source, /type: "mail"/);
-  assert.match(source, /normalizeEmailProvider/);
-  assert.match(source, /smtp\.maileroo\.com\/api\/v2\/emails/);
-  assert.match(source, /api\.brevo\.com\/v3\/smtp\/email/);
+  assert.match(jobsSource, /smtp\.maileroo\.com\/api\/v2\/emails/);
+  assert.match(jobsSource, /api\.brevo\.com\/v3\/smtp\/email/);
   assert.doesNotMatch(source, /testSendMail"\) return fail\("未配置邮件队列发送服务"/);
   assert.match(wrangler, /binding = "NOTIFICATION_EVENTS"/);
   assert.match(wrangler, /queue = "notification-events"/);
-  assert.match(source, /async function sendTestMail/);
-  assert.match(source, /driver: provider/);
+  assert.match(jobsClient, /\/internal\/mail\/test/);
+  assert.match(jobsSource, /driver: provider/);
   assert.match(source, /return ok\(await sendTestMail/);
   assert.doesNotMatch(source, /queued: true, event_id/);
   assert.doesNotMatch(source, /email_encryption/);

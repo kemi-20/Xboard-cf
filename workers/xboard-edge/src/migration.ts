@@ -1,12 +1,14 @@
 import type { D1Database, Fetcher, KVNamespace } from "./types";
 import { invalidateSettingsCache } from "./db";
 import { body, fail, json, now, ok, randomString } from "./compat";
+import { internalSyncToken, invalidateInternalTokenCache } from "./internal/auth";
 
 interface MigrationEnv {
   XBOARD_DB: D1Database;
   XBOARD_KV: KVNamespace;
   XBOARD_SERVER: Fetcher;
   XBOARD_JOBS: Fetcher;
+  INTERNAL_SYNC_TOKEN?: string;
 }
 
 type MigrationMode = "merge" | "overwrite";
@@ -47,7 +49,7 @@ function isThemeSetting(name: unknown) {
 
 function isNonMigratableSetting(name: unknown) {
   const key = String(name || "").trim().toLowerCase();
-  return NON_MIGRATABLE_MAIL_SETTINGS.has(key) || key.startsWith("smtp_") || key.startsWith("payment_") || key.startsWith("pay_")
+  return key === "internal_sync_token" || NON_MIGRATABLE_MAIL_SETTINGS.has(key) || key.startsWith("smtp_") || key.startsWith("payment_") || key.startsWith("pay_")
     || key.startsWith("plugin") || isThemeSetting(key);
 }
 
@@ -69,9 +71,8 @@ function unixTime(value: unknown) {
 
 async function resetServerRuntime(env: MigrationEnv) {
   try {
-    const values = await env.XBOARD_DB.prepare("SELECT name, value FROM v2_settings WHERE name IN ('internal_sync_token', 'server_token')").all<{ name: string; value: string }>();
-    const config = Object.fromEntries((values.results || []).map(row => [row.name, row.value]));
-    const token = config.internal_sync_token || config.server_token || "";
+    invalidateInternalTokenCache();
+    const token = await internalSyncToken(env);
     if (!token) return;
     await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/settings/invalidate", { method: "POST", headers: { "x-xboard-internal-token": token } });
     await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/status/reset", { method: "POST", headers: { "x-xboard-internal-token": token } });
@@ -142,6 +143,7 @@ function exportRow(table: string, source: MigrationRow): MigrationRow | null {
   if (table === "v2_settings") {
     const name = String(row.name || "").trim().toLowerCase();
     if (name === "system_bootstrap_edge_version") return null;
+    if (name === "internal_sync_token") return null;
     if (isThemeSetting(name)) {
       if (!DEFAULT_THEME_SETTINGS.has(name)) return null;
       row.value = "Xboard";

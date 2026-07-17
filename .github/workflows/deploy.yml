@@ -12,6 +12,7 @@ jobs:
     timeout-minutes: 30
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      XBOARD_INTERNAL_TOKEN: ${{ secrets.XBOARD_INTERNAL_TOKEN }}
 
     steps:
       - name: Checkout
@@ -63,6 +64,19 @@ jobs:
       - name: Deploy xboard-edge
         working-directory: workers/xboard-edge
         run: npm run deploy
+
+      - name: Configure internal Worker authentication
+        if: env.XBOARD_INTERNAL_TOKEN != ''
+        shell: bash
+        run: |
+          for worker in xboard-edge xboard-server xboard-jobs; do
+            printf '%s' "$XBOARD_INTERNAL_TOKEN" | (cd "workers/$worker" && npx wrangler secret put INTERNAL_SYNC_TOKEN)
+          done
+
+      - name: Note database-backed internal authentication
+        if: env.XBOARD_INTERNAL_TOKEN == ''
+        shell: bash
+        run: echo "XBOARD_INTERNAL_TOKEN is not configured; Workers will use the shared D1 compatibility token." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Show Cloudflare Workers Builds connection steps
         if: always() && steps.resources.outcome == 'success'

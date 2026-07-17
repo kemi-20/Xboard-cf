@@ -270,9 +270,11 @@ test("large traffic reports are split before entering the queue", () => {
 test("admin changes and migrations can invalidate the server settings cache immediately", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   const db = fs.readFileSync("src/db.ts", "utf8");
+  const auth = fs.readFileSync("src/internal-auth.ts", "utf8");
   assert.match(db, /export function invalidateSettingsCache\(\)/);
   assert.match(source, /url\.pathname === "\/internal\/settings\/invalidate"/);
-  assert.match(source, /SELECT name, value FROM v2_settings WHERE name IN \('internal_sync_token', 'server_token'\)/);
+  assert.match(auth, /SELECT name, value FROM v2_settings WHERE name IN \('internal_sync_token', 'server_token'\)/);
+  assert.match(auth, /token === values\.server_token/);
   assert.match(source, /invalidateSettingsCache\(\)/);
 });
 
@@ -286,7 +288,7 @@ test("websocket device state follows the official per-IP contract", () => {
   assert.match(source, /pushDo\(env, `node:\$\{nodeId\}`/);
   assert.match(source, /UPDATE v2_user SET online_count = \?/);
   assert.doesNotMatch(source, /event === "pong"[\s\S]{0,400}optionalKvPut/);
-  assert.match(source, /Internal sync token is not configured/);
+  assert.match(source, /internalRequestAuthorized/);
   assert.match(source, /event === "report\.devices"[\s\S]*socket\.send\(wsMessage\("sync\.devices"/);
   assert.match(source, /processAlive\(env, nodeId, data\.devices \?\? data, true\)/);
   assert.match(source, /action === "alivelist"[\s\S]{0,160}aggregateDeviceCounts\(env, await nodeUsers\(env, node\), true\)/);

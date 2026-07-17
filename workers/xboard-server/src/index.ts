@@ -2,6 +2,7 @@ import type { D1Database, KVNamespace, Queue, DurableObjectState, ExecutionConte
 import { now } from "./compat.ts";
 import { invalidateSettingsCache, primaryDatabase, settings as loadSettings } from "./db.ts";
 import { cachedData } from "./cache.ts";
+import { internalToken, invalidateInternalTokenCache } from "./internal-auth.ts";
 import {
   availableUser, billableTraffic, buildNodeConfig, isValidNodeType, normalizeNodeType,
   parseJson, parseTraffic, responseEtag, type Row
@@ -13,6 +14,7 @@ export interface Env {
   TRAFFIC_EVENTS: Queue;
   NODE_HUB: any;
   STATUS_HUB: any;
+  INTERNAL_SYNC_TOKEN?: string;
 }
 
 type AuthContext = { input: Row; node?: Row; machine?: Row };
@@ -69,20 +71,32 @@ function booleanSetting(value: unknown, fallback = false) {
 }
 
 const STATUS_HUB_ID = "global";
+let lastStatusWarningAt = 0;
 
 function statusHub(env: Env) {
   return env.STATUS_HUB.get(env.STATUS_HUB.idFromName(STATUS_HUB_ID));
 }
 
+async function internalRequestAuthorized(env: Env, request: Request) {
+  const supplied = request.headers.get("x-xboard-internal-token") || "";
+  let configured = await internalToken(env);
+  if (supplied && supplied !== configured && !env.INTERNAL_SYNC_TOKEN) configured = await internalToken(env, true);
+  return Boolean(configured && supplied === configured);
+}
+
 async function reportStatus(env: Env, kind: "machine" | "node", id: number, state: Row, history = false) {
   try {
-    await statusHub(env).fetch("https://status-hub.internal/report", {
+    const response = await statusHub(env).fetch("https://status-hub.internal/report", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ kind, id, state, history })
     });
-  } catch {
-    // Runtime status is best effort; formal configuration and traffic remain durable elsewhere.
+    if (!response.ok) throw new Error(`StatusHub returned HTTP ${response.status}`);
+  } catch (error) {
+    if (Date.now() - lastStatusWarningAt >= 60_000) {
+      lastStatusWarningAt = Date.now();
+      console.warn("Runtime status update deferred", { kind, id, error: String((error as Error)?.message || error) });
+    }
   }
 }
 
@@ -383,11 +397,6 @@ async function processStatus(env: Env, node: Row, status: unknown) {
   if (load) await reportStatus(env, "node", Number(node.id), { machine_id: Number(node.machine_id || 0) || null, load_status: load });
 }
 
-async function processMetrics(env: Env, node: Row, metrics: unknown) {
-  const value = metricsState(metrics);
-  if (value) await reportStatus(env, "node", Number(node.id), { machine_id: Number(node.machine_id || 0) || null, metrics: value });
-}
-
 function validateStatus(input: Row, optional = false): Response | null {
   const required = ["cpu", "mem.total", "mem.used"];
   if (!optional) required.push("swap.total", "swap.used", "disk.total", "disk.used");
@@ -493,11 +502,6 @@ async function saveMachineStatus(env: Env, machine: Row, input: Row) {
   };
   if (input.net?.in_speed !== undefined && input.net?.out_speed !== undefined) load.net = { in_speed: Number(input.net.in_speed), out_speed: Number(input.net.out_speed) };
   await reportStatus(env, "machine", Number(machine.id), { last_seen_at: recordedAt, connected: true, load_status: load }, true);
-}
-
-async function internalToken(env: Env) {
-  const value = await setting(env, "internal_sync_token", await setting(env, "server_token"));
-  return String(value || "").trim() || null;
 }
 
 async function pushDo(env: Env, name: string, event: string, data: Row) {
@@ -627,7 +631,6 @@ export function appendMachineHistory(history: Row[], point: Row, recordedAt: num
 
 export class StatusHub {
   private state: DurableObjectState;
-  private env: Env;
   private status = new Map<string, Row>();
   private loadedStatus = new Set<string>();
   private persistedStatusAt = new Map<string, number>();
@@ -638,9 +641,8 @@ export class StatusHub {
   private devicesLoaded = false;
   private persistedDevicesAt = new Map<number, number>();
 
-  constructor(state: DurableObjectState, env: Env) {
+  constructor(state: DurableObjectState, _env: Env) {
     this.state = state;
-    this.env = env;
   }
 
   private async loadStatus(key: string) {
@@ -1141,16 +1143,13 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === "/health") return json({ data: { service: "xboard-server", time: now() } });
     if (url.pathname === "/internal/settings/invalidate" && request.method === "POST") {
-      const rows = await env.XBOARD_DB.prepare("SELECT name, value FROM v2_settings WHERE name IN ('internal_sync_token', 'server_token')").all<{ name: string; value: string }>();
-      const values = Object.fromEntries((rows.results || []).map(row => [row.name, row.value]));
-      const configuredToken = String(values.internal_sync_token || values.server_token || "").trim();
-      if (!configuredToken || request.headers.get("x-xboard-internal-token") !== configuredToken) return json({ message: "Unauthorized" }, 401);
+      if (!await internalRequestAuthorized(env, request)) return json({ message: "Unauthorized" }, 401);
       invalidateSettingsCache();
+      invalidateInternalTokenCache();
       return json({ data: true });
     }
     if (url.pathname.startsWith("/internal/status/")) {
-      const configuredToken = await internalToken(env);
-      if (!configuredToken || request.headers.get("x-xboard-internal-token") !== configuredToken) return json({ message: "Unauthorized" }, 401);
+      if (!await internalRequestAuthorized(env, request)) return json({ message: "Unauthorized" }, 401);
       const target = new URL(request.url);
       target.hostname = "status-hub.internal";
       target.pathname = `/${url.pathname.slice("/internal/status/".length)}`;
@@ -1178,9 +1177,7 @@ export default {
       return env.NODE_HUB.get(env.NODE_HUB.idFromName(name)).fetch(request);
     }
     if (url.pathname === "/internal/sync" && request.method === "POST") {
-      const configuredToken = await internalToken(env);
-      if (!configuredToken) return json({ message: "Internal sync token is not configured" }, 500);
-      if (request.headers.get("x-xboard-internal-token") !== configuredToken) return json({ message: "Unauthorized" }, 401);
+      if (!await internalRequestAuthorized(env, request)) return json({ message: "Unauthorized" }, 401);
       const input = await readInput(request);
       if (input.scope === "user" && Number(input.user_id) > 0) {
         const sent = await syncUserChange(env, Number(input.user_id), Number(input.old_group_id || 0));

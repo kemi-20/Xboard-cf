@@ -86,6 +86,7 @@ Worker 之间没有依赖仓库根目录的共享运行时代码，因此 Cloudf
 | Static Assets | `ASSETS` | `xboard-edge` 托管后台 WebUI、语言包和静态文件 |
 | Service Binding | `XBOARD_SERVER` | `xboard-edge`、`xboard-jobs` 调用 `xboard-server` |
 | Service Binding | `XBOARD_JOBS` | `xboard-edge` 请求 `xboard-jobs` 补投 Outbox、物化和重置统计状态 |
+| Worker Secret | `INTERNAL_SYNC_TOKEN` | 三个 Worker 之间的内部鉴权；可由仓库 Secret `XBOARD_INTERNAL_TOKEN` 稳定同步，未配置时使用 D1 兼容密钥，绝不与节点 `server_token` 共用 |
 | Queue Producer | `TRAFFIC_EVENTS` | `xboard-server` 写入 `traffic-events` |
 | Queue Producer | `NOTIFICATION_EVENTS` | `xboard-edge`、`xboard-jobs` 写入邮件或 Telegram 通知事件 |
 | Cron Trigger | `* * * * *` | `xboard-jobs` 每分钟调度周期检查、统计、提醒和清理任务 |

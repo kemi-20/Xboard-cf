@@ -2,6 +2,7 @@ import type { D1Database, D1PreparedStatement, DurableObjectNamespace, Fetcher, 
 import { now, ok } from "./compat.ts";
 import { primaryDatabase, settings as loadSettings } from "./db.ts";
 import { runScheduled } from "./cron.ts";
+import { internalSyncToken } from "./internal-auth.ts";
 export { TrafficStatsHub } from "./traffic-stats.ts";
 
 export interface Env {
@@ -13,6 +14,7 @@ export interface Env {
   MAILEROO_API_KEY?: string;
   BREVO_API_KEY?: string;
   TELEGRAM_BOT_TOKEN?: string;
+  INTERNAL_SYNC_TOKEN?: string;
 }
 
 const SHANGHAI_OFFSET = 8 * 3600;
@@ -142,7 +144,7 @@ async function resolveMailContent(env: Env, payload: any) {
   const flatTemplateVars = Object.fromEntries(Object.entries(templateValue).filter(([key]) => !["vars", "content_mode"].includes(key)));
   const vars = payload.template_value?.vars || payload.vars || flatTemplateVars;
   const renderVars = row ? safeMailVars(vars, payload.template_value?.content_mode || payload.content_mode) : vars;
-  const subjectTemplate = row ? template.subject : payload.subject || template.subject;
+  const subjectTemplate = payload.subject_override || (row ? template.subject : payload.subject || template.subject);
   const subject = render(String(subjectTemplate || ""), renderVars);
   const renderedContent = render(String(template.content), renderVars);
   const text = row || (!payload.html && !payload.text) ? renderedContent : render(String(payload.text || ""), vars);
@@ -151,7 +153,14 @@ async function resolveMailContent(env: Env, payload: any) {
     : (!payload.html && !payload.text)
     ? `<div style="font-family:Arial,sans-serif;white-space:pre-wrap;line-height:1.6">${text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")}</div>`
     : payload.html ? render(String(payload.html), vars) : undefined;
-  return { ...payload, subject, text: text || undefined, html };
+  return {
+    ...payload,
+    template_name: row ? `db:${name}` : `mail.default.${name}`,
+    log_subject: String(payload.subject_override || payload.subject || subject),
+    subject,
+    text: text || undefined,
+    html
+  };
 }
 
 async function recordFailure(env: Env, event: any, error: unknown) {
@@ -386,52 +395,57 @@ async function mail(env: Env, event: any) {
   const claim = await claimedToken(env, event.event_id, "mail", event);
   if (!claim) return;
   let payload = event.payload || {};
+  let config: Record<string, unknown> = {};
   try {
-  payload = await resolveMailContent(env, payload);
-  const provider = String(await setting(env, "email_driver")).toLowerCase() === "brevo" ? "brevo" : "maileroo";
-  const apiKey = (provider === "brevo" ? env.BREVO_API_KEY : env.MAILEROO_API_KEY) || await setting(env, "email_password");
-  const fromAddress = await setting(env, "email_from_address");
-  const fromName = (await setting(env, "email_username") || await setting(env, "app_name") || "XBoard").trim().replace(/[<>]/g, "");
-  const providerName = provider === "brevo" ? "Brevo" : "Maileroo";
-  if (!apiKey) throw new Error(`${providerName} API Key 未配置`);
-  if (!fromAddress) throw new Error(`${providerName} 发件人地址未配置`);
-  const target = payload.to ?? payload.email;
-  if (!target || !payload.subject || (!payload.html && !payload.text)) throw new Error("邮件任务参数不完整");
-  const recipients: string[] = Array.isArray(target) ? target.map(String) : [String(target)];
-  const endpoint = provider === "brevo" ? "https://api.brevo.com/v3/smtp/email" : "https://smtp.maileroo.com/api/v2/emails";
-  const response = await fetch(endpoint, provider === "brevo" ? {
-    method: "POST",
-    headers: { "api-key": apiKey, "content-type": "application/json", accept: "application/json", "idempotency-key": String(event.event_id) },
-    body: JSON.stringify({
-      sender: { email: fromAddress, name: fromName || undefined },
-      to: recipients.map(email => ({ email })),
-      subject: String(payload.subject),
-      htmlContent: payload.html ? String(payload.html) : undefined,
-      textContent: payload.text ? String(payload.text) : undefined
-    })
-  } : {
-    method: "POST",
-    headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json", accept: "application/json", "idempotency-key": String(event.event_id) },
-    body: JSON.stringify({
-      from: { address: fromAddress, display_name: fromName || undefined },
-      to: recipients.map(address => ({ address })),
-      subject: String(payload.subject),
-      html: payload.html ? String(payload.html) : undefined,
-      plain: payload.text ? String(payload.text) : undefined
-    })
-  });
-  const responseText = await response.text();
-  if (!response.ok) throw new Error(`${providerName} ${response.status}: ${responseText.slice(0, 500)}`);
-  let providerId = "";
-  try {
-    const result = JSON.parse(responseText);
-    providerId = String(result?.messageId || result?.data?.reference_id || result?.reference_id || "");
-  } catch {}
-  const ts = now();
-  await completeClaim(env, event.event_id, claim, recipients.map(email =>
-    env.XBOARD_DB.prepare("INSERT INTO v2_mail_log(email, subject, template_name, error, created_at, updated_at) VALUES (?, ?, ?, NULL, ?, ?)")
-      .bind(email, String(payload.subject), String(payload.template_name || "notify"), ts, ts)
-  ));
+    payload = await resolveMailContent(env, payload);
+    const provider = String(await setting(env, "email_driver")).toLowerCase() === "brevo" ? "brevo" : "maileroo";
+    const apiKey = (provider === "brevo" ? env.BREVO_API_KEY : env.MAILEROO_API_KEY) || await setting(env, "email_password");
+    const fromAddress = await setting(env, "email_from_address");
+    const fromName = (await setting(env, "email_username") || await setting(env, "app_name") || "XBoard").trim().replace(/[<>]/g, "");
+    const providerName = provider === "brevo" ? "Brevo" : "Maileroo";
+    const endpoint = provider === "brevo" ? "https://api.brevo.com/v3/smtp/email" : "https://smtp.maileroo.com/api/v2/emails";
+    config = {
+      driver: provider,
+      host: endpoint,
+      port: 443,
+      encryption: "HTTPS",
+      from: { address: fromAddress, name: fromName },
+      username: fromName
+    };
+    if (!apiKey) throw new Error(`${providerName} API Key 未配置`);
+    if (!fromAddress) throw new Error(`${providerName} 发件人地址未配置`);
+    const target = payload.to ?? payload.email;
+    if (!target || !payload.subject || (!payload.html && !payload.text)) throw new Error("邮件任务参数不完整");
+    const recipients: string[] = Array.isArray(target) ? target.map(String) : [String(target)];
+    const response = await fetch(endpoint, provider === "brevo" ? {
+      method: "POST",
+      headers: { "api-key": apiKey, "content-type": "application/json", accept: "application/json", "idempotency-key": String(event.event_id) },
+      body: JSON.stringify({
+        sender: { email: fromAddress, name: fromName || undefined },
+        to: recipients.map(email => ({ email })),
+        subject: String(payload.subject),
+        htmlContent: payload.html ? String(payload.html) : undefined,
+        textContent: payload.text ? String(payload.text) : undefined
+      })
+    } : {
+      method: "POST",
+      headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json", accept: "application/json", "idempotency-key": String(event.event_id) },
+      body: JSON.stringify({
+        from: { address: fromAddress, display_name: fromName || undefined },
+        to: recipients.map(address => ({ address })),
+        subject: String(payload.subject),
+        html: payload.html ? String(payload.html) : undefined,
+        plain: payload.text ? String(payload.text) : undefined
+      })
+    });
+    const responseText = await response.text();
+    if (!response.ok) throw new Error(`${providerName} ${response.status}: ${responseText.slice(0, 500)}`);
+    const ts = now();
+    await completeClaim(env, event.event_id, claim, recipients.map(email =>
+      env.XBOARD_DB.prepare("INSERT INTO v2_mail_log(email, subject, template_name, error, created_at, updated_at) VALUES (?, ?, ?, NULL, ?, ?)")
+        .bind(email, String(payload.log_subject || payload.subject), String(payload.template_name), ts, ts)
+    ));
+    return { email: recipients[0], subject: String(payload.log_subject || payload.subject), template_name: String(payload.template_name), error: null, config };
   } catch (error) {
     const target = payload.to ?? payload.email;
     const recipients = (Array.isArray(target) ? target : target ? [target] : []).map(String);
@@ -439,10 +453,19 @@ async function mail(env: Env, event: any) {
     if (recipients.length) {
       try {
         await env.XBOARD_DB.batch(recipients.map(email => env.XBOARD_DB.prepare("INSERT INTO v2_mail_log(email, subject, template_name, error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
-          .bind(email, String(payload.subject || ""), String(payload.template_name || "notify"), String((error as any)?.message || error), ts, ts)));
+          .bind(email, String(payload.log_subject || payload.subject || ""), String(payload.template_name || "mail.default.notify"), String((error as any)?.message || error), ts, ts)));
       } catch (logError) { console.error("Failed to write mail failure log", { error: logError }); }
     }
     await failClaim(env, event.event_id, claim, error);
+    if (payload.capture_error) {
+      return {
+        email: recipients[0] || String(payload.email || ""),
+        subject: String(payload.log_subject || payload.subject || ""),
+        template_name: String(payload.template_name || "mail.default.notify"),
+        error: String((error as Error)?.message || error),
+        config
+      };
+    }
     throw error;
   }
 }
@@ -500,12 +523,41 @@ async function handle(env: Env, event: any) {
   else throw new Error(`Unsupported queue event type: ${String(event.type || "unknown")}`);
 }
 
-export const __test = { dayStart, render, claimEvent, claimedToken, EventClaimBusyError, completeClaim, failClaim, ensureTrafficDedupSchema, stableBatchId, aggregateTrafficEvents, splitTrafficEvents, trafficEventGroups, traffic, trafficBatch, trafficCandidates };
+export const __test = { dayStart, render, resolveMailContent, mail, claimEvent, claimedToken, EventClaimBusyError, completeClaim, failClaim, ensureTrafficDedupSchema, stableBatchId, aggregateTrafficEvents, splitTrafficEvents, trafficEventGroups, traffic, trafficBatch, trafficCandidates };
 
 export default {
   async fetch(request: Request, env: Env) {
     env = { ...env, XBOARD_DB: primaryDatabase(env.XBOARD_DB) };
     const path = new URL(request.url).pathname;
+    if (request.method === "POST" && path === "/internal/mail/test") {
+      const token = await internalSyncToken(env, false);
+      if (!token || request.headers.get("x-xboard-internal-token") !== token) {
+        return new Response(JSON.stringify({ message: "Unauthorized" }), { status: 401, headers: { "content-type": "application/json" } });
+      }
+      let email = "";
+      try {
+        const input = await request.json() as { email?: unknown };
+        email = String(input.email || "").trim();
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+          return new Response(JSON.stringify({ message: "Email format is incorrect" }), { status: 422, headers: { "content-type": "application/json" } });
+        }
+        const result = await mail(env, {
+          event_id: `mail:test:${crypto.randomUUID()}`,
+          type: "mail",
+          payload: {
+            to: email,
+            template_name: "notify",
+            subject_override: "This is xboard test email",
+            vars: { name: await setting(env, "app_name") || "XBoard", content: "This is xboard test email", url: await setting(env, "app_url") || "" },
+            content_mode: "text",
+            capture_error: true
+          }
+        });
+        return ok(result);
+      } catch (error) {
+        return ok({ email, subject: "This is xboard test email", template_name: "mail.default.notify", error: String((error as Error)?.message || error), config: {} });
+      }
+    }
     if (request.method === "POST" && path === "/internal/traffic/replay") return ok({ delivered: await replayOutbox(env, 500) });
     if (request.method === "POST" && path === "/internal/traffic/materialize") {
       const url = new URL(request.url);

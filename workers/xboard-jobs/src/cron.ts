@@ -1,8 +1,9 @@
 import type { D1Database, D1PreparedStatement, Fetcher, KVNamespace, Queue } from "./types.ts";
 import { now } from "./compat.ts";
 import { primaryDatabase, settings as loadSettings } from "./db.ts";
+import { internalSyncToken } from "./internal-auth.ts";
 
-export interface CronEnv { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; NOTIFICATION_EVENTS: Queue; XBOARD_SERVER: Fetcher; }
+export interface CronEnv { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; NOTIFICATION_EVENTS: Queue; XBOARD_SERVER: Fetcher; INTERNAL_SYNC_TOKEN?: string; }
 
 const SHANGHAI_OFFSET = 8 * 3600;
 
@@ -233,10 +234,17 @@ async function statistics(env: CronEnv, ts: number, day: number) {
     .bind(markerId, ts, ts).run();
 }
 
+let lastOnlineCleanupWarningAt = 0;
+
 async function cleanupOnlineStatus(env: CronEnv, ts: number) {
   try {
     await env.XBOARD_DB.prepare("UPDATE v2_user SET online_count = 0 WHERE online_count > 0 AND (last_online_at IS NULL OR last_online_at < ?)").bind(ts - 600).run();
-  } catch {}
+  } catch (error) {
+    if (Date.now() - lastOnlineCleanupWarningAt >= 300_000) {
+      lastOnlineCleanupWarningAt = Date.now();
+      console.warn("Failed to clean stale online status", { error: String((error as Error)?.message || error) });
+    }
+  }
 }
 
 async function checkTickets(env: CronEnv, ts: number) {
@@ -300,7 +308,7 @@ async function openProcessingOrder(env: CronEnv, order: Record<string, any>, ts:
   const results = await env.XBOARD_DB.batch(statements);
   if (Number((results.at(-1)?.meta as any)?.changes || 0) !== 1) return;
   await optionalKvPut(env, `user_version:${user.id}`, String(ts));
-  const syncToken = await setting(env, "internal_sync_token", await setting(env, "server_token"));
+  const syncToken = await internalSyncToken(env);
   if (syncToken) {
     try {
       await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/sync", {
@@ -345,8 +353,8 @@ async function checkOrders(env: CronEnv, ts: number) {
   }
 }
 
-async function checkTrafficExceeded(env: CronEnv, ts: number) {
-  const token = await setting(env, "internal_sync_token", await setting(env, "server_token"));
+async function checkTrafficExceeded(env: CronEnv) {
+  const token = await internalSyncToken(env);
   while (true) {
     const pending = await env.XBOARD_DB.prepare("SELECT u.id, u.banned, u.transfer_enable, u.u, u.d FROM v2_traffic_pending_check p JOIN v2_user u ON u.id = p.user_id ORDER BY p.updated_at ASC LIMIT 1000").all<any>();
     const rows = pending.results || [];
@@ -385,7 +393,7 @@ async function resetLogs(env: CronEnv, ts: number) {
 async function acquireTaskLock(env: CronEnv, task: string, ts: number) {
   const doClaim = `do:${crypto.randomUUID()}`;
   try {
-    const token = (await setting(env, "internal_sync_token", "")).trim() || (await setting(env, "server_token", "")).trim();
+    const token = await internalSyncToken(env);
     if (token) {
       const response = await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/status/locks/acquire", {
         method: "POST",
@@ -411,7 +419,7 @@ async function acquireTaskLock(env: CronEnv, task: string, ts: number) {
 async function releaseTaskLock(env: CronEnv, task: string, claim: string, ts: number) {
   if (claim.startsWith("do:")) {
     try {
-      const token = (await setting(env, "internal_sync_token", "")).trim() || (await setting(env, "server_token", "")).trim();
+      const token = await internalSyncToken(env);
       if (token) await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/status/locks/release", {
         method: "POST",
         headers: { "content-type": "application/json", "x-xboard-internal-token": token },
@@ -466,7 +474,7 @@ async function run(env: CronEnv, replayOutbox: () => Promise<number>, task = "sc
         if (current === "check:order") await checkOrders(env, ts);
         else if (current === "check:ticket") await checkTickets(env, ts);
         else if (current === "check:commission") await checkCommission(env, ts);
-        else if (current === "check:traffic-exceeded") await checkTrafficExceeded(env, ts);
+        else if (current === "check:traffic-exceeded") await checkTrafficExceeded(env);
         else if (current === "reset:traffic") await resetTraffic(env, ts);
         else if (current === "cleanup:online-status") await cleanupOnlineStatus(env, ts);
         else if (current === "reset:log") await resetLogs(env, ts);
@@ -484,7 +492,7 @@ async function run(env: CronEnv, replayOutbox: () => Promise<number>, task = "sc
   }
 }
 
-export const cronTest = { dayStart, nextResetAt, addOrderMonths, acquireTaskLock, releaseTaskLock, scheduledTasks, checkTrafficExceeded };
+export const cronTest = { dayStart, nextResetAt, addOrderMonths, acquireTaskLock, releaseTaskLock, scheduledTasks, checkTrafficExceeded, cleanupOnlineStatus };
 
 export async function runScheduled<T extends CronEnv>(env: T, replayOutbox: (sessionEnv: T) => Promise<number>) {
   const sessionEnv = { ...env, XBOARD_DB: primaryDatabase(env.XBOARD_DB) } as T;

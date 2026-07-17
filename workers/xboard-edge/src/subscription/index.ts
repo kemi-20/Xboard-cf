@@ -425,7 +425,7 @@ function clashProxy(user: any, server: any, client: Client = "clashmeta") {
   if (server.type === "shadowsocks") Object.assign(base, { cipher: ps.cipher || "aes-128-gcm", password: server.password || user.uuid, ...clashPluginOptions(ps, client) });
   else if (server.type === "vmess") {
     Object.assign(base, { uuid: user.uuid, alterId: 0, cipher: "auto", network: ps.network || "tcp", tls: client === "stash" ? Boolean(ps.tls) : ps.tls ? true : undefined, servername: ps.tls ? ps.tls_settings?.server_name : undefined, "skip-cert-verify": client === "stash" ? Boolean(ps.tls_settings?.allow_insecure) : ps.tls ? Boolean(ps.tls_settings?.allow_insecure) : undefined });
-    applyClashTransport(base, ps, server, client, "vmess");
+    applyClashTransport(base, ps, client, "vmess");
     applyClashExtras(base, ps, client, fingerprint);
   }
   else if (server.type === "vless") {
@@ -459,7 +459,7 @@ function clashProxy(user: any, server: any, client: Client = "clashmeta") {
       base["reality-opts"] = { "public-key": ps.reality_settings?.public_key, "short-id": ps.reality_settings?.short_id };
       if (client === "stash") base.tls = true;
     }
-    applyClashTransport(base, ps, server, client, "trojan");
+    applyClashTransport(base, ps, client, "trojan");
     applyClashExtras(base, ps, client, fingerprint);
   }
   else if (server.type === "hysteria") {
@@ -526,7 +526,7 @@ function clashTransportNetwork(ps: any, client: Client, protocol: "vmess" | "vle
   return supported.has(network) ? network : "tcp";
 }
 
-function applyClashTransport(base: Config, ps: any, server: any, client: Client, protocol: "vmess" | "vless" | "trojan") {
+function applyClashTransport(base: Config, ps: any, client: Client, protocol: "vmess" | "vless" | "trojan") {
   const ns = ps.network_settings || {};
   const network = clashTransportNetwork(ps, client, protocol);
   if (network === "tcp" && ns.header?.type === "http") Object.assign(base, { network: "http", "http-opts": { headers: ns.header?.request?.headers, path: ns.header?.request?.path || ["/"] } });

@@ -34,7 +34,6 @@ import {
 } from "./admin/statistics";
 import {
   adminPlanRows as loadAdminPlanRows,
-  planById as loadPlanById,
   publicPlanRows as loadPublicPlanRows
 } from "./admin/plans";
 import { adminUserList as loadAdminUserList, adminUserQuery as buildAdminUserQuery } from "./admin/users";
@@ -44,12 +43,13 @@ import {
   adminRouteRows as loadAdminRouteRows,
   adminServerGroupRows as loadAdminServerGroupRows,
   adminServerRows as loadAdminServerRows,
-  groupById as loadGroupById,
-  nodeAvailableStatus,
   normalizePublicPort
 } from "./admin/servers";
 import { handleUserTickets } from "./user/tickets";
 import { handleUserOrders } from "./user/orders";
+import { internalSyncToken, invalidateInternalTokenCache } from "./internal/auth";
+import { sendTestMail } from "./internal/jobs-client";
+import { invalidateServerSettings, nodeSyncIntent, notifyNodeSync } from "./internal/sync-client";
 
 export interface Env {
   XBOARD_DB: D1Database;
@@ -61,6 +61,7 @@ export interface Env {
   NOTIFICATION_EVENTS: Queue;
   PUBLIC_READ_DB?: D1Database;
   SETTINGS_MEMORY_SCOPE?: string;
+  INTERNAL_SYNC_TOKEN?: string;
 }
 
 let storageOptimizationReady = false;
@@ -133,59 +134,6 @@ function md5(input: string) {
     a0 = (a0 + a) >>> 0; b0 = (b0 + b) >>> 0; c0 = (c0 + c) >>> 0; d0 = (d0 + d) >>> 0;
   }
   return [a0,b0,c0,d0].map(value => [0,8,16,24].map(shift => ((value >>> shift) & 0xff).toString(16).padStart(2, "0")).join("")).join("");
-}
-
-async function internalSyncToken(env: Env) {
-  const values = await settings(env.XBOARD_DB, env.XBOARD_KV);
-  return String(values.internal_sync_token || values.server_token || "");
-}
-
-async function invalidateServerSettings(env: Env) {
-  try {
-    const token = await internalSyncToken(env);
-    if (!token) return;
-    await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/settings/invalidate", {
-      method: "POST",
-      headers: { "x-xboard-internal-token": token }
-    });
-  } catch { /* Other workers refresh their short cache naturally if the service is unavailable. */ }
-}
-
-type NodeSyncIntent = { scope: "all" } | { scope: "user"; user_id: number; old_group_id?: number };
-
-async function notifyNodeSync(env: Env, intent: NodeSyncIntent = { scope: "all" }) {
-  try {
-    await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/sync", {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-xboard-internal-token": await internalSyncToken(env) },
-      body: JSON.stringify(intent)
-    });
-  } catch {
-    // HTTP polling remains the compatibility fallback when no node is connected by WebSocket.
-  }
-}
-
-async function nodeSyncIntent(request: Request, pathname: string, env: Env): Promise<NodeSyncIntent | null> {
-  if (!shouldNotifyNodeSync(pathname, request.method)) return null;
-  if (!pathname.includes("/user/")) return { scope: "all" };
-  const input = await body<Record<string, any>>(request);
-  const rawId = input.id ?? (Array.isArray(input.ids) && input.ids.length === 1 ? input.ids[0] : undefined);
-  const userId = Number(rawId || 0);
-  if (!userId) return { scope: "all" };
-  const previous = await env.XBOARD_DB.prepare("SELECT group_id FROM v2_user WHERE id = ?").bind(userId).first<{ group_id: number | null }>();
-  return { scope: "user", user_id: userId, old_group_id: Number(previous?.group_id || 0) };
-}
-
-function shouldNotifyNodeSync(pathname: string, method: string) {
-  if (method !== "POST" && method !== "DELETE") return false;
-  return [
-    "/server/manage/save", "/server/manage/update", "/server/manage/drop", "/server/manage/sort",
-    "/server/route/save", "/server/route/drop", "/server/route/sort",
-    "/server/group/save", "/server/group/drop",
-    "/server/machine/save", "/server/machine/update", "/server/machine/drop",
-    "/user/update", "/user/destroy", "/user/ban", "/user/resetSecret", "/user/generate",
-    "/plan/save", "/plan/drop", "/order/paid"
-  ].some(suffix => pathname.endsWith(suffix));
 }
 
 async function runSqlIgnore(env: Env, sql: string, binds: any[] = []) {
@@ -1123,9 +1071,6 @@ function orderStats(env: Env, url: URL) {
 function trafficRank(env: Env, url: URL) {
   return loadTrafficRank(env, url);
 }
-function planById(env: Env, id: unknown) {
-  return loadPlanById(env, id);
-}
 function serverDeps() {
   return {
     optionalKvGet,
@@ -1138,10 +1083,6 @@ function serverDeps() {
     machineHistory: (env: Env, machineId: number, limit: number, rangeHours: number | null) =>
       runtimeMachineHistory(env, () => internalSyncToken(env), machineId, limit, rangeHours)
   };
-}
-
-function groupById(env: Env, id: unknown) {
-  return loadGroupById(env, id);
 }
 
 function adminServerGroupRows(env: Env) {
@@ -1646,29 +1587,6 @@ function renderMailText(source: string, vars: Record<string, unknown>) {
   return source.replace(/\{\{\s*([^}]+?)\s*\}\}/g, (_match, key: string) => String(vars[key] ?? ""));
 }
 
-function mailHtml(content: string) {
-  if (/<[a-z][\s\S]*>/i.test(content)) return content;
-  return `<div style="font-family:Arial,sans-serif;white-space:pre-wrap;line-height:1.6">${content
-    .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;")}</div>`;
-}
-
-async function queueMail(env: Env, payload: { to: string; subject: string; content: string; template_name?: string }) {
-  if (!payload.to || !payload.subject) throw new Error("邮件收件人或主题为空");
-  const eventId = `mail:${crypto.randomUUID()}`;
-  await env.NOTIFICATION_EVENTS.send({
-    event_id: eventId,
-    type: "mail",
-    payload: {
-      to: payload.to,
-      subject: payload.subject,
-      html: mailHtml(payload.content),
-      text: payload.content,
-      template_name: payload.template_name || "notify"
-    }
-  });
-  return eventId;
-}
-
 async function queueTemplateMail(env: Env, name: string, email: string, vars: Record<string, unknown>, subjectOverride?: string) {
   const template = await adminMailTemplateGet(env, name);
   if (!template) throw new Error("模板不存在");
@@ -1724,74 +1642,6 @@ async function ticketTelegramText(env: Env, request: Request, user: Record<strin
     `内容: ${message}`
   );
   return lines.join("\n");
-}
-
-type EmailProvider = "maileroo" | "brevo";
-
-function normalizeEmailProvider(value: unknown): EmailProvider {
-  return String(value || "").toLowerCase() === "brevo" ? "brevo" : "maileroo";
-}
-
-async function sendProviderEmail(provider: EmailProvider, apiKey: string, fromAddress: string, fromName: string, recipients: string[], subject: string, html: string, text: string) {
-  if (!apiKey) throw new Error(`${provider === "brevo" ? "Brevo" : "Maileroo"} API Key 未配置`);
-  if (!fromAddress) throw new Error(`${provider === "brevo" ? "Brevo" : "Maileroo"} 发件人地址未配置`);
-  const endpoint = provider === "brevo"
-    ? "https://api.brevo.com/v3/smtp/email"
-    : "https://smtp.maileroo.com/api/v2/emails";
-  const response = await fetch(endpoint, provider === "brevo" ? {
-    method: "POST",
-    headers: { "api-key": apiKey, "content-type": "application/json", accept: "application/json" },
-    body: JSON.stringify({
-      sender: { email: fromAddress, name: fromName || undefined },
-      to: recipients.map(address => ({ email: address })),
-      subject,
-      htmlContent: html,
-      textContent: text
-    })
-  } : {
-    method: "POST",
-    headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json", accept: "application/json" },
-    body: JSON.stringify({
-      from: { address: fromAddress, display_name: fromName || undefined },
-      to: recipients.map(address => ({ address })),
-      subject,
-      html,
-      plain: text
-    })
-  });
-  const responseText = await response.text();
-  if (!response.ok) throw new Error(`${provider === "brevo" ? "Brevo" : "Maileroo"} ${response.status}: ${responseText.slice(0, 500)}`);
-  return responseText;
-}
-
-async function sendTestMail(env: Env, email: string) {
-  const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
-  const template = await adminMailTemplateGet(env, "notify");
-  const provider = normalizeEmailProvider(all.email_driver);
-  const apiKey = String(firstNonEmpty(all.email_password));
-  const fromAddress = String(firstNonEmpty(all.email_from_address, all.resend_from_address));
-  const fromName = String(firstNonEmpty(all.email_username, all.resend_from_name, all.app_name, "XBoard"));
-  const subject = "This is xboard test email";
-  const vars = { name: pickSetting(all, "app_name", "XBoard"), content: subject, url: pickSetting(all, "app_url", "") };
-  const content = renderMailText(template?.content || mailTemplateDefaults.notify.content, vars);
-  const config = {
-    driver: provider,
-    host: provider === "brevo" ? "https://api.brevo.com/v3/smtp/email" : "https://smtp.maileroo.com/api/v2/emails",
-    port: 443,
-    encryption: "HTTPS",
-    from: { address: fromAddress, name: fromName },
-    username: fromName
-  };
-  let error: string | null = null;
-  try {
-    await sendProviderEmail(provider, apiKey, fromAddress, fromName, [email], subject, mailHtml(content), content);
-  } catch (caught: any) {
-    error = String(caught?.message || caught);
-  }
-  const ts = now();
-  await env.XBOARD_DB.prepare("INSERT INTO v2_mail_log(email, subject, template_name, error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
-    .bind(email, subject, "notify", error, ts, ts).run();
-  return { email, subject, template_name: "notify", error, config };
 }
 
 async function telegramRequest(botToken: string, method: string, payload: Record<string, unknown> = {}) {
@@ -2085,6 +1935,7 @@ async function createOrUpdate(table: string, request: Request, env: Env, id?: st
   }
   if (table === "v2_settings") {
     invalidateSettingsCache();
+    invalidateInternalTokenCache();
     await invalidateServerSettings(env);
     await bump(env.XBOARD_KV, "settings_version");
   }
@@ -2873,7 +2724,9 @@ async function adminApi(request: Request, env: Env, path: string) {
   if (request.method === "GET" && route === "/config/getEmailTemplate") return ok(Object.keys(mailTemplateMeta));
   if (request.method === "GET" && route === "/config/getThemeTemplate") return ok(["Xboard"]);
   if (request.method === "POST" && route === "/config/testSendMail") {
-    return ok(await sendTestMail(env, String((admin as any).email)));
+    const recipient = String((admin as { email?: unknown }).email || "").trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipient)) return fail("Email format is incorrect", 422, 422);
+    return ok(await sendTestMail(env, await internalSyncToken(env), recipient));
   }
   if (request.method === "POST" && route === "/config/setTelegramWebhook") {
     const input = await body<Record<string, any>>(request); const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
@@ -3817,13 +3670,6 @@ async function userApi(request: Request, env: Env, path: string) {
   return json({ message: "Not Found" }, 404);
 }
 
-function assetRequest(request: Request, pathname: string) {
-  const url = new URL(request.url);
-  url.pathname = pathname;
-  url.search = "";
-  return new Request(url.toString(), request);
-}
-
 function normalizeSecurePath(value: unknown) {
   const path = String(value || "").trim().replace(/^\/+|\/+$/g, "");
   return path || "admin";
@@ -3846,7 +3692,7 @@ function isSubscriptionPath(pathname: string, subscribePath: string) {
   return token.length > 0 && !token.includes("/");
 }
 
-async function adminUi(request: Request, env: Env, securePath: string) {
+async function adminUi(securePath: string) {
   const settingsJson = JSON.stringify({ base_url: "/", secure_path: `/${securePath}` }).replace(/</g, "\\u003c");
   const migrationHref = JSON.stringify(`/${securePath}/migration`).replace(/</g, "\\u003c");
   return new Response(`<!doctype html>
@@ -3999,7 +3845,7 @@ async function edgeFetch(request: Request, env: Env, ctx: ExecutionContext): Pro
     if (url.pathname === "/health") return ok({ service: "xboard-edge", time: now() });
     const securePath = staticAsset ? "admin" : await currentSecurePath(env);
     const adminUiPath = `/${securePath}`;
-    if (url.pathname === adminUiPath || url.pathname === `${adminUiPath}/`) return adminUi(request, env, securePath);
+    if (url.pathname === adminUiPath || url.pathname === `${adminUiPath}/`) return adminUi(securePath);
     if (url.pathname === `${adminUiPath}/migration` || url.pathname === `${adminUiPath}/migration/`) {
       const assetUrl = new URL("/migration/panel.html", request.url);
       let response = await env.ASSETS.fetch(new Request(assetUrl.toString(), request));

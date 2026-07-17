@@ -1,10 +1,27 @@
-import { cachedData } from "../cache";
-import { now } from "../compat";
-import type { Fetcher } from "../types";
+import { cachedData } from "../cache.ts";
+import { now } from "../compat.ts";
+import type { Fetcher } from "../types.ts";
+
+export type RuntimeStatus = {
+  last_seen_at?: unknown;
+  disconnected_at?: unknown;
+  connected?: unknown;
+  last_check_at?: unknown;
+  last_push_at?: unknown;
+  load_status?: unknown;
+  metrics?: unknown;
+  online?: unknown;
+  connections_at?: unknown;
+  connections?: unknown;
+  updated_at?: unknown;
+  [key: string]: unknown;
+};
 
 export type StatusSnapshot = {
-  machines: Record<string, Record<string, any>>;
-  nodes: Record<string, Record<string, any>>;
+  machines: Record<string, RuntimeStatus>;
+  nodes: Record<string, RuntimeStatus>;
+  available: boolean;
+  stale: boolean;
 };
 
 type StatusEnv = { XBOARD_SERVER: Fetcher };
@@ -12,6 +29,7 @@ type TokenLoader = () => Promise<string>;
 
 let statusSnapshotVersion = 0;
 let liveDeviceSnapshotCache: { value: Record<string, string[]>; expiresAt: number } | null = null;
+let lastGoodStatusSnapshot: { value: StatusSnapshot; expiresAt: number } | null = null;
 
 async function statusHubRequest(env: StatusEnv, loadToken: TokenLoader, path: string, init: RequestInit = {}) {
   return env.XBOARD_SERVER.fetch(`https://xboard-server.internal/internal/status/${path}`, {
@@ -27,12 +45,23 @@ async function statusHubRequest(env: StatusEnv, loadToken: TokenLoader, path: st
 }
 
 export async function statusSnapshot(env: StatusEnv, loadToken: TokenLoader): Promise<StatusSnapshot> {
-  return cachedData(`status-snapshot:${statusSnapshotVersion}`, 10, async () => {
+  return cachedData(`status-snapshot:v2:${statusSnapshotVersion}`, 10, async () => {
     const response = await statusHubRequest(env, loadToken, "snapshot", { method: "POST" });
     if (!response.ok) throw new Error(`StatusHub returned ${response.status}`);
-    const payload = await response.json() as { data?: StatusSnapshot };
-    return payload.data || { machines: {}, nodes: {} };
-  }, 30).catch(() => ({ machines: {}, nodes: {} }));
+    const payload = await response.json() as { data?: Omit<StatusSnapshot, "available" | "stale"> };
+    if (!payload.data || typeof payload.data.machines !== "object" || !payload.data.machines || Array.isArray(payload.data.machines)
+      || typeof payload.data.nodes !== "object" || !payload.data.nodes || Array.isArray(payload.data.nodes)) {
+      throw new Error("StatusHub returned an invalid snapshot");
+    }
+    const value = { machines: payload.data.machines, nodes: payload.data.nodes, available: true, stale: false };
+    lastGoodStatusSnapshot = { value, expiresAt: Date.now() + 900_000 };
+    return value;
+  }, 0).catch(() => {
+    if (lastGoodStatusSnapshot && lastGoodStatusSnapshot.expiresAt > Date.now()) {
+      return { ...lastGoodStatusSnapshot.value, available: false, stale: true };
+    }
+    return { machines: {}, nodes: {}, available: false, stale: false };
+  });
 }
 
 export async function clearStatus(env: StatusEnv, loadToken: TokenLoader, kind: "machine" | "node", id: number) {
