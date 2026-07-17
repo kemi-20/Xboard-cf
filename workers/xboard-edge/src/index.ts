@@ -1797,7 +1797,10 @@ async function adminServerRows(env: Env): Promise<Record<string, any>[]> {
     const machine = Number(server.machine_id) > 0 ? machines.find(item => Number(item.id) === Number(server.machine_id)) : null;
     const nodeState = live.nodes[String(stateId)] || (stateId !== ownId ? live.nodes[String(ownId)] : null) || {};
     const machineState = machine ? live.machines[String(machine.id)] || {} : {};
-    const machineSeenAt = machine && Number(machine.is_active ?? machine.enabled ?? 1) === 1 && machineState.connected !== false ? Number(machineState.last_seen_at || 0) : 0;
+    const reportedAt = Number(machineState.last_seen_at || 0);
+    const disconnectedAt = Number(machineState.disconnected_at || 0);
+    const machineDisconnected = machineState.connected === false && disconnectedAt >= reportedAt;
+    const machineSeenAt = machine && Number(machine.is_active ?? machine.enabled ?? 1) === 1 && !machineDisconnected ? reportedAt : 0;
     const machineOnline = machineSeenAt > 0 && now() - 300 < machineSeenAt;
     const lastCheckAt = Math.max(Number(nodeState.last_check_at || 0), machineOnline ? machineSeenAt : 0) || null;
     const lastPushAt = Math.max(Number(nodeState.last_push_at || 0), machineOnline ? machineSeenAt : 0) || null;

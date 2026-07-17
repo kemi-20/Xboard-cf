@@ -143,7 +143,7 @@ async function authenticateV2(env: Env, input: Row, handshake = false): Promise<
       if (!found) return apiFailure("Node not found on this machine");
       node = found;
     }
-    await reportStatus(env, "machine", Number(machine.id), { last_seen_at: now() });
+    await reportStatus(env, "machine", Number(machine.id), { last_seen_at: now(), connected: true });
     return { input, machine, node };
   }
   if (!input.token) return validationFailure("token");
@@ -492,7 +492,7 @@ async function saveMachineStatus(env: Env, machine: Row, input: Row) {
     disk: { total: Number(input.disk?.total || 0), used: Number(input.disk?.used || 0) }, updated_at: recordedAt
   };
   if (input.net?.in_speed !== undefined && input.net?.out_speed !== undefined) load.net = { in_speed: Number(input.net.in_speed), out_speed: Number(input.net.out_speed) };
-  await reportStatus(env, "machine", Number(machine.id), { last_seen_at: recordedAt, load_status: load }, true);
+  await reportStatus(env, "machine", Number(machine.id), { last_seen_at: recordedAt, connected: true, load_status: load }, true);
 }
 
 async function internalToken(env: Env) {
@@ -938,7 +938,7 @@ export class NodeHub {
       }
       const nodesResult = await env.XBOARD_DB.prepare("SELECT * FROM v2_server WHERE machine_id = ? AND enabled = 1 ORDER BY sort ASC").bind(machine.id).all<Row>();
       const nodes = nodesResult.results || [];
-      identity = { mode: "machine", machine_id: Number(machine.id), node_ids: nodes.map(node => Number(node.id)) };
+      identity = { mode: "machine", machine_id: Number(machine.id), node_ids: nodes.map(node => Number(node.id)), last_status_at: now() };
       this.replaceConnections();
       this.accept(server, [`machine:${machine.id}`]);
       (server as any).serializeAttachment?.(identity);
@@ -977,6 +977,12 @@ export class NodeHub {
     const data = input.data && typeof input.data === "object" ? input.data as Row : {};
     const nodeIds: number[] = Array.isArray(identity.node_ids) ? identity.node_ids.map(Number) : [];
     if (event === "pong") {
+      const timestamp = now();
+      if (identity.mode === "machine" && Number(identity.machine_id) > 0 && timestamp - Number(identity.last_status_at || 0) >= 240) {
+        const updated = { ...identity, last_status_at: timestamp };
+        (socket as any).serializeAttachment?.(updated);
+        await reportStatus(env, "machine", Number(identity.machine_id), { last_seen_at: timestamp, connected: true });
+      }
       return;
     }
     const nodeId = identity.mode === "machine" ? Number(data.node_id) : Number(identity.node_id);
@@ -1102,7 +1108,7 @@ routes.set("POST /api/v2/server/report", async (_request, env, input) => {
 routes.set("POST /api/v2/server/machine/nodes", async (_request, env, input) => {
   const auth = await authenticateMachineEndpoint(env, input);
   if (auth instanceof Response) return auth;
-  await reportStatus(env, "machine", Number(auth.machine!.id), { last_seen_at: now() });
+  await reportStatus(env, "machine", Number(auth.machine!.id), { last_seen_at: now(), connected: true });
   return json(await machineNodes(env, auth.machine!));
 });
 

@@ -77,6 +77,9 @@ test("node and machine runtime status persist in the global StatusHub", () => {
   assert.match(source, /updatedAt - Number\(this\.persistedStatusAt\.get\(key\) \|\| 0\) >= 60/);
   assert.match(source, /updatedAt - lastRecordedAt >= 300/);
   assert.match(source, /await this\.state\.storage\.put\(`history:\$\{id\}`, nextHistory\)/);
+  assert.match(source, /last_seen_at: recordedAt, connected: true, load_status: load/);
+  assert.match(source, /timestamp - Number\(identity\.last_status_at \|\| 0\) >= 240/);
+  assert.match(source, /last_seen_at: timestamp, connected: true/);
   assert.doesNotMatch(source, /RUNTIME_ANALYTICS/);
   assert.doesNotMatch(wrangler, /analytics_engine_datasets/);
   assert.match(wrangler, /name = "STATUS_HUB"/);

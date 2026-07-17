@@ -484,6 +484,7 @@ test("node list exposes upstream-compatible health and load fields", () => {
   assert.match(source, /load_status: loadStatus/);
   assert.match(source, /online_conn: Number\(metrics\?\.active_connections \|\| 0\)/);
   assert.match(source, /machines\.find\(item => Number\(item\.id\) === Number\(server\.machine_id\)\)/);
+  assert.match(source, /machineState\.connected === false && disconnectedAt >= reportedAt/);
   assert.match(source, /machineOnline \? machineSeenAt : 0/);
   assert.match(source, /const loadStatus = nodeState\.load_status \|\| machineState\.load_status \|\| null/);
 });
