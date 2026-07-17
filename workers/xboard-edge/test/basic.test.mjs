@@ -212,6 +212,23 @@ test("server validation keeps public and backend ports independent", () => {
   assert.doesNotMatch(source, /server\.name = `\$\{server\.name \|\| "Node"\} Copy`/);
 });
 
+test("success responses preserve the upstream ApiResponse envelope", () => {
+  const script = `
+    const { ok } = await import("./src/compat.ts");
+    const response = ok({ value: 1 });
+    console.log(JSON.stringify({ statusCode: response.status, body: await response.json() }));
+  `;
+  const result = spawnSync(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", script], {
+    cwd: process.cwd(),
+    encoding: "utf8"
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout.trim()), {
+    statusCode: 200,
+    body: { status: "success", message: "操作成功", data: { value: 1 }, error: null }
+  });
+});
+
 test("bootstrap preserves renamed default groups", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /INSERT INTO v2_server_group[\s\S]*?ON CONFLICT\(id\) DO NOTHING/);

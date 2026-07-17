@@ -3,7 +3,12 @@ export const json = (data: unknown, status = 200) => new Response(JSON.stringify
   status,
   headers: { "content-type": "application/json; charset=utf-8" }
 });
-export const ok = (data: unknown = true) => json({ data });
+export const ok = (data: unknown = true) => json({
+  status: "success",
+  message: "操作成功",
+  data,
+  error: null
+});
 export const fail = (message = "Error", status = 400, code = 400) => json({ message, errors: message, code }, status);
 export async function body<T = Record<string, unknown>>(request: Request): Promise<T> {
   const type = (request.headers.get("content-type") || "").toLowerCase();
