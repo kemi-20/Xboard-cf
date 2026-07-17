@@ -3763,6 +3763,8 @@ async function adminUi(securePath: string) {
         };
         const install = () => {
           const nav = document.querySelector("aside nav");
+          nav?.querySelector("#xboard-migration-menu")?.closest("li")?.remove();
+          nav?.querySelector("#xboard-migration-menu")?.remove();
           // Reserved for future native plugin, payment, and theme implementations. Keep routes and code, hide only their menus.
           nav?.querySelectorAll('a[href]').forEach(menu => {
             const target = new URL(menu.href, location.href);
@@ -3780,28 +3782,29 @@ async function adminUi(securePath: string) {
           };
           const language = localStorage.getItem("i18nextLng") || "zh-CN";
           const label = migrationLabels[language] || migrationLabels["en-US"];
-          let link = nav?.querySelector("#xboard-migration-menu");
-          if (nav && !link) {
-            const knowledgeLink = Array.from(nav.querySelectorAll("a[href]")).find(menu => {
+          const settingsNav = document.querySelector("main nav");
+          let link = settingsNav?.querySelector("#xboard-migration-settings-menu");
+          if (settingsNav && !link) {
+            const subscribeTemplateLink = Array.from(settingsNav.querySelectorAll("a[href]")).find(menu => {
               const target = new URL(menu.href, location.href);
-              return (target.hash.replace(/^#/, "") || target.pathname) === "/config/knowledge";
+              return (target.hash.replace(/^#/, "") || target.pathname) === "/config/system/subscribe-template";
             });
-            const sourceItem = knowledgeLink?.closest("li") || knowledgeLink;
+            const sourceItem = subscribeTemplateLink?.closest("li") || subscribeTemplateLink;
             if (sourceItem) {
               const item = sourceItem.cloneNode(true);
               link = item.matches("a") ? item : item.querySelector("a");
               if (link) {
-                link.id = "xboard-migration-menu";
+                link.id = "xboard-migration-settings-menu";
                 link.href = href;
-                link.innerHTML = '<div class="mr-2"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="tabler-icon tabler-icon-database-import"><path d="M4 6a8 3 0 1 0 16 0a8 3 0 1 0 -16 0"></path><path d="M4 6v12"></path><path d="M20 6v8"></path><path d="M4 12a8 3 0 0 0 16 0"></path><path d="M4 18c0 1.657 3.582 3 8 3c1.05 0 2.052-.076 2.25-.214"></path><path d="M20 17v6"></path><path d="M17 20l3 3l3 -3"></path></svg></div><span></span>';
+                link.textContent = label.text;
+                link.title = label.title;
                 sourceItem.insertAdjacentElement("afterend", item);
               }
             }
           }
-          link = nav?.querySelector("#xboard-migration-menu");
-          const text = link?.querySelector("span");
+          link = settingsNav?.querySelector("#xboard-migration-settings-menu");
           if (link && link.title !== label.title) link.title = label.title;
-          if (text && text.textContent !== label.text) text.textContent = label.text;
+          if (link && link.textContent !== label.text) link.textContent = label.text;
           updateFooterDate();
         };
         new MutationObserver(install).observe(document.documentElement, { childList: true, subtree: true });
