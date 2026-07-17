@@ -751,7 +751,7 @@ async function finishRollback(request: Request, env: MigrationEnv) {
       if (Number(row.existed)) await env.XBOARD_KV.put(String(row.key_name), String(row.value ?? ""));
       else await env.XBOARD_KV.delete(String(row.key_name));
     }
-    for (const key of ["settings:all", "settings_version", "servers_version"]) {
+    for (const key of ["settings:all", "settings_version", "servers_version", "templates_version", "content_version"]) {
       try { await env.XBOARD_KV.delete(key); } catch { /* D1 remains authoritative. */ }
     }
   } catch (error) {
@@ -846,12 +846,14 @@ async function finishMigration(request: Request, env: MigrationEnv) {
     await markMigrationFailed(env, runId, "完成数据切换失败", details);
     return migrationError(`完成数据切换失败：${details.error}`, 500, details);
   }
-  for (const key of ["settings:all", "settings_version", "servers_version"]) {
+  for (const key of ["settings:all", "settings_version", "servers_version", "templates_version", "content_version"]) {
     try { await env.XBOARD_KV.delete(key); } catch { /* D1 remains authoritative. */ }
   }
   try {
     await env.XBOARD_KV.put("settings_version", String(Date.now()));
     await env.XBOARD_KV.put("servers_version", String(Date.now()));
+    await env.XBOARD_KV.put("templates_version", String(Date.now()));
+    await env.XBOARD_KV.put("content_version", String(Date.now()));
   } catch { /* Cache invalidation is best effort. */ }
   invalidateSettingsCache();
   await resetServerRuntime(env);

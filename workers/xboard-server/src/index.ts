@@ -1,6 +1,7 @@
 import type { D1Database, KVNamespace, Queue, DurableObjectState, ExecutionContext } from "./types.ts";
 import { now } from "./compat.ts";
 import { invalidateSettingsCache, primaryDatabase, settings as loadSettings } from "./db.ts";
+import { cachedData } from "./cache.ts";
 import {
   availableUser, billableTraffic, buildNodeConfig, isValidNodeType, normalizeNodeType,
   parseJson, parseTraffic, responseEtag, type Row
@@ -172,24 +173,35 @@ async function routeRows(env: Env, node: Row): Promise<Row[]> {
 }
 
 async function nodeConfig(env: Env, node: Row) {
+  let version = "0";
+  try { version = await env.XBOARD_KV.get("servers_version") || "0"; } catch {}
+  const [pushInterval, pullInterval] = await Promise.all([
+    setting(env, "server_push_interval", "300"),
+    setting(env, "server_pull_interval", "300")
+  ]);
+  return cachedData(`node-config:${node.id}:${node.updated_at || 0}:${version}:${pushInterval}:${pullInterval}`, 300, async () => {
   const parent = Number(node.parent_id) > 0
     ? await env.XBOARD_DB.prepare("SELECT created_at FROM v2_server WHERE id = ?").bind(Number(node.parent_id)).first<{ created_at: number }>()
     : null;
   const config = buildNodeConfig({ ...node, parent_created_at: parent?.created_at }, await routeRows(env, node));
   config.base_config = {
-    push_interval: Number(await setting(env, "server_push_interval", "300")),
-    pull_interval: Number(await setting(env, "server_pull_interval", "300"))
+    push_interval: Number(pushInterval),
+    pull_interval: Number(pullInterval)
   };
   return config;
+  }, 900);
 }
 
 async function nodeUsers(env: Env, node: Row): Promise<Row[]> {
+  const bucket = Math.floor(now() / 30);
+  return cachedData(`node-users:${node.id}:${node.updated_at || 0}:${bucket}`, 30, async () => {
   const groupIds = parseJson<any[]>(node.group_ids, []).map(Number).filter(Number.isFinite);
   if (!groupIds.length) return [];
   const marks = groupIds.map(() => "?").join(",");
   const result = await env.XBOARD_DB.prepare(`SELECT id, uuid, speed_limit, device_limit FROM v2_user WHERE group_id IN (${marks}) AND (u + d) < transfer_enable AND (expired_at >= ? OR expired_at IS NULL) AND banned = 0`)
     .bind(...groupIds, now()).all<Row>();
   return (result.results || []).map(availableUser);
+  }, 30);
 }
 
 async function etagResponse(request: Request, data: unknown) {

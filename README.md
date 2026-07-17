@@ -149,9 +149,9 @@ flowchart TB
   NotificationQ -. "连续失败" .-> NotificationDLQ
 
   subgraph Data["数据与缓存层"]
-    Memory["Worker isolate 内存缓存<br/>设置热缓存 / 并发请求合并<br/>Queue 统计与流量排行一级缓存"]
-    CacheAPI["Cloudflare Cache API<br/>Queue 统计 60 秒<br/>流量排行 30 秒"]
-    KV["KV: xboard-kv<br/>Session / 验证码 / 限流<br/>版本号 / 设置快照 / 订阅短缓存"]
+    Memory["Worker isolate 内存缓存<br/>设置与读取模型热缓存<br/>同键并发请求合并"]
+    CacheAPI["Cloudflare Cache API<br/>统计 / 配置 / 内容 / 订阅<br/>StatusHub 读取结果"]
+    KV["KV: xboard-kv<br/>Session / 验证码 / 限流<br/>版本号 / 设置快照"]
     D1["D1: xboard-db<br/>用户 / 套餐 / 节点 / 订单 / 余额<br/>设置 / 最终流量 / 统计 / 审计"]
     Pending["v2_traffic_pending_check<br/>仅保存真正需要复查的用户"]
     Outbox["v2_traffic_stats_outbox<br/>每个聚合批次最多一行<br/>成功投递 DO 后删除"]
@@ -161,8 +161,10 @@ flowchart TB
   Server -. "内存 -> KV -> D1" .-> Memory
   Jobs -. "内存 -> KV -> D1" .-> Memory
   Memory -. "版本快照；失败时跳过" .-> KV
-  Edge -. "统计与排行短缓存" .-> CacheAPI
-  CacheAPI -. "未命中或过期" .-> D1
+  Edge -. "统计、配置、内容与订阅" .-> CacheAPI
+  Server -. "节点配置与用户快照" .-> CacheAPI
+  CacheAPI -. "未命中、过期或不可用" .-> D1
+  CacheAPI -. "状态缓存未命中" .-> StatusHub
   KV -. "缓存未命中或不可用" .-> D1
   Edge <-->|"正式业务读写"| D1
   Server <-->|"配置读取 / 流量事件来源"| D1
@@ -205,8 +207,8 @@ flowchart TB
 
 - **D1**：用户、套餐、权限组、节点配置、订单、余额、最终流量、统计和系统设置的权威数据。业务请求默认使用 `first-primary` Session，确保同一请求内顺序一致且能够读取自己的写入；Edge 内部订阅模块和两个经过审计的匿名展示接口从可用读取副本开始。
 - **KV**：Session、验证码、限流、版本号和可重建缓存；不是 Redis 数据的逐键永久替代品。
-- **Worker isolate 内存缓存**：每个 Worker 实例独立保存设置热缓存并合并并发回源请求；`xboard-edge` 还用它作为 Queue 统计和流量排行的第一级短缓存。实例回收后缓存自然消失，不能保存权威数据。
-- **Cloudflare Cache API**：保存后台 Queue 统计 60 秒、流量排行 30 秒等可重新计算的短时结果，跨请求复用但不增加 KV 写入；未命中或过期时直接重新查询 D1。
+- **Worker isolate 内存缓存**：每个 Worker 实例独立保存设置和读取模型热缓存，并用 single-flight 合并同一缓存键的并发回源。实例回收后缓存自然消失，不能保存权威数据。
+- **Cloudflare Cache API**：保存后台统计、节点与机器基础快照、套餐、权限组、路由、公告、知识库、订阅正文、节点配置、节点用户列表及 StatusHub 读取结果。缓存键包含现有版本号，后台修改后自动切换到新键；Cache API 不可用、内容过期或读取失败时直接回到 D1/StatusHub。订阅正文不再写入 KV。
 - **NodeHub**：维护节点或机器的 WebSocket 连接及配置、用户热同步。
 - **StatusHub**：保存高频在线状态、设备状态和机器心跳；运行状态最多每 60 秒持久化一次，设备成员最多每 240 秒持久化一次。机器负载每 300 秒追加一个样本，并持续裁剪为最近 24 小时、最多 1440 点。
 - **TrafficStatsHub**：单个全局 DO 按 `batch_id` 去重，将用户日状态按 `user_id % 16` 分片，服务器日状态单独聚合；每小时把绝对累计值覆盖回原版 `v2_stat*` 表，不保存分析副本。
@@ -216,7 +218,7 @@ flowchart TB
 
 原版 `v2_stat_user`、`v2_stat_server` 和 `v2_stat` 继续保留。TrafficStatsHub 使用绝对值 `ON CONFLICT ... DO UPDATE SET value = excluded.value` 物化，重复执行不会叠加；`v2_stat` 只覆盖 `transfer_used`，不会改写收入、订单、佣金或注册统计。SQLite 导出前会强制补投 Outbox 和物化，失败时导出中断；完整迁移、覆盖导入和回滚会清空 Outbox 与 DO 状态，再从切换后的原版统计表建立当日基线。
 
-后台 Queue 统计使用 Worker isolate 内存与 Cloudflare Cache API 缓存 60 秒，流量排行缓存 30 秒，不增加 KV 写入。Cron 只有一个每分钟 Trigger，并使用一个共享 D1 所有权锁；健康心跳 `schedule:last_check_at` 最多每 300 秒刷新一次。WebSocket 在线路由 KV 只在连接变化、断开或持续在线满 6 小时时刷新，不随每次 `pong` 写入。
+后台概览缓存 15–30 秒，Queue 统计和流量排行缓存 60 秒，历史排行与内容快照缓存 5–10 分钟；机器负载趋势缓存 60 秒。节点配置按 `servers_version` 缓存 300 秒，节点用户列表仅缓存 30 秒，认证、流量上报、设备报告、余额和限额判断从不缓存。Cron 只有一个每分钟 Trigger，并使用一个共享 D1 所有权锁；健康心跳 `schedule:last_check_at` 最多每 300 秒刷新一次。WebSocket 在线路由 KV 只在连接变化、断开或持续在线满 6 小时时刷新，不随每次 `pong` 写入。
 
 ## 邮件服务
 

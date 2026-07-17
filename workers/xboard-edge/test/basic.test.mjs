@@ -212,6 +212,16 @@ test("server validation keeps public and backend ports independent", () => {
   assert.doesNotMatch(source, /server\.name = `\$\{server\.name \|\| "Node"\} Copy`/);
 });
 
+test("repeated read models use coalesced Cache API snapshots", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /const responseDataPromises = new Map/);
+  assert.match(source, /admin-stat-override", 15/);
+  assert.match(source, /admin-stats", 30/);
+  assert.match(source, /admin-server-base:\$\{version\}/);
+  assert.match(source, /machine-history:\$\{machineId\}/);
+  assert.match(source, /content_version/);
+});
+
 test("success responses preserve the upstream ApiResponse envelope", () => {
   const script = `
     const { ok } = await import("./src/compat.ts");

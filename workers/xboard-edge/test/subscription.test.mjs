@@ -250,11 +250,13 @@ test("invalid type filters behave like upstream and do not hide all nodes", () =
   assert.match(source, /requestedTypes\.length && !requestedTypes\.includes\(server\.type\)/);
 });
 
-test("subscription generation survives KV quota and cache failures", () => {
+test("subscription generation uses Cache API without writing payloads to KV", () => {
   const source = fs.readFileSync("src/subscription/kv.ts", "utf8");
-  assert.match(source, /try[\s\S]*await kv\.get\(key\)[\s\S]*catch/);
+  assert.match(source, /crypto\.subtle\.digest\("SHA-256"/);
+  assert.match(source, /await cache\.match\(request\)/);
   assert.match(source, /const value = await load\(\)/);
-  assert.match(source, /try[\s\S]*await kv\.put\(key[\s\S]*catch/);
+  assert.match(source, /await cache\.put\(request/);
+  assert.doesNotMatch(source, /_kv\.(?:get|put)\(/);
 });
 
 test("subscription settings decorate server names like upstream", () => {

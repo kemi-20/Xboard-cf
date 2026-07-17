@@ -25,6 +25,15 @@ test("node polling defaults to five minutes", () => {
   assert.doesNotMatch(source, /setting\(env, "server_(?:push|pull)_interval", "60"\)/);
 });
 
+test("node configuration and user snapshots use Cache API after authentication", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const cache = fs.readFileSync("src/cache.ts", "utf8");
+  assert.match(source, /node-config:\$\{node\.id\}/);
+  assert.match(source, /node-users:\$\{node\.id\}/);
+  assert.match(cache, /await cache\.match\(request\)/);
+  assert.match(cache, /const pending = new Map/);
+});
+
 test("websocket settings accept both SQLite booleans and numeric flags", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /function booleanSetting\(value: unknown, fallback = false\)/);
