@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import initSqlJs from "sql.js";
 
-const source = fs.readFileSync("src/index.ts", "utf8");
+const source = fs.readFileSync("src/index.ts", "utf8") + fs.readFileSync("src/user/orders.ts", "utf8");
 
 test("balance-sensitive routes use state-guarded writes", () => {
   assert.match(source, /UPDATE v2_order SET status=1,paid_at=\?,callback_no=\?,updated_at=\?.*status=0 RETURNING id/);

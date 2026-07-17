@@ -20,6 +20,36 @@ import {
 } from "./admin/contract";
 import { generateEch } from "./ech";
 import { isNodeProtocolPath } from "./node-protocol";
+import {
+  clearStatus as clearRuntimeStatus,
+  liveDeviceSnapshot as runtimeDeviceSnapshot,
+  liveOnlineSummary as runtimeOnlineSummary,
+  machineHistory as runtimeMachineHistory,
+  statusSnapshot as runtimeStatusSnapshot
+} from "./internal/status-client";
+import {
+  adminStats as loadAdminStats,
+  orderStats as loadOrderStats,
+  trafficRank as loadTrafficRank
+} from "./admin/statistics";
+import {
+  adminPlanRows as loadAdminPlanRows,
+  planById as loadPlanById,
+  publicPlanRows as loadPublicPlanRows
+} from "./admin/plans";
+import { adminUserList as loadAdminUserList, adminUserQuery as buildAdminUserQuery } from "./admin/users";
+import {
+  adminMachineHistory as loadAdminMachineHistory,
+  adminMachineRows as loadAdminMachineRows,
+  adminRouteRows as loadAdminRouteRows,
+  adminServerGroupRows as loadAdminServerGroupRows,
+  adminServerRows as loadAdminServerRows,
+  groupById as loadGroupById,
+  nodeAvailableStatus,
+  normalizePublicPort
+} from "./admin/servers";
+import { handleUserTickets } from "./user/tickets";
+import { handleUserOrders } from "./user/orders";
 
 export interface Env {
   XBOARD_DB: D1Database;
@@ -1082,335 +1112,65 @@ function monthStart(ts = now()) {
   return Math.floor(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1) / 1000) - APP_TIMEZONE_OFFSET;
 }
 
-async function adminStats(env: Env) {
-  const current = now();
-  const today = dayStart();
-  const yesterday = today - 86400;
-  const month = monthStart();
-  const lastMonth = monthStart(month - 1);
-  const twoMonthsAgo = monthStart(lastMonth - 1);
-  const nodes = await adminServerRows(env);
-  const liveOnline = await liveOnlineSummary(env);
-  const totalUsers = await firstNumber(env, "SELECT COUNT(*) AS c FROM v2_user");
-  const activeUsers = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE expired_at IS NULL OR expired_at >= ${current}`);
-  const currentMonthNewUsers = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE created_at >= ${month} AND created_at < ${current}`);
-  const lastMonthNewUsers = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE created_at >= ${lastMonth} AND created_at < ${month}`);
-  const todayIncome = await firstNumber(env, `SELECT COALESCE(SUM(total_amount), 0) AS c FROM v2_order WHERE created_at >= ${today} AND created_at < ${current} AND status NOT IN (0,2)`);
-  const yesterdayIncome = await firstNumber(env, `SELECT COALESCE(SUM(total_amount), 0) AS c FROM v2_order WHERE created_at >= ${yesterday} AND created_at < ${today} AND status NOT IN (0,2)`);
-  const currentMonthIncome = await firstNumber(env, `SELECT COALESCE(SUM(total_amount), 0) AS c FROM v2_order WHERE created_at >= ${month} AND created_at < ${current} AND status NOT IN (0,2)`);
-  const lastMonthIncome = await firstNumber(env, `SELECT COALESCE(SUM(total_amount), 0) AS c FROM v2_order WHERE created_at >= ${lastMonth} AND created_at < ${month} AND status NOT IN (0,2)`);
-  const twoMonthsAgoIncome = await firstNumber(env, `SELECT COALESCE(SUM(total_amount), 0) AS c FROM v2_order WHERE created_at >= ${twoMonthsAgo} AND created_at < ${lastMonth} AND status NOT IN (0,2)`);
-  const currentMonthCommissionPayout = await firstNumber(env, `SELECT COALESCE(SUM(get_amount), 0) AS c FROM v2_commission_log WHERE created_at >= ${month} AND created_at < ${current}`);
-  const lastMonthCommissionPayout = await firstNumber(env, `SELECT COALESCE(SUM(get_amount), 0) AS c FROM v2_commission_log WHERE created_at >= ${lastMonth} AND created_at < ${month}`);
-  const twoMonthsAgoCommission = await firstNumber(env, `SELECT COALESCE(SUM(get_amount), 0) AS c FROM v2_commission_log WHERE created_at >= ${twoMonthsAgo} AND created_at < ${lastMonth}`);
-  const monthUpload = await firstNumber(env, `SELECT COALESCE(SUM(u), 0) AS c FROM v2_stat_server WHERE record_at >= ${month} AND record_at < ${current}`);
-  const monthDownload = await firstNumber(env, `SELECT COALESCE(SUM(d), 0) AS c FROM v2_stat_server WHERE record_at >= ${month} AND record_at < ${current}`);
-  const todayUpload = await firstNumber(env, `SELECT COALESCE(SUM(u), 0) AS c FROM v2_stat_server WHERE record_at >= ${today} AND record_at < ${current}`);
-  const todayDownload = await firstNumber(env, `SELECT COALESCE(SUM(d), 0) AS c FROM v2_stat_server WHERE record_at >= ${today} AND record_at < ${current}`);
-  const totalUpload = await firstNumber(env, "SELECT COALESCE(SUM(u), 0) AS c FROM v2_stat_server");
-  const totalDownload = await firstNumber(env, "SELECT COALESCE(SUM(d), 0) AS c FROM v2_stat_server");
-  const growth = (value: number, previous: number) => previous > 0 ? Math.round(((value - previous) / previous) * 1000) / 10 : 0;
+function adminStats(env: Env) {
+  return loadAdminStats(env, { dayStart, monthStart, adminServerRows, liveOnlineSummary, firstNumber });
+}
+
+function orderStats(env: Env, url: URL) {
+  return loadOrderStats(env, url);
+}
+
+function trafficRank(env: Env, url: URL) {
+  return loadTrafficRank(env, url);
+}
+function planById(env: Env, id: unknown) {
+  return loadPlanById(env, id);
+}
+function serverDeps() {
   return {
-    todayIncome,
-    dayIncomeGrowth: growth(todayIncome, yesterdayIncome),
-    currentMonthIncome,
-    lastMonthIncome,
-    monthIncomeGrowth: growth(currentMonthIncome, lastMonthIncome),
-    lastMonthIncomeGrowth: growth(lastMonthIncome, twoMonthsAgoIncome),
-    currentMonthCommissionPayout,
-    lastMonthCommissionPayout,
-    commissionGrowth: growth(lastMonthCommissionPayout, twoMonthsAgoCommission),
-    ticketPendingTotal: await firstNumber(env, "SELECT COUNT(*) AS c FROM v2_ticket WHERE status = 0"),
-    commissionPendingTotal: await firstNumber(env, "SELECT COUNT(*) AS c FROM v2_order WHERE commission_status = 0 AND invite_user_id IS NOT NULL AND status = 3 AND commission_balance > 0"),
-    currentMonthNewUsers,
-    userGrowth: growth(currentMonthNewUsers, lastMonthNewUsers),
-    totalUsers,
-    activeUsers,
-    onlineUsers: liveOnline?.users ?? await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE online_count > 0 AND last_online_at >= ${current - 600}`),
-    onlineDevices: liveOnline?.devices ?? await firstNumber(env, `SELECT COALESCE(SUM(online_count), 0) AS c FROM v2_user WHERE online_count > 0 AND last_online_at >= ${current - 600}`),
-    onlineNodes: nodes.filter(node => Number((node as any).available_status) > 0).length,
-    todayTraffic: { upload: todayUpload, download: todayDownload, total: todayUpload + todayDownload },
-    monthTraffic: { upload: monthUpload, download: monthDownload, total: monthUpload + monthDownload },
-    totalTraffic: { upload: totalUpload, download: totalDownload, total: totalUpload + totalDownload }
+    optionalKvGet,
+    parseJsonArray,
+    parseJsonObject,
+    routeMatchArray,
+    isNilLike,
+    nullableNumber,
+    statusSnapshot,
+    machineHistory: (env: Env, machineId: number, limit: number, rangeHours: number | null) =>
+      runtimeMachineHistory(env, () => internalSyncToken(env), machineId, limit, rangeHours)
   };
 }
 
-function dateString(ts: number) {
-  return new Date((ts + APP_TIMEZONE_OFFSET) * 1000).toISOString().slice(0, 10);
+function groupById(env: Env, id: unknown) {
+  return loadGroupById(env, id);
 }
 
-async function orderStats(env: Env, url: URL) {
-  const start = url.searchParams.get("start_date");
-  const end = url.searchParams.get("end_date");
-  const type = url.searchParams.get("type");
-  const allowedTypes = new Set(["paid_total", "paid_count", "commission_total", "commission_count"]);
-  const clauses = ["record_type = 'd'"];
-  const bindings: number[] = [];
-  if (start) {
-    clauses.push("record_at >= ?");
-    bindings.push(Math.floor(Date.parse(`${start}T00:00:00+08:00`) / 1000));
-  }
-  if (end) {
-    clauses.push("record_at <= ?");
-    bindings.push(Math.floor(Date.parse(`${end}T23:59:59+08:00`) / 1000));
-  }
-  const result = await env.XBOARD_DB.prepare(`SELECT record_at,paid_total,paid_count,commission_total,commission_count FROM v2_stat WHERE ${clauses.join(" AND ")} ORDER BY record_at DESC`)
-    .bind(...bindings).all<Record<string, any>>();
-  const rows = result.results || [];
-  const dailyStats = rows.map(row => {
-    const date = dateString(Number(row.record_at || 0));
-    if (type && allowedTypes.has(type)) {
-      const labels: Record<string, string> = { paid_total: "收款金额", paid_count: "收款笔数", commission_total: "佣金金额", commission_count: "佣金笔数" };
-      return { date, value: Number(row[type] || 0), type: labels[type] };
-    }
-    const paidTotal = Number(row.paid_total || 0);
-    const paidCount = Number(row.paid_count || 0);
-    const commissionTotal = Number(row.commission_total || 0);
-    const commissionCount = Number(row.commission_count || 0);
-    return {
-      date,
-      paid_total: paidTotal,
-      paid_count: paidCount,
-      commission_total: commissionTotal,
-      commission_count: commissionCount,
-      avg_order_amount: paidCount > 0 ? Math.round(paidTotal / paidCount * 100) / 100 : 0,
-      avg_commission_amount: commissionCount > 0 ? Math.round(commissionTotal / commissionCount * 100) / 100 : 0
-    };
-  });
-  const list = [...dailyStats].reverse();
-  const fullRows = rows.map(row => ({
-    paid_total: Number(row.paid_total || 0),
-    paid_count: Number(row.paid_count || 0),
-    commission_total: Number(row.commission_total || 0),
-    commission_count: Number(row.commission_count || 0)
-  }));
-  const paidTotal = fullRows.reduce((sum, item) => sum + item.paid_total, 0);
-  const paidCount = fullRows.reduce((sum, item) => sum + item.paid_count, 0);
-  const commissionTotal = fullRows.reduce((sum, item) => sum + item.commission_total, 0);
-  const commissionCount = fullRows.reduce((sum, item) => sum + item.commission_count, 0);
-  return {
-    summary: {
-      start_date: start || (rows.length ? dateString(Number(rows.at(-1)?.record_at || 0)) : dateString(now())),
-      end_date: end || (rows.length ? dateString(Number(rows[0]?.record_at || 0)) : dateString(now())),
-      paid_total: paidTotal,
-      paid_count: paidCount,
-      commission_total: commissionTotal,
-      commission_count: commissionCount,
-      avg_paid_amount: paidCount ? Math.round(paidTotal / paidCount * 100) / 100 : 0,
-      avg_commission_amount: commissionCount ? Math.round(commissionTotal / commissionCount * 100) / 100 : 0,
-      commission_rate: paidTotal ? Math.round(commissionTotal / paidTotal * 10000) / 100 : 0
-    },
-    list
-  };
+function adminServerGroupRows(env: Env) {
+  return loadAdminServerGroupRows(env, serverDeps());
 }
-
-async function trafficRank(env: Env, url: URL) {
-  const type = String(url.searchParams.get("type"));
-  const start = Number(url.searchParams.get("start_time") || now() - 7 * 86400);
-  const end = Number(url.searchParams.get("end_time") || now());
-  const startBucket = Math.floor(start / 300);
-  const endBucket = Math.floor(end / 300);
-  return cachedData(`traffic-rank:${type}:${startBucket}:${endBucket}`, 300, async () => {
-  const previousStart = start - Math.max(0, end - start);
-  const calculateChange = (value: number, previousValue: number) => previousValue > 0
-    ? Math.round(((value - previousValue) / previousValue) * 1000) / 10
-    : 0;
-  if (type === "node") {
-    try {
-      const rows = await env.XBOARD_DB.prepare(
-        `WITH traffic AS (
-           SELECT server_id AS id,
-             SUM(CASE WHEN record_at >= ? AND record_at <= ? THEN u + d ELSE 0 END) AS value,
-             SUM(CASE WHEN record_at >= ? AND record_at < ? THEN u + d ELSE 0 END) AS previousValue
-           FROM v2_stat_server
-           WHERE record_at >= ? AND record_at <= ? AND COALESCE(record_type, 'd') = 'd'
-           GROUP BY server_id
-         )
-         SELECT traffic.id, s.name, COALESCE(traffic.value, 0) AS value, COALESCE(traffic.previousValue, 0) AS previousValue
-         FROM traffic LEFT JOIN v2_server s ON s.id = traffic.id
-         WHERE traffic.value > 0 ORDER BY traffic.value DESC LIMIT 10`
-      ).bind(start, end, previousStart, start, previousStart, end).all<{ id: number; name: string; value: number; previousValue: number }>();
-      const ranked = (rows.results || []).map(row => {
-        const value = Number(row.value || 0); const previousValue = Number(row.previousValue || 0);
-        return { id: String(row.id), name: row.name || `Node ${row.id}`, value, previousValue, change: calculateChange(value, previousValue), timestamp: new Date(end * 1000).toISOString() };
-      });
-      return ranked;
-    } catch {
-      return [];
-    }
-  }
-  try {
-    const rows = await env.XBOARD_DB.prepare(
-      `WITH traffic AS (
-         SELECT user_id AS id,
-           SUM(CASE WHEN record_at >= ? AND record_at <= ? THEN u + d ELSE 0 END) AS value,
-           SUM(CASE WHEN record_at >= ? AND record_at < ? THEN u + d ELSE 0 END) AS previousValue
-         FROM v2_stat_user
-         WHERE record_at >= ? AND record_at <= ? AND COALESCE(record_type, 'd') = 'd'
-         GROUP BY user_id
-       )
-       SELECT traffic.id, u.email AS name, COALESCE(traffic.value, 0) AS value, COALESCE(traffic.previousValue, 0) AS previousValue
-       FROM traffic LEFT JOIN v2_user u ON u.id = traffic.id
-       WHERE traffic.value > 0 ORDER BY traffic.value DESC LIMIT 10`
-    ).bind(start, end, previousStart, start, previousStart, end).all<{ id: number; name: string; value: number; previousValue: number }>();
-    const ranked = (rows.results || []).map(row => {
-      const value = Number(row.value || 0); const previousValue = Number(row.previousValue || 0);
-      return { id: String(row.id), name: row.name || `User ${row.id}`, value, previousValue, change: calculateChange(value, previousValue), timestamp: new Date(end * 1000).toISOString() };
-    });
-    return ranked;
-  } catch {
-    return [];
-  }
+function adminUserList(env: Env, request: Request) {
+  return loadAdminUserList(env, request, {
+    parseJsonArray,
+    parseJsonObject,
+    safeUser,
+    paginated,
+    subscribeUrl,
+    liveDeviceSnapshot
   });
 }
-
-async function planById(env: Env, id: unknown) {
-  if (!id) return null;
-  return await env.XBOARD_DB.prepare("SELECT id, name FROM v2_plan WHERE id = ?").bind(id).first();
-}
-
-async function groupById(env: Env, id: unknown) {
-  if (!id) return null;
-  return await env.XBOARD_DB.prepare("SELECT id, name FROM v2_server_group WHERE id = ?").bind(id).first();
-}
-
-async function adminServerGroupRows(env: Env) {
-  const version = await optionalKvGet(env, "servers_version") || "0";
-  return cachedData(`admin-server-groups:${version}`, 60, async () => {
-  const [groupsResult, usersResult, serversResult] = await Promise.all([
-    env.XBOARD_DB.prepare("SELECT * FROM v2_server_group ORDER BY id DESC").all<Record<string, any>>(),
-    env.XBOARD_DB.prepare("SELECT group_id, COUNT(*) AS count FROM v2_user WHERE group_id IS NOT NULL GROUP BY group_id").all<{ group_id: number; count: number }>(),
-    env.XBOARD_DB.prepare("SELECT group_ids FROM v2_server").all<{ group_ids: string | null }>()
-  ]);
-  const userCounts = new Map((usersResult.results || []).map(row => [Number(row.group_id), Number(row.count || 0)]));
-  const serverCounts = new Map<number, number>();
-  for (const server of serversResult.results || []) {
-    for (const groupId of new Set(parseJsonArray(server.group_ids).map(Number).filter(Number.isFinite))) {
-      serverCounts.set(groupId, (serverCounts.get(groupId) || 0) + 1);
-    }
-  }
-  return (groupsResult.results || []).map(group => ({
-    ...group,
-    users_count: userCounts.get(Number(group.id)) || 0,
-    server_count: serverCounts.get(Number(group.id)) || 0
-  }));
-  }, 180);
-}
-
-const adminUserFields: Record<string, string> = {
-  id: "u.id", email: "u.email", plan_id: "u.plan_id", group_id: "u.group_id", banned: "u.banned", is_admin: "u.is_admin",
-  is_staff: "u.is_staff", balance: "u.balance", commission_balance: "u.commission_balance", transfer_enable: "u.transfer_enable",
-  u: "u.u", d: "u.d", total_used: "(COALESCE(u.u, 0) + COALESCE(u.d, 0))", created_at: "u.created_at", updated_at: "u.updated_at",
-  expired_at: "u.expired_at", plan_name: "p.name", "plan.name": "p.name", group_name: "g.name", "group.name": "g.name",
-  "invite_user.email": "iu.email", invite_user_id: "u.invite_user_id", group_ids: "u.group_id"
-};
 
 function adminUserQuery(input: Record<string, any>) {
-  const clauses: Array<{ sql: string; logic: "AND" | "OR" }> = [];
-  const bindings: any[] = [];
-  for (const filter of parseJsonArray(input.filter)) {
-    const field = adminUserFields[String(filter?.id || "")];
-    const value = filter?.value;
-    if (!field || value === undefined || value === null || value === "") continue;
-    if (Array.isArray(value)) {
-      if (!value.length) continue;
-      clauses.push({ sql: `${field} IN (${value.map(() => "?").join(",")})`, logic: String(filter?.logic || "and").toLowerCase() === "or" ? "OR" : "AND" });
-      bindings.push(...value);
-      continue;
-    }
-    const nullOperator = String(value).toLowerCase();
-    if (nullOperator === "null" || nullOperator === "notnull") {
-      clauses.push({ sql: `${field} IS ${nullOperator === "notnull" ? "NOT " : ""}NULL`, logic: String(filter?.logic || "and").toLowerCase() === "or" ? "OR" : "AND" });
-      continue;
-    }
-    const match = String(value).match(/^(eq|neq|gt|gte|lt|lte):(.*)$/s);
-    if (match) {
-      const operators: Record<string, string> = { eq: "=", neq: "!=", gt: ">", gte: ">=", lt: "<", lte: "<=" };
-      clauses.push({ sql: `${field} ${operators[match[1]]} ?`, logic: String(filter?.logic || "and").toLowerCase() === "or" ? "OR" : "AND" });
-      bindings.push(match[2]);
-    } else {
-      clauses.push({ sql: `${field} LIKE ?`, logic: String(filter?.logic || "and").toLowerCase() === "or" ? "OR" : "AND" });
-      bindings.push(`%${String(value)}%`);
-    }
-  }
-  const sort = parseJsonArray(input.sort)
-    .map(item => ({ field: adminUserFields[String(item?.id || "")], direction: item?.desc ? "DESC" : "ASC" }))
-    .filter(item => item.field);
-  return {
-    where: clauses.length ? ` WHERE ${clauses.map((clause, index) => `${index ? clause.logic : ""} (${clause.sql})`).join(" ")}` : "",
-    bindings,
-    order: [...sort.map(item => `${item.field} ${item.direction}`), "u.id DESC"].join(", ")
-  };
+  return buildAdminUserQuery(input, parseJsonArray);
+}
+function planDeps() {
+  return { optionalKvGet, parseJsonArray, parseJsonObject, pickSetting, orderPeriods };
 }
 
-async function adminUserList(env: Env, request: Request) {
-  const input = request.method === "POST" ? await body<Record<string, any>>(request.clone()) : {};
-  const url = new URL(request.url);
-  const page = Math.max(1, Number(input.page || input.current || url.searchParams.get("page") || 1));
-  const pageSize = Math.min(100, Math.max(1, Number(input.page_size || input.pageSize || input.limit || url.searchParams.get("page_size") || 20)));
-  const query = adminUserQuery(input);
-  const [usersResult, countResult] = await Promise.all([
-    env.XBOARD_DB.prepare(`SELECT u.* FROM v2_user u LEFT JOIN v2_plan p ON p.id = u.plan_id LEFT JOIN v2_server_group g ON g.id = u.group_id LEFT JOIN v2_user iu ON iu.id = u.invite_user_id${query.where} ORDER BY ${query.order} LIMIT ? OFFSET ?`)
-      .bind(...query.bindings, pageSize, (page - 1) * pageSize).all<Record<string, any>>(),
-    env.XBOARD_DB.prepare(`SELECT COUNT(*) AS count FROM v2_user u LEFT JOIN v2_plan p ON p.id = u.plan_id LEFT JOIN v2_server_group g ON g.id = u.group_id LEFT JOIN v2_user iu ON iu.id = u.invite_user_id${query.where}`)
-      .bind(...query.bindings).first<{ count: number }>()
-  ]);
-  const userRows = usersResult.results || [];
-  const liveDevices = await liveDeviceSnapshot(env);
-  const inviterIds = [...new Set(userRows.map(row => Number(row.invite_user_id || 0)).filter(Boolean))];
-  const planIds = [...new Set(userRows.map(row => Number(row.plan_id || 0)).filter(Boolean))];
-  const groupIds = [...new Set(userRows.map(row => Number(row.group_id || 0)).filter(Boolean))];
-  const inviters = new Map<number, { id: number; email: string }>();
-  const [inviterRows, planRows, groupRows] = await Promise.all([
-    inviterIds.length ? env.XBOARD_DB.prepare(`SELECT id, email FROM v2_user WHERE id IN (${inviterIds.map(() => "?").join(",")})`).bind(...inviterIds).all<any>() : Promise.resolve({ results: [] }),
-    planIds.length ? env.XBOARD_DB.prepare(`SELECT * FROM v2_plan WHERE id IN (${planIds.map(() => "?").join(",")})`).bind(...planIds).all<any>() : Promise.resolve({ results: [] }),
-    groupIds.length ? env.XBOARD_DB.prepare(`SELECT * FROM v2_server_group WHERE id IN (${groupIds.map(() => "?").join(",")})`).bind(...groupIds).all<any>() : Promise.resolve({ results: [] })
-  ]);
-  for (const inviter of inviterRows.results || []) inviters.set(Number(inviter.id), { id: Number(inviter.id), email: String(inviter.email || "") });
-  const plans = new Map((planRows.results || []).map((row: any) => [Number(row.id), { ...row, prices: parseJsonObject(row.prices), tags: parseJsonArray(row.tags) }]));
-  const groups = new Map((groupRows.results || []).map((row: any) => [Number(row.id), row]));
-  const data = await Promise.all(userRows.map(async row => ({
-      ...safeUser(row),
-      balance: Number(row.balance || 0) / 100,
-      commission_balance: Number(row.commission_balance || 0) / 100,
-      commission_type: Number(row.commission_type ?? 0),
-      total_used: Number(row.u || 0) + Number(row.d || 0),
-      used_traffic: Number(row.u || 0) + Number(row.d || 0),
-      subscribe_url: await subscribeUrl(request, env, row.token),
-      plan: plans.get(Number(row.plan_id || 0)) || null,
-      group: groups.get(Number(row.group_id || 0)) || null,
-      invite_user: inviters.get(Number(row.invite_user_id || 0)) || null,
-      online_count: liveDevices === null ? Number(row.online_count || 0) : (liveDevices[String(row.id)]?.length || 0),
-      last_online_at: liveDevices?.[String(row.id)]?.length ? now() : row.last_online_at
-    })));
-  return paginated(data, Number(countResult?.count || 0), page, pageSize);
+function adminPlanRows(env: Env) {
+  return loadAdminPlanRows(env, planDeps());
 }
 
-async function adminPlanRows(env: Env) {
-  const version = await optionalKvGet(env, "servers_version") || "0";
-  return cachedData(`admin-plans:${version}`, 60, async () => {
-  const current = now();
-  const [planResult, groupResult, countResult] = await Promise.all([
-    env.XBOARD_DB.prepare("SELECT * FROM v2_plan ORDER BY sort DESC, id DESC LIMIT 1000").all<Record<string, any>>(),
-    env.XBOARD_DB.prepare("SELECT id, name FROM v2_server_group").all<{ id: number; name: string }>(),
-    env.XBOARD_DB.prepare(`SELECT plan_id, COUNT(*) AS users_count,
-      SUM(CASE WHEN expired_at IS NULL OR expired_at > ? THEN 1 ELSE 0 END) AS active_users_count
-      FROM v2_user WHERE plan_id IS NOT NULL GROUP BY plan_id`).bind(current).all<{ plan_id: number; users_count: number; active_users_count: number }>()
-  ]);
-  const groups = new Map((groupResult.results || []).map(group => [Number(group.id), group]));
-  const counts = new Map((countResult.results || []).map(row => [Number(row.plan_id), row]));
-  return (planResult.results || []).map((plan): Record<string, any> => {
-    const count = counts.get(Number(plan.id));
-    return {
-      ...plan,
-      group: groups.get(Number(plan.group_id)) || null,
-      users_count: Number(count?.users_count || 0),
-      active_users_count: Number(count?.active_users_count || 0),
-      prices: typeof plan.prices === "string" ? (() => { try { return JSON.parse(plan.prices || "{}"); } catch { return {}; } })() : plan.prices,
-      tags: parseJsonArray(plan.tags)
-    } as Record<string, any>;
-  });
-  }, 180);
+function publicPlanRows(request: Request, env: Env) {
+  return loadPublicPlanRows(request, env, planDeps());
 }
 
 function requestLanguage(request: Request) {
@@ -1419,95 +1179,15 @@ function requestLanguage(request: Request) {
   if (language.startsWith("zh")) return "zh";
   return "en";
 }
-
-async function publicPlanRows(request: Request, env: Env) {
-  const all = await settings(env.XBOARD_DB, env.XBOARD_KV, env.SETTINGS_MEMORY_SCOPE || "primary");
-  const language = requestLanguage(request);
-  const text = {
-    en: { unlimited: "No Limit", soldOut: "Sold out", reset: ["First Day of Month", "Monthly", "Never", "First Day of Year", "Yearly"] },
-    zh: { unlimited: "无限制", soldOut: "已售罄", reset: ["每月1号", "按月重置", "不重置", "每年1月1日", "按年重置"] },
-    ru: { unlimited: "Без ограничений", soldOut: "Распродано", reset: ["Первый день месяца", "Ежемесячно", "Никогда", "Первый день года", "Ежегодно"] }
-  }[language];
-  return (await adminPlanRows(env)).map(plan => {
-    const prices = parseJsonObject(plan.prices);
-    const resetMethod = plan.reset_traffic_method === null || plan.reset_traffic_method === undefined
-      ? Number(pickSetting(all, "reset_traffic_method", 1))
-      : Number(plan.reset_traffic_method);
-    const replacements: Record<string, unknown> = {
-      "{{transfer}}": plan.transfer_enable,
-      "{{speed}}": plan.speed_limit === null || plan.speed_limit === undefined ? text.unlimited : plan.speed_limit,
-      "{{devices}}": plan.device_limit === null || plan.device_limit === undefined ? text.unlimited : plan.device_limit,
-      "{{reset_method}}": text.reset[resetMethod] || text.reset[1]
-    };
-    let content = String(plan.content || "");
-    for (const [key, value] of Object.entries(replacements)) content = content.replaceAll(key, String(value));
-    return {
-      id: plan.id, group_id: plan.group_id, name: plan.name, tags: parseJsonArray(plan.tags), content,
-      ...Object.fromEntries(Object.entries(orderPeriods).map(([legacy, current]) => {
-        const value = prices[current];
-        return [legacy, value === null || value === undefined || value === "" ? null : Number(value) * 100];
-      })),
-      capacity_limit: plan.capacity_limit === null || plan.capacity_limit === undefined
-        ? null
-        : Number(plan.capacity_limit) <= 0 ? text.soldOut : Number(plan.capacity_limit),
-      transfer_enable: plan.transfer_enable, speed_limit: plan.speed_limit, device_limit: plan.device_limit,
-      show: Boolean(Number(plan.show)), sell: Boolean(Number(plan.sell)), renew: Boolean(Number(plan.renew)),
-      reset_traffic_method: plan.reset_traffic_method, sort: plan.sort, created_at: plan.created_at, updated_at: plan.updated_at
-    };
-  });
+function adminRouteRows(env: Env) {
+  return loadAdminRouteRows(env, serverDeps());
+}
+function statusSnapshot(env: Env) {
+  return runtimeStatusSnapshot(env, () => internalSyncToken(env));
 }
 
-async function adminRouteRows(env: Env) {
-  const version = await optionalKvGet(env, "servers_version") || "0";
-  return cachedData(`admin-routes:${version}`, 300, async () => {
-  const routes = await rows(env.XBOARD_DB, "v2_server_route", 1000) as any[];
-  return routes.map(route => ({
-    ...route,
-    match: routeMatchArray(route.match)
-  }));
-  }, 900);
-}
-
-function nodeAvailableStatus(lastCheckAt: number | null, lastPushAt: number | null, timestamp = now()) {
-  if (!lastCheckAt || timestamp - 300 >= lastCheckAt) return 0;
-  if (!lastPushAt || timestamp - 300 >= lastPushAt) return 1;
-  return 2;
-}
-
-function parseKvObject(value: string | null) {
-  return value ? parseJsonObject(value) : null;
-}
-
-type StatusSnapshot = { machines: Record<string, Record<string, any>>; nodes: Record<string, Record<string, any>> };
-let statusSnapshotVersion = 0;
-let liveDeviceSnapshotCache: { value: Record<string, string[]>; expiresAt: number } | null = null;
-
-async function statusHubRequest(env: Env, path: string, init: RequestInit = {}) {
-  return env.XBOARD_SERVER.fetch(`https://xboard-server.internal/internal/status/${path}`, {
-    ...init,
-    headers: { ...(init.headers || {}), "x-xboard-internal-token": await internalSyncToken(env) }
-  });
-}
-
-async function statusSnapshot(env: Env): Promise<StatusSnapshot> {
-  return cachedData(`status-snapshot:${statusSnapshotVersion}`, 10, async () => {
-    const response = await statusHubRequest(env, "snapshot");
-    if (!response.ok) throw new Error(`StatusHub returned ${response.status}`);
-    const payload = await response.json() as { data?: StatusSnapshot };
-    return payload.data || { machines: {}, nodes: {} };
-  }, 30).catch(() => ({ machines: {}, nodes: {} }));
-}
-
-async function clearStatus(env: Env, kind: "machine" | "node", id: number) {
-  statusSnapshotVersion += 1;
-  liveDeviceSnapshotCache = null;
-  try {
-    await statusHubRequest(env, "clear", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ kind, id })
-    });
-  } catch { /* Stale runtime state is ignored when its D1 configuration no longer exists. */ }
+function clearStatus(env: Env, kind: "machine" | "node", id: number) {
+  return clearRuntimeStatus(env, () => internalSyncToken(env), kind, id);
 }
 
 async function optionalKvGet(env: Env, key: string) {
@@ -1522,184 +1202,25 @@ async function optionalKvPutTtl(env: Env, key: string, value: string, expiration
   try { await env.XBOARD_KV.put(key, value, { expirationTtl }); } catch { /* Verification mail can still be queued when KV is temporarily unavailable. */ }
 }
 
-async function liveDeviceSnapshot(env: Env): Promise<Record<string, string[]> | null> {
-  if (liveDeviceSnapshotCache && liveDeviceSnapshotCache.expiresAt > Date.now()) return liveDeviceSnapshotCache.value;
-  const value: Record<string, string[]> = {};
-  let available = false;
-  try {
-    const response = await statusHubRequest(env, "devices/list", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ timestamp: now() })
-    });
-    if (response.ok) {
-      const payload = await response.json() as { data?: { users?: Record<string, unknown> } };
-      if (payload.data?.users && typeof payload.data.users === "object" && !Array.isArray(payload.data.users)) {
-        available = true;
-        for (const [userId, ips] of Object.entries(payload.data.users)) {
-          value[userId] = Array.isArray(ips) ? [...new Set(ips.map(String).filter(Boolean))] : [];
-        }
-      }
-    }
-  } catch { /* Connection reports below can still provide a live fallback. */ }
-  const runtime = await statusSnapshot(env);
-  const cutoff = now() - 900;
-  const connectionCounts: Record<string, number> = {};
-  for (const node of Object.values(runtime.nodes || {})) {
-    const connectionsAt = Number(node.connections_at || node.updated_at || 0);
-    if (connectionsAt < cutoff || !node.connections || typeof node.connections !== "object" || Array.isArray(node.connections)) continue;
-    available = true;
-    for (const [userId, count] of Object.entries(node.connections)) {
-      const online = Math.max(0, Math.trunc(Number(count || 0)));
-      if (online > 0) connectionCounts[userId] = Number(connectionCounts[userId] || 0) + online;
-    }
-  }
-  for (const [userId, count] of Object.entries(connectionCounts)) {
-    const current = value[userId] || [];
-    const missing = Math.max(0, count - current.length);
-    if (missing) value[userId] = [...current, ...Array.from({ length: missing }, (_, index) => `__active_connection__:${index}`)];
-  }
-  if (!available) return null;
-  liveDeviceSnapshotCache = { value, expiresAt: Date.now() + 10_000 };
-  return value;
+function liveDeviceSnapshot(env: Env) {
+  return runtimeDeviceSnapshot(env, () => internalSyncToken(env));
 }
 
-async function liveOnlineSummary(env: Env) {
-  const devices = await liveDeviceSnapshot(env);
-  if (devices === null) return null;
-  const counts = Object.values(devices).map(ips => ips.length).filter(Boolean);
-  return { users: counts.length, devices: counts.reduce((total, count) => total + count, 0) };
+function liveOnlineSummary(env: Env) {
+  return runtimeOnlineSummary(env, () => internalSyncToken(env));
 }
 
-function normalizePublicPort(value: unknown) {
-  const port = String(value ?? "").trim();
-  return /^\d+\.0+$/.test(port) ? port.slice(0, port.indexOf(".")) : port;
+function adminServerRows(env: Env) {
+  return loadAdminServerRows(env, serverDeps());
 }
 
-async function adminServerRows(env: Env): Promise<Record<string, any>[]> {
-  const version = await optionalKvGet(env, "servers_version") || "0";
-  const [base, live] = await Promise.all([
-    cachedData(`admin-server-base:${version}`, 300, async () => {
-      const [serverResult, machineResult, groupResult] = await Promise.all([
-        env.XBOARD_DB.prepare("SELECT * FROM v2_server ORDER BY sort ASC, id ASC LIMIT 1000").all<Record<string, any>>(),
-        env.XBOARD_DB.prepare("SELECT * FROM v2_server_machine ORDER BY id ASC LIMIT 1000").all<Record<string, any>>(),
-        env.XBOARD_DB.prepare("SELECT * FROM v2_server_group ORDER BY id ASC LIMIT 1000").all<Record<string, any>>()
-      ]);
-      return { servers: serverResult.results || [], machines: machineResult.results || [], groups: groupResult.results || [] };
-    }, 900),
-    statusSnapshot(env)
-  ]);
-  const { servers, machines, groups: groupRows } = base;
-  const groupMap = new Map(groupRows.map(group => [Number(group.id), group]));
-  const out = [];
-  for (const server of servers) {
-    const stateId = Number(server.parent_id || server.id);
-    const ownId = Number(server.id);
-    const machine = Number(server.machine_id) > 0 ? machines.find(item => Number(item.id) === Number(server.machine_id)) : null;
-    const nodeState = live.nodes[String(stateId)] || (stateId !== ownId ? live.nodes[String(ownId)] : null) || {};
-    const machineState = machine ? live.machines[String(machine.id)] || {} : {};
-    const reportedAt = Number(machineState.last_seen_at || 0);
-    const disconnectedAt = Number(machineState.disconnected_at || 0);
-    const machineDisconnected = machineState.connected === false && disconnectedAt >= reportedAt;
-    const machineSeenAt = machine && Number(machine.is_active ?? machine.enabled ?? 1) === 1 && !machineDisconnected ? reportedAt : 0;
-    const machineOnline = machineSeenAt > 0 && now() - 300 < machineSeenAt;
-    const lastCheckAt = Math.max(Number(nodeState.last_check_at || 0), machineOnline ? machineSeenAt : 0) || null;
-    const lastPushAt = Math.max(Number(nodeState.last_push_at || 0), machineOnline ? machineSeenAt : 0) || null;
-    const availableStatus = nodeAvailableStatus(lastCheckAt, lastPushAt);
-    const loadStatus = nodeState.load_status || machineState.load_status || null;
-    const metrics = nodeState.metrics || (loadStatus?.metrics && typeof loadStatus.metrics === "object" ? loadStatus.metrics : null);
-    const groupIds = parseJsonArray(server.group_ids);
-    const groups = groupIds.map(id => groupMap.get(Number(id))).filter(Boolean);
-    out.push({
-      ...server,
-      port: normalizePublicPort(server.port),
-      show: Boolean(Number(server.show ?? 1)),
-      enabled: Boolean(Number(server.enabled ?? 1)),
-      rate_time_enable: Boolean(Number(server.rate_time_enable || 0)),
-      rate_time_ranges: parseJsonArray(server.rate_time_ranges),
-      group_ids: groupIds,
-      route_ids: parseJsonArray(server.route_ids),
-      tags: parseJsonArray(server.tags),
-      protocol_settings: parseJsonObject(server.protocol_settings),
-      custom_outbounds: parseJsonArray(server.custom_outbounds),
-      custom_routes: parseJsonArray(server.custom_routes),
-      cert_config: isNilLike(server.cert_config) ? null : parseJsonObject(server.cert_config),
-      groups,
-      parent: server.parent_id ? servers.find(s => Number(s.id) === Number(server.parent_id)) || null : null,
-      machine: machine ? { ...machine, token: undefined, load_status: loadStatus } : null,
-      last_check_at: lastCheckAt,
-      last_push_at: lastPushAt,
-      online: Number(nodeState.online || 0),
-      is_online: availableStatus === 0 ? 0 : 1,
-      available_status: availableStatus,
-      cache_key: `${server.type}-${server.id}-${server.updated_at}-${availableStatus === 0 ? 0 : 1}`,
-      load_status: loadStatus,
-      metrics,
-      online_conn: Number(metrics?.active_connections || 0)
-    });
-  }
-  return out;
+function adminMachineRows(env: Env) {
+  return loadAdminMachineRows(env, serverDeps());
 }
 
-async function adminMachineRows(env: Env) {
-  const version = await optionalKvGet(env, "servers_version") || "0";
-  const [base, live] = await Promise.all([
-    cachedData(`admin-machine-base:${version}`, 300, async () => {
-      const [machines, counts] = await Promise.all([
-        env.XBOARD_DB.prepare("SELECT * FROM v2_server_machine ORDER BY id ASC LIMIT 1000").all<Record<string, any>>(),
-        env.XBOARD_DB.prepare("SELECT machine_id, COUNT(*) AS count FROM v2_server WHERE machine_id IS NOT NULL GROUP BY machine_id").all<{ machine_id: number; count: number }>()
-      ]);
-      return { machines: machines.results || [], counts: Object.fromEntries((counts.results || []).map(row => [String(row.machine_id), Number(row.count || 0)])) };
-    }, 900),
-    statusSnapshot(env)
-  ]);
-  const out = [];
-  for (const machine of base.machines) {
-    const { token: _token, ...safeMachine } = machine;
-    const machineState = live.machines[String(machine.id)] || {};
-    out.push({
-      ...safeMachine,
-      notes: machine.notes || "",
-      is_active: Boolean(Number(machine.is_active ?? machine.enabled ?? 1)),
-      last_seen_at: machineState.last_seen_at || null,
-      load_status: machineState.load_status || null,
-      servers_count: Number(base.counts[String(machine.id)] || 0)
-    });
-  }
-  return out;
+function adminMachineHistory(env: Env, url: URL) {
+  return loadAdminMachineHistory(env, url, serverDeps());
 }
-
-async function adminMachineHistory(env: Env, url: URL) {
-  const machineIdValue = url.searchParams.get("machine_id") || url.searchParams.get("id");
-  const limitValue = url.searchParams.get("limit");
-  const rangeRaw = url.searchParams.get("range_hours") || url.searchParams.get("range");
-  const rangeHoursValue = rangeRaw?.match(/^\d+h$/) ? rangeRaw.slice(0, -1) : rangeRaw;
-  const machineId = nullableNumber(machineIdValue);
-  const limit = limitValue === null || limitValue === "" ? 60 : nullableNumber(limitValue);
-  const rangeHours = rangeHoursValue === null || rangeHoursValue === "" ? null : nullableNumber(rangeHoursValue);
-
-  if (!machineId || !Number.isInteger(machineId)) return fail("machine_id 字段是必须的", 422, 422);
-  if (!limit || !Number.isInteger(limit) || limit < 10 || limit > 1440) return fail("limit 必须在 10 到 1440 之间", 422, 422);
-  if (rangeHours !== null && (!Number.isInteger(rangeHours) || rangeHours < 1 || rangeHours > 24)) {
-    return fail("range_hours 必须在 1 到 24 之间", 422, 422);
-  }
-
-  const machine = await env.XBOARD_DB.prepare("SELECT id FROM v2_server_machine WHERE id = ?").bind(machineId).first();
-  if (!machine) return fail("服务器不存在", 422, 422);
-  const params = new URLSearchParams({ machine_id: String(machineId), limit: String(limit) });
-  if (rangeHours !== null) params.set("range_hours", String(rangeHours));
-  const statusRows = await cachedData(`machine-history:${machineId}:${limit}:${rangeHours ?? "all"}`, 60, async () => {
-    const response = await statusHubRequest(env, `history?${params}`);
-    if (!response.ok) throw new Error(`StatusHub returned ${response.status}`);
-    const payload = await response.json() as { data?: Record<string, unknown>[] };
-    return Array.isArray(payload.data) ? payload.data : [];
-  }, 120).catch(() => null);
-  if (!statusRows) return fail("获取服务器负载历史失败", 500, 500);
-  return ok(statusRows
-    .sort((left, right) => Number(left.recorded_at || 0) - Number(right.recorded_at || 0))
-    .slice(-limit));
-}
-
 function shellQuote(value: string) {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
@@ -4185,146 +3706,23 @@ async function userApi(request: Request, env: Env, path: string) {
     }
     return ok(couponResource(coupon));
   }
-  if (route.startsWith("/order/")) {
-    const url = new URL(request.url); const input = request.method === "POST" ? await body<Record<string, any>>(request.clone()) : {};
-    url.searchParams.forEach((value, key) => { input[key] = value; });
-    const userId = Number((user as any).id);
-    const orderResource = async (row: Record<string, any>) => {
-      const plan = row.plan_id ? await env.XBOARD_DB.prepare("SELECT * FROM v2_plan WHERE id = ?").bind(row.plan_id).first<Record<string, any>>() : null;
-      return { ...row, status: Number(row.status), total_amount: Number(row.total_amount || 0), period: legacyOrderPeriod(row.period), plan: plan ? { ...plan, prices: parseJsonObject(plan.prices), tags: parseJsonArray(plan.tags) } : null, payment: null };
-    };
-    if (request.method === "GET" && route === "/order/fetch") {
-      const status = input.status === undefined ? null : nullableNumber(input.status);
-      if (input.status !== undefined && (status === null || ![0,1,2,3].includes(status))) return fail("状态参数有误", 422, 422);
-      const result = status === null
-        ? await env.XBOARD_DB.prepare("SELECT * FROM v2_order WHERE user_id = ? ORDER BY created_at DESC").bind(userId).all<Record<string, any>>()
-        : await env.XBOARD_DB.prepare("SELECT * FROM v2_order WHERE user_id = ? AND status = ? ORDER BY created_at DESC").bind(userId, status).all<Record<string, any>>();
-      return ok(await Promise.all((result.results || []).map(orderResource)));
-    }
-    if (request.method === "GET" && route === "/order/detail") {
-      const order = await env.XBOARD_DB.prepare("SELECT * FROM v2_order WHERE user_id = ? AND trade_no = ?").bind(userId, String(input.trade_no || "")).first<Record<string, any>>();
-      if (!order) return fail("订单不存在或已支付", 400, 400);
-      const value = await orderResource(order);
-      if (!value.plan) return fail("订阅计划不存在", 400, 400);
-      const surplusOrderIds = parseJsonArray(order.surplus_order_ids).map(Number).filter(Boolean);
-      const surplusResult = surplusOrderIds.length
-        ? await env.XBOARD_DB.prepare(`SELECT * FROM v2_order WHERE user_id = ? AND id IN (${surplusOrderIds.map(() => "?").join(",")}) ORDER BY id ASC`).bind(userId, ...surplusOrderIds).all<Record<string, any>>()
-        : { results: [] as Record<string, any>[] };
-      return ok({ ...value, try_out_plan_id: Number(pickSetting(await settings(env.XBOARD_DB, env.XBOARD_KV), "try_out_plan_id", 0)), surplus_orders: surplusResult.results || [] });
-    }
-    if (request.method === "GET" && route === "/order/check") {
-      const order = await env.XBOARD_DB.prepare("SELECT status FROM v2_order WHERE user_id = ? AND trade_no = ?").bind(userId, String(input.trade_no || "")).first<{ status: number }>();
-      return order ? ok(Number(order.status)) : fail("订单不存在", 400, 400);
-    }
-    if (request.method === "GET" && route === "/order/getPaymentMethod") return ok([]);
-    if (request.method === "POST" && route === "/order/cancel") {
-      const tradeNo = String(input.trade_no || "");
-      if (!tradeNo) return fail("参数无效", 422, 422);
-      const order = await env.XBOARD_DB.prepare("SELECT * FROM v2_order WHERE user_id = ? AND trade_no = ?").bind(userId, tradeNo).first<Record<string, any>>();
-      if (!order) return fail("订单不存在", 400, 400);
-      if (Number(order.status) !== 0) return fail("只能取消待支付订单", 400, 400);
-      return await cancelOrder(env, order, now()) ? ok(true) : fail("取消失败", 400, 400);
-    }
-    if (request.method === "POST" && route === "/order/save") {
-      const planId = nullableNumber(input.plan_id); const legacyPeriod = String(input.period || ""); const period = normalizeOrderPeriod(legacyPeriod);
-      if (!planId) return fail("套餐ID不能为空", 422, 422);
-      if (!period) return fail("套餐周期错误", 422, 422);
-      const pending = await env.XBOARD_DB.prepare("SELECT id FROM v2_order WHERE user_id = ? AND status IN (0,1) LIMIT 1").bind(userId).first();
-      if (pending) return fail("您有未支付或待处理订单，请先取消", 400, 400);
-      const plan = await env.XBOARD_DB.prepare("SELECT * FROM v2_plan WHERE id = ?").bind(planId).first<Record<string, any>>();
-      if (!plan) return fail("订阅计划不存在", 400, 400);
-      const prices = parseJsonObject(plan.prices); const price = Number(prices[period] ?? prices[legacyPeriod]);
-      if (!Number.isFinite(price) || price < 0) return fail("该付款周期未启用", 400, 400);
-      const samePlan = Number((user as any).plan_id) === planId;
-      const activeUser = userIsAvailable(user as Record<string, any>);
-      if (period === "reset_traffic") {
-        if (!samePlan || !activeUser) return fail("订阅已过期或无有效订阅，无法购买流量重置包", 400, 400);
-      } else {
-        if ((!Number(plan.show) && !Number(plan.renew)) || (!Number(plan.show) && !samePlan)) return fail("该订阅已售罄，请选择其他订阅", 400, 400);
-        if (!Number(plan.renew) && samePlan) return fail("该订阅无法续费，请更换其他订阅", 400, 400);
-        if (!Number(plan.show) && Number(plan.renew) && !activeUser) return fail("该订阅已过期，请更换其他订阅", 400, 400);
-      }
-      if (plan.capacity_limit !== null && plan.capacity_limit !== undefined) {
-        const count = await firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE plan_id = ${planId} AND (expired_at IS NULL OR expired_at >= ${now()})`);
-        if (count >= Number(plan.capacity_limit) && Number((user as any).plan_id) !== planId) return fail("该订阅已售罄", 400, 400);
-      }
-      let totalAmount = Math.trunc(price * 100);
-      let discountAmount = 0;
-      let couponId: number | null = null;
-      let couponHasGlobalLimit = false;
-      const couponCode = String(input.coupon_code || "").trim();
-      if (couponCode) {
-        const coupon = await env.XBOARD_DB.prepare("SELECT * FROM v2_coupon WHERE code = ?").bind(couponCode).first<Record<string, any>>();
-        const ts = now();
-        if (!coupon || !Number(coupon.show)) return fail("优惠券无效", 400, 400);
-        if (coupon.limit_use !== null && Number(coupon.limit_use) <= 0) return fail("优惠券已用完", 400, 400);
-        if (Number(coupon.started_at || 0) > ts || Number(coupon.ended_at || 0) < ts) return fail("优惠券不在有效期内", 400, 400);
-        const limitedPlans = parseJsonArray(coupon.limit_plan_ids).map(Number);
-        if (limitedPlans.length && !limitedPlans.includes(planId)) return fail("优惠券不适用于该套餐", 400, 400);
-        const limitedPeriods = canonicalCouponPeriods(coupon.limit_period);
-        if (limitedPeriods.length && !limitedPeriods.includes(period)) return fail("优惠券不适用于该周期", 400, 400);
-        if (coupon.limit_use_with_user !== null) {
-          const used = await env.XBOARD_DB.prepare("SELECT COUNT(*) AS count FROM v2_order WHERE coupon_id = ? AND user_id = ? AND status NOT IN (0,2)").bind(coupon.id, userId).first<{ count: number }>();
-          if (Number(used?.count || 0) >= Number(coupon.limit_use_with_user)) return fail("优惠券已达到个人使用次数限制", 400, 400);
-        }
-        const couponType = Math.trunc(Number.parseFloat(String(coupon.type || 0)));
-        discountAmount = couponType === 1 ? Number(coupon.value || 0) : couponType === 2 ? totalAmount * Number(coupon.value || 0) / 100 : 0;
-        discountAmount = Math.min(totalAmount, Math.trunc(discountAmount));
-        couponId = Number(coupon.id);
-        couponHasGlobalLimit = coupon.limit_use !== null;
-      }
-      if (Number((user as any).discount || 0) > 0) discountAmount += Math.trunc(totalAmount * Number((user as any).discount) / 100);
-      discountAmount = Math.min(totalAmount, discountAmount);
-      totalAmount -= discountAmount;
-      const tradeNo = token(16); const ts = now();
-      const hasPlan = (user as any).plan_id !== null && (user as any).plan_id !== undefined;
-      const type = period === "reset_traffic" ? 4
-        : hasPlan && Number((user as any).plan_id) !== planId && ((user as any).expired_at === null || Number((user as any).expired_at) > ts) ? 3
-        : Number((user as any).plan_id) === planId && ((user as any).expired_at === null || Number((user as any).expired_at) > ts) ? 2 : 1;
-      const allSettings = await settings(env.XBOARD_DB, env.XBOARD_KV);
-      if (type === 3 && !Number(pickSetting(allSettings, "plan_change_enable", 1))) return fail("目前不允许更改订阅，请联系客服或提交工单操作", 400, 400);
-      const currentUser = await env.XBOARD_DB.prepare("SELECT * FROM v2_user WHERE id = ?").bind(userId).first<Record<string, any>>() || user as Record<string, any>;
-      let surplusAmount = 0;
-      let surplusCredit = 0;
-      let surplusOrderIds: number[] = [];
-      if (type === 3 && Number(pickSetting(allSettings, "surplus_enable", 1))) {
-        const surplus = await orderSurplus(env, currentUser, allSettings);
-        surplusAmount = surplus.amount;
-        surplusOrderIds = surplus.orderIds;
-        if (surplusAmount >= totalAmount) {
-          surplusCredit = surplusAmount - totalAmount;
-          totalAmount = 0;
-        } else {
-          totalAmount -= surplusAmount;
-        }
-      }
-      const commission = await orderCommission(env, currentUser, totalAmount);
-      const payableAmount = totalAmount;
-      const couponAvailability = couponHasGlobalLimit ? " AND EXISTS (SELECT 1 FROM v2_coupon WHERE id=? AND limit_use>0)" : "";
-      const statements = [env.XBOARD_DB.prepare(`INSERT INTO v2_order(user_id, plan_id, period, trade_no, status, total_amount, balance_amount, discount_amount, coupon_id, type, surplus_amount, surplus_credit, surplus_order_ids, invite_user_id, commission_balance, created_at, updated_at)
-        SELECT ?,?,?,?,0,MAX(0,?-MIN(MAX(COALESCE(u.balance,0),0),?)),MIN(MAX(COALESCE(u.balance,0),0),?),?,?,?,?,?,?,?,?,?,?
-        FROM v2_user u WHERE u.id=? AND NOT EXISTS (SELECT 1 FROM v2_order WHERE user_id=u.id AND status IN (0,1))${couponAvailability}`)
-        .bind(userId, planId, period, tradeNo, payableAmount, payableAmount, payableAmount, discountAmount, couponId, type, surplusAmount, surplusCredit, JSON.stringify(surplusOrderIds), commission.inviteUserId, commission.commissionBalance, ts, ts, userId, ...(couponHasGlobalLimit ? [couponId] : []))];
-      statements.push(env.XBOARD_DB.prepare(`UPDATE v2_user SET balance=balance-(SELECT balance_amount FROM v2_order WHERE trade_no=?),updated_at=?
-        WHERE id=? AND EXISTS (SELECT 1 FROM v2_order WHERE trade_no=? AND user_id=? AND status=0) AND (SELECT balance_amount FROM v2_order WHERE trade_no=?)>0`)
-        .bind(tradeNo, ts, userId, tradeNo, userId, tradeNo));
-      if (couponHasGlobalLimit) statements.push(env.XBOARD_DB.prepare("UPDATE v2_coupon SET limit_use=limit_use-1,updated_at=? WHERE id=? AND limit_use>0 AND EXISTS (SELECT 1 FROM v2_order WHERE trade_no=?)").bind(ts, couponId, tradeNo));
-      const results = await env.XBOARD_DB.batch(statements);
-      if (Number((results[0]?.meta as any)?.changes || 0) !== 1) return couponHasGlobalLimit
-        ? fail("优惠券已用完", 400, 400)
-        : fail("您有未支付或开通中的订单，请稍后再试或取消它", 400, 400);
-      return ok(tradeNo);
-    }
-    if (request.method === "POST" && route === "/order/checkout") {
-      const order = await env.XBOARD_DB.prepare("SELECT * FROM v2_order WHERE user_id = ? AND trade_no = ? AND status = 0").bind(userId, String(input.trade_no || "")).first<Record<string, any>>();
-      if (!order) return fail("订单不存在或已支付", 400, 400);
-      if (Number(order.total_amount || 0) > 0) return fail("真实支付功能暂未启用", 400, 400);
-      const paidRequest = new Request(request.url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ trade_no: order.trade_no, callback_no: order.trade_no }) });
-      const paid = await adminOrder(paidRequest, env, "/order/paid");
-      if (!paid?.ok) return paid || fail("支付失败", 400, 400);
-      return json({ type: -1, data: true });
-    }
-  }
+  const orderResponse = await handleUserOrders(request, env, route, user as Record<string, any>, {
+    nullableNumber,
+    parseJsonObject,
+    parseJsonArray,
+    legacyOrderPeriod,
+    pickSetting,
+    cancelOrder,
+    normalizeOrderPeriod,
+    userIsAvailable,
+    firstNumber,
+    canonicalCouponPeriods,
+    couponResource,
+    orderSurplus,
+    orderCommission,
+    adminOrder
+  });
+  if (orderResponse) return orderResponse;
   if (path.includes("/plan/fetch")) {
     const plans = await publicPlanRows(request, env);
     const counts = await env.XBOARD_DB.prepare("SELECT plan_id, COUNT(*) AS count FROM v2_user WHERE plan_id IS NOT NULL AND (expired_at IS NULL OR expired_at >= ?) GROUP BY plan_id").bind(now()).all<any>();
@@ -4410,69 +3808,12 @@ async function userApi(request: Request, env: Env, path: string) {
     for (const row of knowledge) (grouped[String(row.category || "") ] ||= []).push(row);
     return ok(grouped);
   }
-  if (request.method === "GET" && route === "/ticket/fetch") {
-    const id = nullableNumber(new URL(request.url).searchParams.get("id"));
-    if (id) {
-      const ticket = await env.XBOARD_DB.prepare("SELECT * FROM v2_ticket WHERE id = ? AND user_id = ?").bind(id, (user as any).id).first<Record<string, any>>();
-      if (!ticket) return fail("工单不存在", 400, 400);
-      const messages = await env.XBOARD_DB.prepare("SELECT *, CASE WHEN user_id = ? THEN 1 ELSE 0 END AS is_me FROM v2_ticket_message WHERE ticket_id = ? ORDER BY id ASC").bind((user as any).id, id).all();
-      return ok({ ...ticket, message: messages.results || [] });
-    }
-    const data = await env.XBOARD_DB.prepare("SELECT * FROM v2_ticket WHERE user_id = ? ORDER BY created_at DESC").bind((user as any).id).all();
-    return ok(data.results || []);
-  }
-  if (request.method === "POST" && route === "/ticket/save") {
-    const input = await body<Record<string, any>>(request);
-    if (!String(input.subject || "").trim() || !String(input.message || "").trim()) return fail("工单主题和内容不能为空", 422, 422);
-    if (![0, 1, 2].includes(Number(input.level))) return fail("工单等级格式不正确", 422, 422);
-    const ts = now();
-    const existing = await env.XBOARD_DB.prepare("SELECT id FROM v2_ticket WHERE user_id = ? AND status = 0 LIMIT 1").bind((user as any).id).first();
-    if (existing) return fail("存在未关闭的工单", 400, 400);
-    const result = await env.XBOARD_DB.prepare("INSERT INTO v2_ticket(user_id, subject, level, status, reply_status, last_reply_user_id, created_at, updated_at) VALUES (?, ?, ?, 0, 0, ?, ?, ?)")
-      .bind((user as any).id, String(input.subject), Number(input.level || 0), (user as any).id, ts, ts).run();
-    await env.XBOARD_DB.prepare("INSERT INTO v2_ticket_message(ticket_id, user_id, message, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
-      .bind(Number((result.meta as any)?.last_row_id || 0), (user as any).id, String(input.message), ts, ts).run();
-    const ticketId = Number((result.meta as any)?.last_row_id || 0);
-    try { await queueTelegramToAdmins(env, await ticketTelegramText(env, request, user as Record<string, any>, ticketId, String(input.subject), String(input.message))); } catch {}
-    return ok(true);
-  }
-  if (path.includes("/ticket/close")) {
-    const input = await body<Record<string, any>>(request);
-    const result = await env.XBOARD_DB.prepare("UPDATE v2_ticket SET status = 1, updated_at = ? WHERE id = ? AND user_id = ?").bind(now(), input.id, (user as any).id).run();
-    return Number((result.meta as any)?.changes || 0) === 1 ? ok(true) : fail("工单不存在", 400, 400);
-  }
-  if (request.method === "POST" && route === "/ticket/reply") {
-    const input = await body<Record<string, any>>(request);
-    if (!input.id || !input.message) return fail("参数不正确", 400, 400);
-    const ticket = await env.XBOARD_DB.prepare("SELECT id, subject, status, reply_status, last_reply_user_id FROM v2_ticket WHERE id = ? AND user_id = ?").bind(input.id, (user as any).id).first<Record<string, any>>();
-    if (!ticket) return fail("工单不存在", 400, 400);
-    if (Number(ticket.status)) return fail("工单已关闭，无法回复", 400, 400);
-    const config = await settings(env.XBOARD_DB, env.XBOARD_KV);
-    if (Number(pickSetting(config, "ticket_must_wait_reply", 0)) && Number(ticket.last_reply_user_id) === Number((user as any).id)) return fail("请等待客服回复后再发送消息", 400, 400);
-    const ts = now();
-    await env.XBOARD_DB.batch([
-      env.XBOARD_DB.prepare("INSERT INTO v2_ticket_message(ticket_id, user_id, message, created_at, updated_at) VALUES (?, ?, ?, ?, ?)").bind(ticket.id, (user as any).id, String(input.message), ts, ts),
-      env.XBOARD_DB.prepare("UPDATE v2_ticket SET reply_status = 0, last_reply_user_id = ?, updated_at = ? WHERE id = ?").bind((user as any).id, ts, ticket.id)
-    ]);
-    try { await queueTelegramToAdmins(env, await ticketTelegramText(env, request, user as Record<string, any>, Number(ticket.id), String(ticket.subject || ""), String(input.message))); } catch {}
-    return ok(true);
-  }
-  if (request.method === "POST" && route === "/ticket/withdraw") {
-    const input = await body<Record<string, any>>(request); const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
-    if (Number(pickSetting(all, "withdraw_close_enable", 0))) return fail("Unsupported withdraw", 400, 400);
-    const methods = pickSetting(all, "commission_withdraw_method", ["USDT", "支付宝"]);
-    if (!Array.isArray(methods) || !methods.includes(input.withdraw_method)) return fail("Unsupported withdrawal method", 422, 422);
-    const limit = Number(pickSetting(all, "commission_withdraw_limit", 100));
-    if (Number((user as any).commission_balance || 0) / 100 < limit) return fail(`The current required minimum withdrawal commission is ${limit}`, 422, 422);
-    if (!String(input.withdraw_account || "").trim()) return fail("Withdrawal account is required", 422, 422);
-    const existing = await env.XBOARD_DB.prepare("SELECT id FROM v2_ticket WHERE user_id = ? AND status = 0 LIMIT 1").bind((user as any).id).first();
-    if (existing) return fail("存在未关闭的工单", 400, 400);
-    const ts = now(); const result = await env.XBOARD_DB.prepare("INSERT INTO v2_ticket(user_id,subject,level,status,reply_status,last_reply_user_id,created_at,updated_at) VALUES (?, ?, 2, 0, 0, ?, ?, ?)")
-      .bind((user as any).id, "[Commission Withdrawal Request] This ticket is opened by the system", (user as any).id, ts, ts).run();
-    await env.XBOARD_DB.prepare("INSERT INTO v2_ticket_message(ticket_id,user_id,message,created_at,updated_at) VALUES (?,?,?,?,?)")
-      .bind(Number((result.meta as any)?.last_row_id || 0), (user as any).id, `Withdrawal method：${input.withdraw_method}\r\nWithdrawal account：${input.withdraw_account}`, ts, ts).run();
-    return ok(true);
-  }
+  const ticketResponse = await handleUserTickets(request, env, path, route, user as Record<string, any>, {
+    pickSetting,
+    ticketTelegramText,
+    queueTelegramToAdmins
+  });
+  if (ticketResponse) return ticketResponse;
   return json({ message: "Not Found" }, 404);
 }
 

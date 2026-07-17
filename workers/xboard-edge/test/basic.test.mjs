@@ -3,9 +3,24 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { spawnSync } from "node:child_process";
 
+const edgeSource = () => [
+  "src/index.ts",
+  "src/cache.ts",
+  "src/admin/contract.ts",
+  "src/admin/users.ts",
+  "src/admin/servers.ts",
+  "src/admin/plans.ts",
+  "src/admin/statistics.ts",
+  "src/internal/status-client.ts",
+  "src/user/orders.ts",
+  "src/user/tickets.ts",
+  "src/ech.ts",
+  "src/node-protocol.ts"
+].map(file => fs.readFileSync(file, "utf8")).join("\n");
+
 test("xboard-edge has an entrypoint", () => {
   assert.ok(fs.existsSync("src/index.ts"));
-  assert.match(fs.readFileSync("src/index.ts", "utf8"), /export default/);
+  assert.match(edgeSource(), /export default/);
 });
 
 test("admin authentication accepts raw and Bearer Authorization tokens", () => {
@@ -33,7 +48,7 @@ test("admin authentication accepts raw and Bearer Authorization tokens", () => {
 });
 
 test("new installations default node polling to five minutes", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   const seed = fs.readFileSync("../../schema/seed.sql", "utf8");
   assert.match(source, /server_pull_interval: 300, server_push_interval: 300/);
   assert.match(seed, /\('server_pull_interval', '300'/);
@@ -41,7 +56,7 @@ test("new installations default node polling to five minutes", () => {
 });
 
 test("fresh trial duration matches upstream while node polling remains cost optimized", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   const seed = fs.readFileSync("../../schema/seed.sql", "utf8");
   assert.match(source, /try_out_plan_id: 1, try_out_hour: 1/);
   assert.match(seed, /\('try_out_hour', '1'/);
@@ -56,7 +71,7 @@ test("SQLite migration normalizes upstream nullable numeric fields required by D
 });
 
 test("orders accept canonical periods and expose configured reset and surplus details", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   assert.match(source, /canonicalOrderPeriods\.has\(value\) \? value : ""/);
   assert.match(source, /const period = normalizeOrderPeriod\(legacyPeriod\)/);
   assert.match(source, /new_order_event_id/);
@@ -74,7 +89,7 @@ test("machine form validates while typing", () => {
 });
 
 test("admin shell references the current bundle without caching", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   assert.match(source, /src="\/assets\/index-CF20260713\.js"/);
   assert.doesNotMatch(source, /src="\/assets\/index-CEIYH7i8\.js"/);
   assert.match(source, /"cache-control": "no-store, no-cache, must-revalidate"/);
@@ -98,7 +113,7 @@ test("admin shell references the current bundle without caching", () => {
 });
 
 test("mobile node editor remains inside the visual viewport after keyboard dismissal", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   const html = fs.readFileSync("public/index.html", "utf8");
   const script = fs.readFileSync("public/assets/mobile-node-dialog-fix.js", "utf8");
   const style = fs.readFileSync("public/assets/mobile-node-dialog-fix.css", "utf8");
@@ -134,7 +149,7 @@ test("admin search hides reserved pages and includes data migration", () => {
 });
 
 test("admin UI and API follow the saved secure path", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   assert.match(source, /async function currentSecurePath/);
   assert.match(source, /const adminUiPath = `\/\$\{securePath\}`/);
   assert.match(source, /const dynamicAdminPrefix = `\/api\/v2\/\$\{securePath\}`/);
@@ -145,7 +160,7 @@ test("admin UI and API follow the saved secure path", () => {
 });
 
 test("dashboard queue statistics honor the official time windows", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8") + fs.readFileSync("src/cache.ts", "utf8");
+  const source = edgeSource() + fs.readFileSync("src/cache.ts", "utf8");
   assert.match(source, /cachedData\("queue-stats", 60/);
   assert.match(source, /globalThis as any\)\.caches\?\.default/);
   assert.match(source, /status = 'failed' AND COALESCE\(updated_at, created_at\) >= \?/);
@@ -161,7 +176,7 @@ test("dashboard queue statistics honor the official time windows", () => {
 });
 
 test("registration limits use the Cloudflare visitor IP and preserve it during automatic login", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   assert.match(source, /request\.headers\.get\("cf-connecting-ip"\) \|\| request\.headers\.get\("x-forwarded-for"\)/);
   assert.match(source, /const rateKey = `rate:register:\$\{requestIp\(request\)\}`/);
   assert.match(source, /\["cf-connecting-ip", "x-forwarded-for", "user-agent"\]/);
@@ -169,7 +184,7 @@ test("registration limits use the Cloudflare visitor IP and preserve it during a
 });
 
 test("admin CRUD routes server resources to their own tables", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8") + fs.readFileSync("src/admin/contract.ts", "utf8");
+  const source = edgeSource() + fs.readFileSync("src/admin/contract.ts", "utf8");
   assert.match(source, /\["\/server\/group\/", "v2_server_group"\]/);
   assert.match(source, /\["\/server\/route\/", "v2_server_route"\]/);
   assert.match(source, /\["\/server\/machine\/", "v2_server_machine"\]/);
@@ -178,15 +193,15 @@ test("admin CRUD routes server resources to their own tables", () => {
 });
 
 test("server groups include the user and node counts expected by the official admin UI", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
-  assert.match(source, /async function adminServerGroupRows\(env: Env\)/);
+  const source = edgeSource();
+  assert.match(source, /async function adminServerGroupRows<[^>]+>\(env: E, deps: ServerDeps<E>\)/);
   assert.match(source, /users_count: userCounts\.get\(Number\(group\.id\)\) \|\| 0/);
   assert.match(source, /server_count: serverCounts\.get\(Number\(group\.id\)\) \|\| 0/);
   assert.match(source, /suffix === "\/server\/group\/fetch"\) return ok\(await adminServerGroupRows\(env\)\)/);
 });
 
 test("audited compatibility fixes match upstream order, ticket and statistics behavior", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   assert.match(source, /async function orderSurplus/);
   assert.match(source, /surplus_amount, surplus_credit, surplus_order_ids/);
   assert.match(source, /VALUES \(\?, \?, \?, 0, 0, \?, \?, \?\)/);
@@ -200,7 +215,7 @@ test("audited compatibility fixes match upstream order, ticket and statistics be
 });
 
 test("server validation keeps public and backend ports independent", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   assert.match(source, /for \(const field of \["type", "name", "host", "port", "server_port", "rate"\]\)/);
   assert.match(source, /function normalizePublicPort\(value: unknown\)/);
   assert.match(source, /\^\\d\+\\\.0\+\$/);
@@ -213,7 +228,7 @@ test("server validation keeps public and backend ports independent", () => {
 });
 
 test("repeated read models use coalesced Cache API snapshots", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8") + fs.readFileSync("src/cache.ts", "utf8");
+  const source = edgeSource() + fs.readFileSync("src/cache.ts", "utf8") + fs.readFileSync("src/internal/status-client.ts", "utf8");
   assert.match(source, /const responseDataPromises = new Map/);
   assert.match(source, /admin-stat-override", 15/);
   assert.match(source, /admin-stats", 30/);
@@ -223,7 +238,7 @@ test("repeated read models use coalesced Cache API snapshots", () => {
 });
 
 test("machine saves invalidate versioned machine and server list caches", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   const start = source.indexOf("async function saveMachine");
   const end = source.indexOf("function nullableNumber", start);
   const saveMachine = source.slice(start, end);
@@ -250,12 +265,12 @@ test("success responses preserve the upstream ApiResponse envelope", () => {
 });
 
 test("bootstrap preserves renamed default groups", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   assert.match(source, /INSERT INTO v2_server_group[\s\S]*?ON CONFLICT\(id\) DO NOTHING/);
 });
 
 test("bootstrap never overwrites an existing customized default plan", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   const seed = fs.readFileSync("../../schema/seed.sql", "utf8");
   assert.match(source, /INSERT INTO v2_plan[\s\S]*?ON CONFLICT\(id\) DO NOTHING/);
   assert.match(seed, /INSERT INTO v2_plan[\s\S]*?ON CONFLICT\(id\) DO NOTHING/);
@@ -322,7 +337,7 @@ test("missing settings version bypasses stale version-zero snapshots in every wo
 });
 
 test("settings saves invalidate the xboard-server instance cache", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   const migration = fs.readFileSync("src/migration.ts", "utf8");
   assert.match(source, /async function invalidateServerSettings\(env: Env\)/);
   assert.match(source, /internal\/settings\/invalidate/);
@@ -333,7 +348,7 @@ test("settings saves invalidate the xboard-server instance cache", () => {
 });
 
 test("node protocol paths are proxied through the xboard-server service binding", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8") + fs.readFileSync("src/node-protocol.ts", "utf8");
+  const source = edgeSource() + fs.readFileSync("src/node-protocol.ts", "utf8");
   const wrangler = fs.readFileSync("wrangler.toml", "utf8");
   assert.match(source, /isNodeProtocolPath\(url\.pathname, request\.method\)/);
   assert.match(source, /pathname === "\/api\/v2\/server\/machine\/nodes"[\s\S]*method === "POST"/);
@@ -345,7 +360,7 @@ test("node protocol paths are proxied through the xboard-server service binding"
 });
 
 test("official subscription paths are handled inside xboard-edge", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   const wrangler = fs.readFileSync("wrangler.toml", "utf8");
   assert.match(source, /import \{ handleSubscriptionRequest \} from "\.\/subscription\/index\.ts"/);
   assert.match(source, /url\.pathname === "\/api\/v1\/client\/subscribe"/);
@@ -358,7 +373,7 @@ test("official subscription paths are handled inside xboard-edge", () => {
 });
 
 test("machine detail GET endpoints read ids from query parameters", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   const getToken = source.slice(source.indexOf('if (path.includes("/server/machine/getToken"))'), source.indexOf('if (path.includes("/server/machine/installCommand"))'));
   const installCommand = source.slice(source.indexOf('if (path.includes("/server/machine/installCommand"))'), source.indexOf('if (path.includes("/server/machine/resetToken"))'));
   assert.match(getToken, /new URL\(request\.url\)\.searchParams\.get\("id"\)/);
@@ -368,7 +383,7 @@ test("machine detail GET endpoints read ids from query parameters", () => {
 });
 
 test("machine tokens match Laravel Str::random(32) format", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   const compat = fs.readFileSync("src/compat.ts", "utf8");
   assert.match(source, /const machineToken = randomString\(32\)/);
   assert.match(compat, /ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/);
@@ -376,7 +391,7 @@ test("machine tokens match Laravel Str::random(32) format", () => {
 });
 
 test("generated subscription URLs honor configured domain and path", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   assert.match(source, /const values = await settings\(env\.XBOARD_DB, env\.XBOARD_KV\)/);
   assert.match(source, /values\.subscribe_url/);
   assert.match(source, /values\.subscribe_path/);
@@ -417,7 +432,7 @@ test("bootstrap keeps Cloudflare tenant identifiers out of the repository", () =
 });
 
 test("admin can fetch a fresh subscription URL for the copy action", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   assert.match(source, /path\.includes\("\/user\/getSubscribe"\)/);
   assert.match(source, /SELECT token FROM v2_user WHERE id = \?/);
 });
@@ -428,7 +443,7 @@ test("plan list hides payment periods whose price is blank", () => {
 });
 
 test("user editor defaults missing commission type safely", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   const bundle = fs.readFileSync("public/assets/index-CF20260713.js", "utf8");
   assert.match(source, /ALTER TABLE v2_user ADD COLUMN commission_type INTEGER NOT NULL DEFAULT 0/);
   assert.match(source, /commission_type: Number\(row\.commission_type \?\? 0\)/);
@@ -436,24 +451,24 @@ test("user editor defaults missing commission type safely", () => {
 });
 
 test("admin user and node forms receive upstream-compatible boolean values", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   for (const field of ["banned", "is_admin", "is_staff", "remind_expire", "remind_traffic", "commission_auto_check"]) {
     assert.match(source, new RegExp(`${field}: Boolean\\(boolNumber\\(row\\.${field}`));
   }
   assert.match(source, /rate_time_enable: Boolean\(Number\(server\.rate_time_enable/);
-  assert.match(source, /protocol_settings: parseJsonObject\(server\.protocol_settings\)/);
+  assert.match(source, /protocol_settings: deps\.parseJsonObject\(server\.protocol_settings\)/);
   assert.doesNotMatch(source, /paginated\(data,[^\n]+meta: result/);
 });
 
 test("admin APIs reject non-official paths and methods before loose compatibility handlers", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8") + fs.readFileSync("src/admin/contract.ts", "utf8");
+  const source = edgeSource() + fs.readFileSync("src/admin/contract.ts", "utf8");
   assert.match(source, /function adminRouteAllowed\(route: string, method: string\)/);
   assert.match(source, /if \(!adminRouteAllowed\(route, request\.method\)\) return json\(\{ message: "Not Found" \}, 404\)/);
   assert.match(source, /"\/server\/group\/save": \["POST"\]/);
 });
 
 test("passport, guest and client routes are separated from authenticated user routes", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   assert.match(source, /startsWith\("\/api\/v1\/passport"\).*startsWith\("\/api\/v2\/passport"\)/s);
   assert.match(source, /startsWith\("\/api\/v1\/guest"\)\) return guestApi/);
   assert.match(source, /startsWith\("\/api\/v1\/client"\).*startsWith\("\/api\/v2\/client"\)/s);
@@ -461,20 +476,20 @@ test("passport, guest and client routes are separated from authenticated user ro
 });
 
 test("guest email whitelist suffixes preserve the upstream array contract", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   assert.match(source, /function emailSuffixes\(value: unknown\)/);
   assert.match(source, /email_whitelist_suffix: pickSetting\(all, "email_whitelist_enable", 0\) \? emailSuffixes/);
 });
 
 test("route fetch returns match rules as an array", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   assert.match(source, /function routeMatchArray\(value: unknown\): string\[\]/);
-  assert.match(source, /match: routeMatchArray\(route\.match\)/);
+  assert.match(source, /match: deps\.routeMatchArray\(route\.match\)/);
   assert.match(source, /suffix === "\/server\/route\/fetch"\) return ok\(await adminRouteRows\(env\)\)/);
 });
 
 test("node list exposes upstream-compatible health and load fields", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   assert.match(source, /function nodeAvailableStatus\(lastCheckAt: number \| null, lastPushAt: number \| null/);
   assert.match(source, /timestamp - 300 >= lastCheckAt/);
   assert.match(source, /statusSnapshot\(env\)/);
@@ -490,11 +505,11 @@ test("node list exposes upstream-compatible health and load fields", () => {
 });
 
 test("machine load history matches the upstream chart contract", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
-  assert.match(source, /async function adminMachineHistory\(env: Env, url: URL\)/);
+  const source = edgeSource() + fs.readFileSync("src/internal/status-client.ts", "utf8");
+  assert.match(source, /async function adminMachineHistory<[^>]+>\(env: E, url: URL, deps: ServerDeps<E>\)/);
   assert.match(source, /limit < 10 \|\| limit > 1440/);
   assert.match(source, /rangeHours < 1 \|\| rangeHours > 24/);
-  assert.match(source, /statusHubRequest\(env, `history\?\$\{params\}`\)/);
+  assert.match(source, /statusHubRequest\(env, loadToken, `history\?\$\{params\}`\)/);
   assert.match(source, /new URLSearchParams\(\{ machine_id: String\(machineId\), limit: String\(limit\) \}\)/);
   assert.match(source, /if \(!statusRows\) return fail\("获取服务器负载历史失败"/);
   assert.match(source, /\.sort\(\(left, right\) => Number\(left\.recorded_at \|\| 0\) - Number\(right\.recorded_at \|\| 0\)\)/);
@@ -511,14 +526,14 @@ test("login sessions fall back to D1 when KV writes fail", () => {
 });
 
 test("bootstrap remains available when the KV daily write limit is exhausted", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   assert.match(source, /system_bootstrap_edge_version/);
   assert.match(source, /await optionalKvPut\(env, "bootstrap:edge:v20"/);
   assert.doesNotMatch(source, /await env\.XBOARD_KV\.put\("bootstrap:edge:v12"/);
 });
 
 test("overwrite migrations suppress first-run seed data", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   assert.match(source, /mode = 'overwrite' AND status != 'rolled_back'/);
   assert.match(source, /if \(!preserveMigratedData\) \{[\s\S]*SELECT COUNT\(\*\) AS c FROM v2_user/);
   assert.doesNotMatch(source, /DELETE FROM v2_user WHERE email = 'admin@admin\.com'/);
@@ -527,8 +542,7 @@ test("overwrite migrations suppress first-run seed data", () => {
 });
 
 test("dashboard statistics follow the upstream order and server traffic contracts", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
-  const stats = source.slice(source.indexOf("async function adminStats"), source.indexOf("function dateString"));
+  const stats = fs.readFileSync("src/admin/statistics.ts", "utf8");
   assert.match(stats, /status NOT IN \(0,2\)/);
   assert.match(stats, /FROM v2_stat_server/);
   assert.doesNotMatch(stats, /FROM v2_stat_user/);
@@ -538,8 +552,7 @@ test("dashboard statistics follow the upstream order and server traffic contract
 });
 
 test("traffic rankings use one period aggregation and a short non-KV cache", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
-  const rank = source.slice(source.indexOf("async function trafficRank"), source.indexOf("async function planById"));
+  const rank = fs.readFileSync("src/admin/statistics.ts", "utf8");
   assert.match(rank, /cachedData\(`traffic-rank:/);
   assert.match(rank, /Math\.floor\(start \/ 300\)/);
   assert.match(rank, /Math\.floor\(end \/ 300\)/);
@@ -554,7 +567,7 @@ test("traffic rankings use one period aggregation and a short non-KV cache", () 
 });
 
 test("traffic ranking validation matches the upstream required type and timestamp bounds", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   const route = source.slice(source.indexOf('if (path.includes("/stat/getTrafficRank"))'), source.indexOf('if (request.method === "GET" && (route === "/stat/getServerLastRank"'));
   assert.match(route, /if \(!type\) return fail\("type 字段是必须的", 422, 422\)/);
   assert.match(route, /type !== "node" && type !== "user"/);
@@ -563,7 +576,7 @@ test("traffic ranking validation matches the upstream required type and timestam
 });
 
 test("storage optimization removes write-heavy unused traffic indexes", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   const schema = fs.readFileSync("../../schema/d1.sql", "utf8");
   for (const name of ["idx_v2_stat_user_u", "idx_v2_stat_user_d", "idx_v2_stat_user_record", "idx_v2_stat_server_upload", "idx_v2_stat_server_download", "idx_v2_stat_server_record"]) {
     assert.match(source, new RegExp(`"DROP INDEX IF EXISTS ${name}"`));
@@ -578,7 +591,7 @@ test("storage optimization removes write-heavy unused traffic indexes", () => {
 });
 
 test("edge database requests default to primary and only audited guest reads use an unconstrained session", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   const db = fs.readFileSync("src/db.ts", "utf8");
   assert.match(db, /db\.withSession\("first-primary"\)/);
   assert.match(db, /db\.withSession\("first-unconstrained"\)/);
@@ -595,7 +608,7 @@ test("edge database requests default to primary and only audited guest reads use
 });
 
 test("revenue overview reads the migrated daily statistics table", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   const stats = source.slice(source.indexOf("async function orderStats"), source.indexOf("async function trafficRank"));
   assert.match(stats, /FROM v2_stat WHERE/);
   assert.match(stats, /record_type = 'd'/);
@@ -618,7 +631,7 @@ test("email settings describe Maileroo and Brevo instead of SMTP or Resend", () 
 
 test("admin migration imports official SQLite data in bounded D1 batches", () => {
   const source = fs.readFileSync("src/migration.ts", "utf8");
-  const index = fs.readFileSync("src/index.ts", "utf8") + fs.readFileSync("src/admin/contract.ts", "utf8");
+  const index = edgeSource() + fs.readFileSync("src/admin/contract.ts", "utf8");
   assert.match(source, /sourceRows\.length > 100/);
   assert.match(source, /run\.mode === "overwrite" \? "INSERT" : "INSERT OR IGNORE"/);
   assert.match(source, /INSERT OR IGNORE/);
@@ -657,7 +670,7 @@ test("complete migration deletes old business data before strict replacement", (
 test("migration UI parses SQLite and Redis backups locally", () => {
   const page = fs.readFileSync("public/migration/panel.html", "utf8");
   const app = fs.readFileSync("public/migration/app.js", "utf8");
-  const index = fs.readFileSync("src/index.ts", "utf8");
+  const index = edgeSource();
   assert.match(page, /SQLite3/);
   assert.match(page, /Redis RDB \/ JSON/);
   assert.match(page, /SQLite3 数据库（必选）/);
@@ -707,7 +720,7 @@ test("migration excludes service credentials that cannot move to Cloudflare", ()
 });
 
 test("unsupported plugin, payment, and theme menus stay reserved but hidden", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   assert.match(source, /Reserved for future native plugin, payment, and theme implementations/);
   assert.match(source, /target\.hash\.replace\(\/\^#\//);
   assert.match(source, /route === "\/config\/plugin"/);
@@ -730,7 +743,7 @@ test("migration does not import or export application log records", () => {
 });
 
 test("bootstrap creates the upstream performance indexes on existing D1 databases", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   const schema = fs.readFileSync("../../schema/d1.sql", "utf8");
   for (const index of ["idx_v2_order_created_at", "idx_v2_order_status", "idx_v2_commission_user", "idx_v2_ticket_status", "idx_v2_stat_server_server", "idx_v2_user_availability", "idx_v2_server_sort", "idx_v2_stat_user_record_user"]) {
     assert.match(source, new RegExp(index));
@@ -747,14 +760,14 @@ test("migration export restores original SQLite value representations", () => {
 });
 
 test("plan traffic is converted from gigabytes to user bytes", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   assert.match(source, /SELECT transfer_enable FROM v2_plan[\s\S]*?\* 1073741824/);
   assert.match(source, /Number\(plan\.transfer_enable \|\| 0\) \* 1073741824/);
   assert.match(source, /v2_plan\.transfer_enable = v2_user\.transfer_enable/);
 });
 
 test("Maileroo and Brevo settings persist through the official email field names", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   assert.match(source, /email_driver: \["maileroo", "brevo"\]/);
   assert.match(source, /email_password: firstNonEmpty\(all\.email_password\)/);
   assert.match(source, /email_from_address: firstNonEmpty\(all\.email_from_address, all\.resend_from_address\)/);
@@ -763,7 +776,7 @@ test("Maileroo and Brevo settings persist through the official email field names
 });
 
 test("admin orders are persisted and exposed through the official route set", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   for (const route of ["fetch", "assign", "detail", "update", "cancel", "paid"]) {
     assert.match(source, new RegExp(`route === "/order/${route}"`));
   }
@@ -787,7 +800,7 @@ test("admin orders are persisted and exposed through the official route set", ()
 });
 
 test("admin user relations, CSV units and smoke tests cover functional paths", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   const smoke = fs.readFileSync("../../scripts/smoke-test.ts", "utf8");
   assert.match(source, /SELECT id, email FROM v2_user WHERE id IN/);
   assert.match(source, /invite_user: inviters\.get/);
@@ -802,7 +815,7 @@ test("admin user relations, CSV units and smoke tests cover functional paths", (
 });
 
 test("traffic history exposes the official server_rate field", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   assert.match(source, /server_rate: Number\(row\.server_rate \?\? 1\) \|\| 1/);
   assert.match(source, /SUM\(u\) AS u, SUM\(d\) AS d/);
   assert.match(source, /GROUP BY user_id, server_rate, record_type, record_at/);
@@ -811,14 +824,14 @@ test("traffic history exposes the official server_rate field", () => {
 });
 
 test("node metrics use StatusHub as the realtime source", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource() + fs.readFileSync("src/internal/status-client.ts", "utf8");
   assert.match(source, /const metrics = nodeState\.metrics \|\| \(loadStatus\?\.metrics/);
   assert.match(source, /async function statusHubRequest/);
   assert.doesNotMatch(source, /parseKvObject\(kvMetrics\) \|\| parseKvObject\(server\.metrics\)/);
 });
 
 test("node sync and error handling avoid unrelated work and SQL disclosure", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   const giftCards = fs.readFileSync("src/gift-card.ts", "utf8");
   assert.match(source, /pathname\.endsWith\(suffix\)/);
   assert.doesNotMatch(source.slice(source.indexOf("function shouldNotifyNodeSync"), source.indexOf("async function runSqlIgnore")), /pathname\.includes\(part\)/);
@@ -830,7 +843,7 @@ test("node sync and error handling avoid unrelated work and SQL disclosure", () 
 
 test("gift card APIs implement the official admin and user route set", () => {
   const source = fs.readFileSync("src/gift-card.ts", "utf8");
-  const index = fs.readFileSync("src/index.ts", "utf8");
+  const index = edgeSource();
   for (const route of ["templates", "create-template", "update-template", "delete-template", "generate-codes", "codes", "toggle-code", "export-codes", "usages", "statistics", "types", "update-code", "delete-code"]) {
     assert.match(source, new RegExp(`gift-card/${route}`));
   }
@@ -871,7 +884,7 @@ test("fresh D1 schema follows upstream visibility and expiry defaults", () => {
 });
 
 test("mail APIs support Maileroo and Brevo without SMTP fields", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   const adminBundle = fs.readFileSync("public/assets/index-CF20260713.js", "utf8");
   const wrangler = fs.readFileSync("wrangler.toml", "utf8");
   assert.match(source, /NOTIFICATION_EVENTS: Queue/);
@@ -895,7 +908,7 @@ test("mail APIs support Maileroo and Brevo without SMTP fields", () => {
 });
 
 test("Telegram webhook setup and join requests use the official Bot API", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   assert.match(source, /api\.telegram\.org\/bot\$\{botToken\}/);
   assert.match(source, /setWebhook/);
   assert.match(source, /setMyCommands/);
@@ -913,7 +926,7 @@ test("non-payment compatibility endpoints no longer return fake success", () => 
 });
 
 test("quick login, withdrawals and ECH generation are implemented", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8") + fs.readFileSync("src/ech.ts", "utf8");
+  const source = edgeSource();
   assert.match(source, /quick_login:\$\{verify\}/);
   assert.match(source, /Commission Withdrawal Request/);
   assert.match(source, /BEGIN \$\{label\}/);
@@ -975,7 +988,7 @@ test("user knowledge, server availability and invite commission match upstream c
 });
 
 test("audited notice, ranking and migration edge cases match upstream", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   const migration = fs.readFileSync("src/migration.ts", "utf8");
   assert.match(source, /SELECT \* FROM v2_notice WHERE show = 1 ORDER BY sort ASC, id DESC LIMIT \? OFFSET \?/);
   assert.match(source, /return json\(\{ data: result\.results \|\| \[\], total \}\)/);
@@ -999,12 +1012,12 @@ test("D1 keeps upstream lookup indexes used by tokens and gift cards", () => {
 });
 
 test("audited admin and user mutations reject stale or partial operations", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   assert.match(source, /const filtered = scope === "filtered" \? adminUserQuery\(input\) : null/);
   assert.match(source, /const results = await env\.XBOARD_DB\.batch\(statements\)/);
   assert.match(source, /status NOT IN \(0,2\)/);
   assert.doesNotMatch(source, /coupon_id = .*status IN \(1,3\)/);
-  assert.match(source, /return await cancelOrder\(env, order, now\(\)\) \? ok\(true\) : fail\("取消失败"/);
+  assert.match(source, /return await deps\.cancelOrder\(env, order, now\(\)\) \? ok\(true\) : fail\("取消失败"/);
   assert.match(source, /callback_no: order\.trade_no/);
   assert.match(source, /\[0, 1, 2\]\.includes\(Number\(input\.level\)\)/);
   assert.match(source, /String\(input\.password\)\.length < 8/);
@@ -1025,7 +1038,7 @@ test("statistics and mail templates preserve the upstream contracts", () => {
 });
 
 test("RX compatibility fixes preserve upstream CRUD, plans, Telegram and filters", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   const giftCards = fs.readFileSync("src/gift-card.ts", "utf8");
   const wrangler = fs.readFileSync("wrangler.toml", "utf8");
   assert.match(source, /const validServerTypes = new Set/);
@@ -1071,7 +1084,7 @@ test("V2 client app config exposes the complete upstream structure", () => {
 });
 
 test("admin ticket, coupon and audit handlers preserve upstream behavior", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   assert.match(source, /UPDATE v2_ticket SET reply_status = 1/);
   assert.match(source, /ticket_sendEmailNotify_/);
   assert.match(source, /expirationTtl: 1800/);
@@ -1081,8 +1094,8 @@ test("admin ticket, coupon and audit handlers preserve upstream behavior", () =>
   assert.match(source, /return json\(paginated\(\(result\.results \|\| \[\]\)\.map/);
   assert.match(source, /function canonicalCouponPeriods/);
   assert.match(source, /limit_period: canonicalCouponPeriods\(row\.limit_period\)/);
-  assert.match(source, /const limitedPeriods = canonicalCouponPeriods\(coupon\.limit_period\)/);
-  assert.equal((source.match(/const limitedPeriods = canonicalCouponPeriods\(coupon\.limit_period\)/g) || []).length, 2);
+  assert.match(source, /const limitedPeriods = (?:deps\.)?canonicalCouponPeriods\(coupon\.limit_period\)/);
+  assert.equal((source.match(/const limitedPeriods = (?:deps\.)?canonicalCouponPeriods\(coupon\.limit_period\)/g) || []).length, 2);
   assert.match(source, /return ok\(couponResource\(coupon\)\)/);
   assert.match(source, /route === "\/server\/group\/save"/);
   assert.match(source, /if \(!name\) return fail\("组名不能为空"/);
@@ -1098,7 +1111,7 @@ test("bootstrap defaults never overwrite customized mail templates", () => {
 });
 
 test("GLM compatibility audit fixes preserve upstream mutations and envelopes", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   const schema = fs.readFileSync("../../schema/d1.sql", "utf8");
   assert.match(source, /id \? String\(existing\?\.code \|\| ""\) : randomString\(8\)/);
   assert.doesNotMatch(source, /new Response\(`\\uFEFF\$\{lines/);
@@ -1116,8 +1129,8 @@ test("GLM compatibility audit fixes preserve upstream mutations and envelopes", 
 });
 
 test("admin online state prefers StatusHub with a D1 fallback", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
-  assert.match(source, /statusHubRequest\(env, "devices\/list"/);
+  const source = edgeSource();
+  assert.match(source, /statusHubRequest\(env, loadToken, "devices\/list"/);
   assert.match(source, /connectionCounts\[userId\].*\+ online/);
   assert.match(source, /count - current\.length/);
   assert.match(source, /liveDevices === null \? Number\(row\.online_count \|\| 0\)/);
