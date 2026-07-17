@@ -1045,7 +1045,7 @@ test("audited notice, ranking and migration edge cases match upstream", () => {
   assert.match(source, /SELECT \* FROM v2_notice WHERE show = 1 ORDER BY sort ASC, id DESC LIMIT \? OFFSET \?/);
   assert.match(source, /return json\(\{ data: result\.results \|\| \[\], total: Number\(\(totalResult\.results\?\.\[0\]/);
   assert.match(source, /previousValue/);
-  assert.match(source, /change: calculateChange\(value, previousValue\)/);
+  assert.match(source, /change: growthRate\(value, previousValue\)/);
   assert.match(source, /monthStart\(\)\)\.all(?:<Record<string, any>>)?\(\)/);
   assert.match(migration, /row\.online_count == null/);
   assert.match(migration, /row\.last_login_ip = \[24, 16, 8, 0\]/);
@@ -1091,6 +1091,21 @@ test("statistics and mail templates preserve the upstream contracts", () => {
   assert.match(source, /const result = await sendTestMail\(env, email, \{ templateName: name, subject: subjects\[name\], vars, contentMode: "text" \}\)/);
   assert.match(source, /return result\.error \? fail\(`发送失败: \$\{result\.error\}`/);
   assert.match(jobsClient, /template_name: options\.templateName/);
+});
+
+test("read-only list metadata and migration validation stay batched", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const orders = fs.readFileSync("src/user/orders.ts", "utf8");
+  const migration = fs.readFileSync("src/migration.ts", "utf8");
+  const subscriptionDb = fs.readFileSync("src/subscription/db.ts", "utf8");
+  assert.match(source, /trafficResetLogs[\s\S]*XBOARD_DB\.batch<Record<string, any>>/);
+  assert.match(source, /route === "\/coupon\/fetch"[\s\S]*XBOARD_DB\.batch<Record<string, any>>/);
+  assert.match(source, /route === "\/stat\/getStatUser"[\s\S]*XBOARD_DB\.batch<Record<string, any>>/);
+  assert.match(orders, /SELECT \* FROM v2_plan WHERE id IN/);
+  assert.doesNotMatch(orders.slice(orders.indexOf('route === "\/order\/fetch"'), orders.indexOf('route === "\/order\/detail"')), /\.map\(orderResource\)/);
+  assert.match(migration, /db\.batch<\{ count: number \}>\(tables\.map/);
+  assert.match(migration, /GROUP BY table_name/);
+  assert.doesNotMatch(subscriptionDb, /export async function list/);
 });
 
 test("migration page keeps the complete workflow in a responsive accessible shell", () => {

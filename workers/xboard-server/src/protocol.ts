@@ -166,8 +166,6 @@ export function buildNodeConfig(node: Row, routeRows: Row[] = []): Row {
       ]) };
       break;
     case "socks":
-      response = { ...base, server_port: int(node.server_port), tls: int(get(settings, "tls", 0)), tls_settings: get(settings, "tls_settings", null) };
-      break;
     case "naive":
     case "http":
       response = { ...base, server_port: int(node.server_port), tls: int(get(settings, "tls", 0)), tls_settings: get(settings, "tls_settings", null) };

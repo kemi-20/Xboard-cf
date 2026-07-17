@@ -203,9 +203,17 @@ async function allTableCounts(db: D1Database) {
 }
 
 async function tableCounts(db: D1Database, tables: readonly string[]) {
-  const counts: Record<string, number> = {};
-  for (const table of tables) counts[table] = await tableCount(db, table);
-  return counts;
+  if (!tables.length) return {};
+  const results = await db.batch<{ count: number }>(tables.map(table => db.prepare(`SELECT COUNT(*) AS count FROM ${table}`)));
+  return Object.fromEntries(tables.map((table, index) => [table, Number(results[index]?.results?.[0]?.count || 0)]));
+}
+
+async function migratedTableCounts(db: D1Database, tables: readonly string[]) {
+  if (!tables.length) return {};
+  const results = await db.batch<{ count: number }>(tables.map(table => db.prepare(table === "v2_settings"
+    ? "SELECT COUNT(*) AS count FROM v2_settings WHERE name != 'system_bootstrap_edge_version'"
+    : `SELECT COUNT(*) AS count FROM ${table}`)));
+  return Object.fromEntries(tables.map((table, index) => [table, Number(results[index]?.results?.[0]?.count || 0)]));
 }
 
 function snapshotTables(run: Record<string, unknown>): string[] {
@@ -340,12 +348,6 @@ async function tableCount(db: D1Database, table: string) {
   return Number(row?.count || 0);
 }
 
-async function migratedTableCount(db: D1Database, table: string) {
-  if (table !== "v2_settings") return tableCount(db, table);
-  const row = await db.prepare("SELECT COUNT(*) AS count FROM v2_settings WHERE name != 'system_bootstrap_edge_version'").first<{ count: number }>();
-  return Number(row?.count || 0);
-}
-
 async function migrationStatus(env: MigrationEnv) {
   await ensureMigrationSchema(env);
   const runs = await env.XBOARD_DB.prepare("SELECT * FROM v2_migration_runs ORDER BY created_at DESC LIMIT 10").all<Record<string, unknown>>();
@@ -444,11 +446,13 @@ async function finishSnapshot(request: Request, env: MigrationEnv) {
   if (Number(run.snapshot_complete || 0)) return ok({ counts: safeJson(run.snapshot_counts), already_complete: true });
   if (run.prepared_at) return fail("目标数据库已开始准备，不能再完成迁移前快照", 409, 409);
   const expected = safeJson(run.snapshot_counts) as Record<string, number>;
+  const tables = snapshotTables(run);
+  const capturedRows = await env.XBOARD_DB.prepare("SELECT table_name, COUNT(*) AS count FROM v2_migration_snapshot_rows WHERE run_id = ? GROUP BY table_name")
+    .bind(runId).all<{ table_name: string; count: number }>();
+  const capturedCounts = new Map((capturedRows.results || []).map(row => [String(row.table_name), Number(row.count || 0)]));
   const mismatches: Array<{ table: string; expected: number; captured: number }> = [];
-  for (const table of snapshotTables(run)) {
-    const row = await env.XBOARD_DB.prepare("SELECT COUNT(*) AS count FROM v2_migration_snapshot_rows WHERE run_id = ? AND table_name = ?")
-      .bind(runId, table).first<{ count: number }>();
-    const captured = Number(row?.count || 0);
+  for (const table of tables) {
+    const captured = capturedCounts.get(table) || 0;
     if (captured !== Number(expected[table] || 0)) mismatches.push({ table, expected: Number(expected[table] || 0), captured });
   }
   if (mismatches.length) {
@@ -457,7 +461,7 @@ async function finishSnapshot(request: Request, env: MigrationEnv) {
     return migrationError("迁移前快照校验失败，未写入任何导入数据", 409, details);
   }
   await env.XBOARD_DB.prepare("UPDATE v2_migration_runs SET snapshot_complete = 1, updated_at = ? WHERE id = ?").bind(now(), runId).run();
-  await logMigration(env, runId, Number(run.skip_backup || 0) ? "强制账号备份已完成" : "迁移前 D1 快照与原版 SQLite 自动备份已完成", undefined, { counts: expected, tables: snapshotTables(run) });
+  await logMigration(env, runId, Number(run.skip_backup || 0) ? "强制账号备份已完成" : "迁移前 D1 快照与原版 SQLite 自动备份已完成", undefined, { counts: expected, tables });
   return ok({ counts: expected });
 }
 
@@ -736,9 +740,10 @@ async function finishRollback(request: Request, env: MigrationEnv) {
   const run = await migrationRun(env, runId);
   if (!run || run.status !== "rolling_back") return fail("还原任务不存在或已结束", 409, 409);
   const expected = safeJson(run.snapshot_counts) as Record<string, number>;
+  const restoredCounts = await tableCounts(env.XBOARD_DB, MIGRATION_TABLES);
   const mismatches: Array<{ table: string; expected: number; restored: number }> = [];
   for (const table of MIGRATION_TABLES) {
-    const restored = await tableCount(env.XBOARD_DB, table);
+    const restored = restoredCounts[table] || 0;
     if (restored !== Number(expected[table] || 0)) mismatches.push({ table, expected: Number(expected[table] || 0), restored });
   }
   if (mismatches.length) {
@@ -790,12 +795,13 @@ async function finishMigration(request: Request, env: MigrationEnv) {
   const warnings: string[] = [];
   const targetMismatches: Array<{ table: string; expected: number; actual: number }> = [];
   if (run.source_type !== "redis") {
+    const countedTables = MIGRATION_TABLES.filter(table => run.mode === "overwrite" || sourceCounts[table] !== undefined);
+    Object.assign(counts, await migratedTableCounts(env.XBOARD_DB, countedTables));
     for (const table of MIGRATION_TABLES) {
       if (sourceCounts[table] !== undefined) {
         const received = Number(progress[table]?.received || 0);
         if (received !== Number(sourceCounts[table])) warnings.push(`${table}: 源库 ${sourceCounts[table]} 行，实际接收 ${received} 行`);
       }
-      if (run.mode === "overwrite" || sourceCounts[table] !== undefined) counts[table] = await migratedTableCount(env.XBOARD_DB, table);
       if (run.mode === "overwrite") {
         const expected = Number(progress[table]?.inserted || 0);
         if (counts[table] !== expected) targetMismatches.push({ table, expected, actual: counts[table] });

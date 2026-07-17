@@ -49,6 +49,15 @@ test("node polling defaults to five minutes", () => {
   assert.doesNotMatch(source, /setting\(env, "server_(?:push|pull)_interval", "60"\)/);
 });
 
+test("Tidalab submit paths skip user reads and preserve payload-based ETags", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const tidalab = source.slice(source.indexOf("async function handleTidalab"), source.indexOf("async function machineNodes"));
+  assert.doesNotMatch(tidalab.split('if (family === "ShadowsocksTidalab")')[0], /nodeUsers/);
+  assert.match(tidalab, /etagResponse\(request, \{ data \}, data\)/);
+  assert.match(tidalab, /etagResponse\(request, \{ msg: "ok", data \}, data\)/);
+  assert.match(tidalab, /if \(action === "submit"\) return submit\(\)/);
+});
+
 test("node configuration and user snapshots use Cache API after authentication", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   const cache = fs.readFileSync("src/cache.ts", "utf8");

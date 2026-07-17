@@ -1128,8 +1128,10 @@ async function build(request: Request, env: Env, token: string) {
   if (user.expired_at !== null && Number(user.expired_at) < now()) return { status: 403, body: "", headers: { "content-type": "text/plain" } };
   if (Number(user.transfer_enable || 0) <= 0) return { status: 403, body: "", headers: { "content-type": "text/plain" } };
 
-  const config = await loadSettings(env.XBOARD_DB, env.XBOARD_KV);
-  const templateMap = await templates(env);
+  const [config, templateMap] = await Promise.all([
+    loadSettings(env.XBOARD_DB, env.XBOARD_KV),
+    templates(env)
+  ]);
   const url = new URL(request.url);
   const requestedTypeInput = url.searchParams.get("types") || "all";
   const requestedTypes = requestedTypeInput === "all" ? [...validServerTypes] : requestedTypeInput.split(/[|,｜]+/).map(value => value.trim()).filter(value => validServerTypes.has(value));

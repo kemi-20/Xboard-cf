@@ -17,6 +17,10 @@ function dateString(timestamp: number) {
   return new Date((timestamp + APP_TIMEZONE_OFFSET) * 1000).toISOString().slice(0, 10);
 }
 
+function growthRate(value: number, previous: number) {
+  return previous > 0 ? Math.round(((value - previous) / previous) * 1000) / 10 : 0;
+}
+
 export async function adminStats<E extends StatisticsEnv>(env: E, deps: StatisticsDeps<E>) {
   const current = now();
   const today = deps.dayStart();
@@ -76,21 +80,20 @@ export async function adminStats<E extends StatisticsEnv>(env: E, deps: Statisti
   const monthUpload = Number(traffic.month_upload || 0), monthDownload = Number(traffic.month_download || 0);
   const todayUpload = Number(traffic.today_upload || 0), todayDownload = Number(traffic.today_download || 0);
   const totalUpload = Number(traffic.total_upload || 0), totalDownload = Number(traffic.total_download || 0);
-  const growth = (value: number, previous: number) => previous > 0 ? Math.round(((value - previous) / previous) * 1000) / 10 : 0;
   return {
     todayIncome,
-    dayIncomeGrowth: growth(todayIncome, yesterdayIncome),
+    dayIncomeGrowth: growthRate(todayIncome, yesterdayIncome),
     currentMonthIncome,
     lastMonthIncome,
-    monthIncomeGrowth: growth(currentMonthIncome, lastMonthIncome),
-    lastMonthIncomeGrowth: growth(lastMonthIncome, twoMonthsAgoIncome),
+    monthIncomeGrowth: growthRate(currentMonthIncome, lastMonthIncome),
+    lastMonthIncomeGrowth: growthRate(lastMonthIncome, twoMonthsAgoIncome),
     currentMonthCommissionPayout,
     lastMonthCommissionPayout,
-    commissionGrowth: growth(lastMonthCommissionPayout, twoMonthsAgoCommission),
+    commissionGrowth: growthRate(lastMonthCommissionPayout, twoMonthsAgoCommission),
     ticketPendingTotal: Number(tickets.ticket_pending_total || 0),
     commissionPendingTotal: Number(orders.commission_pending_total || 0),
     currentMonthNewUsers,
-    userGrowth: growth(currentMonthNewUsers, lastMonthNewUsers),
+    userGrowth: growthRate(currentMonthNewUsers, lastMonthNewUsers),
     totalUsers,
     activeUsers,
     onlineUsers: Math.max(Number(users.online_users || 0), Number(liveOnline?.users || 0)),
@@ -175,9 +178,6 @@ export async function trafficRank(env: StatisticsEnv, url: URL) {
   const endBucket = Math.floor(end / 300);
   return cachedData(`traffic-rank:${type}:${startBucket}:${endBucket}`, 300, async () => {
     const previousStart = start - Math.max(0, end - start);
-    const calculateChange = (value: number, previousValue: number) => previousValue > 0
-      ? Math.round(((value - previousValue) / previousValue) * 1000) / 10
-      : 0;
     const table = type === "node" ? "v2_stat_server" : "v2_stat_user";
     const idColumn = type === "node" ? "server_id" : "user_id";
     const relationTable = type === "node" ? "v2_server" : "v2_user";
@@ -205,7 +205,7 @@ export async function trafficRank(env: StatisticsEnv, url: URL) {
           name: row.name || `${type === "node" ? "Node" : "User"} ${row.id}`,
           value,
           previousValue,
-          change: calculateChange(value, previousValue),
+          change: growthRate(value, previousValue),
           timestamp: new Date(end * 1000).toISOString()
         };
       });

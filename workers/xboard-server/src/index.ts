@@ -223,8 +223,8 @@ async function nodeUsers(env: Env, node: Row): Promise<Row[]> {
   }, 30);
 }
 
-async function etagResponse(request: Request, data: unknown) {
-  const etag = await responseEtag(data);
+async function etagResponse(request: Request, data: unknown, etagData: unknown = data) {
+  const etag = await responseEtag(etagData);
   if ((request.headers.get("if-none-match") || "").includes(etag.replaceAll('"', ""))) return new Response(null, { status: 304 });
   return json(data, 200, { ETag: etag });
 }
@@ -448,39 +448,31 @@ async function handleUniProxy(request: Request, env: Env, action: string, auth: 
 
 async function handleTidalab(request: Request, env: Env, family: string, action: string, auth: AuthContext) {
   const node = auth.node!;
-  const users = await nodeUsers(env, node);
   const protocol = parseJson<Row>(node.protocol_settings, {});
+  const submit = async () => {
+    const raw = Array.isArray(auth.input.__raw) ? auth.input.__raw : [];
+    const traffic: Row = {};
+    for (const item of raw as any[]) if (item?.user_id !== undefined) traffic[String(item.user_id)] = [item.u, item.d];
+    await enqueueTraffic(env, node, traffic);
+    return json({ ret: 1, msg: "ok" });
+  };
   if (family === "ShadowsocksTidalab") {
     if (action === "user") {
       await touchNode(env, node);
+      const users = await nodeUsers(env, node);
       const data = users.map(user => ({ id: user.id, port: Number(node.server_port), cipher: protocol.cipher ?? null, secret: user.uuid }));
-      const etag = await responseEtag(data);
-      if ((request.headers.get("if-none-match") || "").includes(etag.replaceAll('"', ""))) return new Response(null, { status: 304 });
-      return json({ data }, 200, { ETag: etag });
+      return etagResponse(request, { data }, data);
     }
-    if (action === "submit") {
-      const raw = Array.isArray(auth.input.__raw) ? auth.input.__raw : [];
-      const traffic: Row = {};
-      for (const item of raw as any[]) if (item?.user_id !== undefined) traffic[String(item.user_id)] = [item.u, item.d];
-      await enqueueTraffic(env, node, traffic);
-      return json({ ret: 1, msg: "ok" });
-    }
+    if (action === "submit") return submit();
   }
   if (family === "TrojanTidalab") {
     if (action === "user") {
       await touchNode(env, node);
+      const users = await nodeUsers(env, node);
       const data = users.map(({ uuid, ...user }) => ({ ...user, trojan_user: { password: uuid } }));
-      const etag = await responseEtag(data);
-      if ((request.headers.get("if-none-match") || "").includes(etag.replaceAll('"', ""))) return new Response(null, { status: 304 });
-      return json({ msg: "ok", data }, 200, { ETag: etag });
+      return etagResponse(request, { msg: "ok", data }, data);
     }
-    if (action === "submit") {
-      const raw = Array.isArray(auth.input.__raw) ? auth.input.__raw : [];
-      const traffic: Row = {};
-      for (const item of raw as any[]) if (item?.user_id !== undefined) traffic[String(item.user_id)] = [item.u, item.d];
-      await enqueueTraffic(env, node, traffic);
-      return json({ ret: 1, msg: "ok" });
-    }
+    if (action === "submit") return submit();
     if (action === "config") {
       if (!auth.input.local_port) return validationFailure("local_port", "本地端口不能为空");
       const config = { run_type: "server", local_addr: "0.0.0.0", local_port: Number(node.server_port), remote_addr: "www.taobao.com", remote_port: 80, password: [], ssl: { cert: "/root/.cert/server.crt", key: "/root/.cert/server.key", sni: protocol.server_name || node.host }, api: { enabled: true, api_addr: "127.0.0.1", api_port: Number(auth.input.local_port) } };
@@ -491,10 +483,14 @@ async function handleTidalab(request: Request, env: Env, family: string, action:
 }
 
 async function machineNodes(env: Env, machine: Row) {
-  const result = await env.XBOARD_DB.prepare("SELECT id, type, name FROM v2_server WHERE machine_id = ? AND enabled = 1 ORDER BY sort ASC").bind(machine.id).all<Row>();
+  const [result, pushInterval, pullInterval] = await Promise.all([
+    env.XBOARD_DB.prepare("SELECT id, type, name FROM v2_server WHERE machine_id = ? AND enabled = 1 ORDER BY sort ASC").bind(machine.id).all<Row>(),
+    setting(env, "server_push_interval", "300"),
+    setting(env, "server_pull_interval", "300")
+  ]);
   return {
     nodes: result.results || [],
-    base_config: { push_interval: Number(await setting(env, "server_push_interval", "300")), pull_interval: Number(await setting(env, "server_pull_interval", "300")) }
+    base_config: { push_interval: Number(pushInterval), pull_interval: Number(pullInterval) }
   };
 }
 

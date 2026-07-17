@@ -32,8 +32,8 @@ export async function handleUserOrders<E extends OrderEnv>(
     const url = new URL(request.url); const input = request.method === "POST" ? await body<Record<string, any>>(request.clone()) : {};
     url.searchParams.forEach((value, key) => { input[key] = value; });
     const userId = Number((user as any).id);
-    const orderResource = async (row: Record<string, any>) => {
-      const plan = row.plan_id ? await env.XBOARD_DB.prepare("SELECT * FROM v2_plan WHERE id = ?").bind(row.plan_id).first<Record<string, any>>() : null;
+    const orderResource = (row: Record<string, any>, plans?: Map<number, Record<string, any>>) => {
+      const plan = row.plan_id ? plans?.get(Number(row.plan_id)) || null : null;
       return { ...row, status: Number(row.status), total_amount: Number(row.total_amount || 0), period: deps.legacyOrderPeriod(row.period), plan: plan ? { ...plan, prices: deps.parseJsonObject(plan.prices), tags: deps.parseJsonArray(plan.tags) } : null, payment: null };
     };
     if (request.method === "GET" && route === "/order/fetch") {
@@ -42,12 +42,19 @@ export async function handleUserOrders<E extends OrderEnv>(
       const result = status === null
         ? await env.XBOARD_DB.prepare("SELECT * FROM v2_order WHERE user_id = ? ORDER BY created_at DESC").bind(userId).all<Record<string, any>>()
         : await env.XBOARD_DB.prepare("SELECT * FROM v2_order WHERE user_id = ? AND status = ? ORDER BY created_at DESC").bind(userId, status).all<Record<string, any>>();
-      return ok(await Promise.all((result.results || []).map(orderResource)));
+      const rows = result.results || [];
+      const planIds = [...new Set(rows.map(row => Number(row.plan_id || 0)).filter(Boolean))];
+      const planResult = planIds.length
+        ? await env.XBOARD_DB.prepare(`SELECT * FROM v2_plan WHERE id IN (${planIds.map(() => "?").join(",")})`).bind(...planIds).all<Record<string, any>>()
+        : { results: [] as Record<string, any>[] };
+      const plans = new Map((planResult.results || []).map(plan => [Number(plan.id), plan]));
+      return ok(rows.map(row => orderResource(row, plans)));
     }
     if (request.method === "GET" && route === "/order/detail") {
       const order = await env.XBOARD_DB.prepare("SELECT * FROM v2_order WHERE user_id = ? AND trade_no = ?").bind(userId, String(input.trade_no || "")).first<Record<string, any>>();
       if (!order) return fail("订单不存在或已支付", 400, 400);
-      const value = await orderResource(order);
+      const plan = order.plan_id ? await env.XBOARD_DB.prepare("SELECT * FROM v2_plan WHERE id = ?").bind(order.plan_id).first<Record<string, any>>() : null;
+      const value = orderResource(order, new Map(plan ? [[Number(plan.id), plan]] : []));
       if (!value.plan) return fail("订阅计划不存在", 400, 400);
       const surplusOrderIds = deps.parseJsonArray(order.surplus_order_ids).map(Number).filter(Boolean);
       const surplusResult = surplusOrderIds.length

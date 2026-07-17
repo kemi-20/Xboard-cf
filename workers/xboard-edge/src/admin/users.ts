@@ -88,13 +88,14 @@ export async function adminUserList<E extends UserEnv>(env: E, request: Request,
   const data = await Promise.all(userRows.map(async row => {
     const liveCount = liveDevices?.[String(row.id)]?.length || 0;
     const persistedCount = Number(row.last_online_at || 0) >= observedAt - 600 ? Number(row.online_count || 0) : 0;
+    const usedTraffic = Number(row.u || 0) + Number(row.d || 0);
     return {
       ...deps.safeUser(row),
       balance: Number(row.balance || 0) / 100,
       commission_balance: Number(row.commission_balance || 0) / 100,
       commission_type: Number(row.commission_type ?? 0),
-      total_used: Number(row.u || 0) + Number(row.d || 0),
-      used_traffic: Number(row.u || 0) + Number(row.d || 0),
+      total_used: usedTraffic,
+      used_traffic: usedTraffic,
       subscribe_url: await deps.subscribeUrl(request, env, row.token),
       plan: plans.get(Number(row.plan_id || 0)) || null,
       group: groups.get(Number(row.group_id || 0)) || null,

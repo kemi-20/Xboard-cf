@@ -16,13 +16,6 @@ const SETTINGS_NAMES = [
 ] as const;
 let settingsCache: { value: Record<string, string>; version: string; expiresAt: number; versionCheckedAt: number } | null = null;
 let settingsPromise: Promise<Record<string, string>> | null = null;
-export async function list(db: D1Database, table: string, page = 1, pageSize = 20) {
-  const safe = table.replace(/[^a-zA-Z0-9_]/g, "");
-  const offset = Math.max(0, page - 1) * pageSize;
-  const rows = await db.prepare(`SELECT * FROM ${safe} ORDER BY id DESC LIMIT ? OFFSET ?`).bind(pageSize, offset).all();
-  const total = await db.prepare(`SELECT COUNT(*) AS c FROM ${safe}`).first<{ c: number }>();
-  return { data: rows.results || [], total: total?.c || 0, current_page: page, per_page: pageSize };
-}
 export async function settings(db: D1Database, kv?: KVNamespace) {
   const current = Date.now();
   if (settingsCache && settingsCache.expiresAt > current && (!kv || current - settingsCache.versionCheckedAt < SETTINGS_VERSION_CHECK_MS)) return settingsCache.value;

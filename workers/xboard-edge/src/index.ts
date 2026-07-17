@@ -1748,10 +1748,12 @@ async function trafficResetLogs(env: Env, request: Request) {
   if (start !== null) { clauses.push("l.reset_time >= ?"); binds.push(start); }
   if (end !== null) { clauses.push("l.reset_time <= ?"); binds.push(end); }
   const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
-  const result = await env.XBOARD_DB.prepare(`SELECT l.*, u.email AS user_email FROM v2_traffic_reset_logs l LEFT JOIN v2_user u ON u.id = l.user_id${where} ORDER BY l.reset_time DESC LIMIT ? OFFSET ?`).bind(...binds, pageSize, offset).all<Record<string, any>>();
+  const [result, totalResult] = await env.XBOARD_DB.batch<Record<string, any>>([
+    env.XBOARD_DB.prepare(`SELECT l.*, u.email AS user_email FROM v2_traffic_reset_logs l LEFT JOIN v2_user u ON u.id = l.user_id${where} ORDER BY l.reset_time DESC LIMIT ? OFFSET ?`).bind(...binds, pageSize, offset),
+    env.XBOARD_DB.prepare(`SELECT COUNT(*) AS count FROM v2_traffic_reset_logs l LEFT JOIN v2_user u ON u.id = l.user_id${where}`).bind(...binds)
+  ]);
   const data = (result.results || []).map(row => trafficResetResource(row, request));
-  const totalRow = await env.XBOARD_DB.prepare(`SELECT COUNT(*) AS count FROM v2_traffic_reset_logs l LEFT JOIN v2_user u ON u.id = l.user_id${where}`).bind(...binds).first<{ count: number }>();
-  const total = Number(totalRow?.count || 0);
+  const total = Number((totalResult.results?.[0] as any)?.count || 0);
   return { data, pagination: { current_page: page, last_page: Math.max(1, Math.ceil(total / pageSize)), per_page: pageSize, total } };
 }
 
@@ -1960,8 +1962,10 @@ async function adminTicket(request: Request, env: Env, route: string, adminId: n
     if (id) {
       const ticket = await env.XBOARD_DB.prepare("SELECT t.* FROM v2_ticket t WHERE t.id = ?").bind(id).first<Record<string, any>>();
       if (!ticket) return fail("工单不存在", 400, 400202);
-      const user = await env.XBOARD_DB.prepare("SELECT * FROM v2_user WHERE id = ?").bind(ticket.user_id).first<Record<string, any>>();
-      const messages = await env.XBOARD_DB.prepare("SELECT m.*, u.email FROM v2_ticket_message m LEFT JOIN v2_user u ON u.id = m.user_id WHERE m.ticket_id = ? ORDER BY m.id ASC").bind(id).all();
+      const [user, messages] = await Promise.all([
+        env.XBOARD_DB.prepare("SELECT * FROM v2_user WHERE id = ?").bind(ticket.user_id).first<Record<string, any>>(),
+        env.XBOARD_DB.prepare("SELECT m.*, u.email FROM v2_ticket_message m LEFT JOIN v2_user u ON u.id = m.user_id WHERE m.ticket_id = ? ORDER BY m.id ASC").bind(id).all()
+      ]);
       const transformedUser = user ? { ...safeUser(user), balance: Number(user.balance || 0) / 100, commission_balance: Number(user.commission_balance || 0) / 100, subscribe_url: await subscribeUrl(request, env, String(user.token || "")) } : null;
       return ok({ ...ticket, user: transformedUser, messages: messages.results || [] });
     }
@@ -1984,14 +1988,16 @@ async function adminTicket(request: Request, env: Env, route: string, adminId: n
     const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
     const sort = parseJsonArray(input.sort).map(item => ({ field: ticketFields[String(item?.id || "")], direction: item?.desc ? "DESC" : "ASC" })).filter(item => item.field);
     const order = [...sort.map(item => `${item.field} ${item.direction}`), "t.updated_at DESC"].join(", ");
-    const result = await env.XBOARD_DB.prepare(`SELECT t.* FROM v2_ticket t JOIN v2_user u ON u.id = t.user_id${where} ORDER BY ${order} LIMIT ? OFFSET ?`).bind(...binds, pageSize, (current - 1) * pageSize).all<Record<string, any>>();
-    const count = await env.XBOARD_DB.prepare(`SELECT COUNT(*) AS count FROM v2_ticket t JOIN v2_user u ON u.id = t.user_id${where}`).bind(...binds).first<{ count: number }>();
+    const [result, countResult] = await env.XBOARD_DB.batch<Record<string, any>>([
+      env.XBOARD_DB.prepare(`SELECT t.* FROM v2_ticket t JOIN v2_user u ON u.id = t.user_id${where} ORDER BY ${order} LIMIT ? OFFSET ?`).bind(...binds, pageSize, (current - 1) * pageSize),
+      env.XBOARD_DB.prepare(`SELECT COUNT(*) AS count FROM v2_ticket t JOIN v2_user u ON u.id = t.user_id${where}`).bind(...binds)
+    ]);
     const tickets = result.results || [];
     const userIds = [...new Set(tickets.map(ticket => Number(ticket.user_id)).filter(Boolean))];
     const users = userIds.length ? await env.XBOARD_DB.prepare(`SELECT * FROM v2_user WHERE id IN (${userIds.map(() => "?").join(",")})`).bind(...userIds).all<Record<string, any>>() : { results: [] as Record<string, any>[] };
     const userEntries = await Promise.all((users.results || []).map(async user => [Number(user.id), { ...safeUser(user), balance: Number(user.balance || 0) / 100, commission_balance: Number(user.commission_balance || 0) / 100, subscribe_url: await subscribeUrl(request, env, String(user.token || "")) }] as const));
     const userMap = new Map(userEntries);
-    return json({ data: tickets.map(ticket => ({ ...ticket, user: userMap.get(Number(ticket.user_id)) || null })), total: Number(count?.count || 0) });
+    return json({ data: tickets.map(ticket => ({ ...ticket, user: userMap.get(Number(ticket.user_id)) || null })), total: Number((countResult.results?.[0] as any)?.count || 0) });
   }
   if (!id) return fail("工单ID不能为空", 422, 422);
   const ticket = await env.XBOARD_DB.prepare("SELECT id, user_id, subject, status FROM v2_ticket WHERE id = ?").bind(id).first<Record<string, any>>();
@@ -2067,9 +2073,11 @@ async function adminCoupon(request: Request, env: Env, route: string): Promise<R
     const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
     const sort = parseJsonArray(input.sort).map(item => ({ field: String(item?.id || ""), direction: item?.desc ? "DESC" : "ASC" })).filter(item => couponFields.has(item.field));
     const order = [...sort.map(item => `${item.field} ${item.direction}`), "created_at DESC"].join(", ");
-    const result = await env.XBOARD_DB.prepare(`SELECT * FROM v2_coupon${where} ORDER BY ${order} LIMIT ? OFFSET ?`).bind(...binds, pageSize, (current - 1) * pageSize).all<Record<string, any>>();
-    const totalRow = await env.XBOARD_DB.prepare(`SELECT COUNT(*) AS count FROM v2_coupon${where}`).bind(...binds).first<{ count: number }>();
-    const total = Number(totalRow?.count || 0);
+    const [result, totalResult] = await env.XBOARD_DB.batch<Record<string, any>>([
+      env.XBOARD_DB.prepare(`SELECT * FROM v2_coupon${where} ORDER BY ${order} LIMIT ? OFFSET ?`).bind(...binds, pageSize, (current - 1) * pageSize),
+      env.XBOARD_DB.prepare(`SELECT COUNT(*) AS count FROM v2_coupon${where}`).bind(...binds)
+    ]);
+    const total = Number((totalResult.results?.[0] as any)?.count || 0);
     return json(paginated((result.results || []).map(row => ({
         ...row,
         type: Math.trunc(Number.parseFloat(String(row.type ?? 0))),
@@ -2684,6 +2692,10 @@ async function adminApi(request: Request, env: Env, path: string) {
       if (!["maileroo", "brevo"].includes(input.email_driver)) return fail("邮件服务商只能是 Maileroo 或 Brevo", 422, 422);
     }
     const ts = now();
+    const emailAliases: Record<string, string> = {
+      email_username: "resend_from_name", resend_from_name: "email_username",
+      email_from_address: "resend_from_address", resend_from_address: "email_from_address"
+    };
     for (const [name, value] of Object.entries(input)) {
       if (await saveSubscribeTemplate(env, name, value)) continue;
       if (!allowedConfigSettings.has(name)) return fail(`不支持的设置项: ${name}`, 422, 422);
@@ -2708,10 +2720,6 @@ async function adminApi(request: Request, env: Env, path: string) {
       if (name === "server_token" && value !== null && value !== "" && String(value).length < 16) return fail("通讯密钥长度必须大于16位", 422, 422);
       if (name === "reset_traffic_method" && ![0, 1, 2, 3, 4].includes(Number(storedValue))) return fail("月流量重置方式无效", 422, 422);
       if (name === "captcha_type" && !["recaptcha", "turnstile", "recaptcha-v3"].includes(String(value))) return fail("人机验证类型无效", 422, 422);
-      const emailAliases: Record<string, string> = {
-        email_username: "resend_from_name", resend_from_name: "email_username",
-        email_from_address: "resend_from_address", resend_from_address: "email_from_address"
-      };
       await env.XBOARD_DB.prepare("INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
         .bind(name, typeof storedValue === "object" ? JSON.stringify(storedValue) : String(storedValue), ts, ts).run();
       if (emailAliases[name]) {
@@ -2848,15 +2856,16 @@ async function adminApi(request: Request, env: Env, path: string) {
     if (!userId) return fail("user_id 字段是必须的", 422, 422);
     const page = Math.max(1, Number(input.page || 1));
     const pageSize = Math.min(100, Math.max(1, Number(input.pageSize || input.page_size || 10)));
-    const result = await env.XBOARD_DB.prepare(`SELECT user_id, server_rate, record_type, record_at, SUM(u) AS u, SUM(d) AS d, MIN(created_at) AS created_at, MAX(updated_at) AS updated_at
-      FROM v2_stat_user WHERE user_id = ? GROUP BY user_id, server_rate, record_type, record_at
-      ORDER BY record_at DESC LIMIT ? OFFSET ?`)
-      .bind(userId, pageSize, (page - 1) * pageSize).all<Record<string, any>>();
-    const totalRow = await env.XBOARD_DB.prepare(`SELECT COUNT(*) AS count FROM (
-      SELECT 1 FROM v2_stat_user WHERE user_id = ? GROUP BY user_id, server_rate, record_type, record_at
-    )`).bind(userId).first<{ count: number }>();
+    const [result, totalResult] = await env.XBOARD_DB.batch<Record<string, any>>([
+      env.XBOARD_DB.prepare(`SELECT user_id, server_rate, record_type, record_at, SUM(u) AS u, SUM(d) AS d, MIN(created_at) AS created_at, MAX(updated_at) AS updated_at
+        FROM v2_stat_user WHERE user_id = ? GROUP BY user_id, server_rate, record_type, record_at
+        ORDER BY record_at DESC LIMIT ? OFFSET ?`).bind(userId, pageSize, (page - 1) * pageSize),
+      env.XBOARD_DB.prepare(`SELECT COUNT(*) AS count FROM (
+        SELECT 1 FROM v2_stat_user WHERE user_id = ? GROUP BY user_id, server_rate, record_type, record_at
+      )`).bind(userId)
+    ]);
     const data = (result.results || []).map(row => ({ ...row, u: Number(row.u || 0), d: Number(row.d || 0), server_rate: Number(row.server_rate ?? 1) || 1 }));
-    return json(paginated(data, Number(totalRow?.count || 0), page, pageSize));
+    return json(paginated(data, Number((totalResult.results?.[0] as any)?.count || 0), page, pageSize));
   }
   if (request.method === "GET" && route === "/stat/getRanking") {
     const url = new URL(request.url);
