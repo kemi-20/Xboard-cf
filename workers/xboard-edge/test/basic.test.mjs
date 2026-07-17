@@ -230,6 +230,12 @@ test("server validation keeps public and backend ports independent", () => {
   assert.doesNotMatch(source, /server\.name = `\$\{server\.name \|\| "Node"\} Copy`/);
 });
 
+test("new installations generate a private node communication token", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /server_token: randomString\(32\)/);
+  assert.doesNotMatch(source, /xboard-cf-server-token-change-me/);
+});
+
 test("repeated read models use coalesced Cache API snapshots", () => {
   const source = edgeSource() + fs.readFileSync("src/cache.ts", "utf8") + fs.readFileSync("src/internal/status-client.ts", "utf8");
   assert.match(source, /const responseDataPromises = new Map/);
@@ -244,8 +250,8 @@ test("runtime status bypasses platform caches while retaining a short Edge snaps
   const source = fs.readFileSync("src/internal/status-client.ts", "utf8");
   assert.match(source, /cache: "no-store"/);
   assert.match(source, /"cache-control": "no-store, no-cache, must-revalidate"/);
-  assert.match(source, /statusHubRequest\(env, loadToken, "snapshot", \{ method: "POST" \}\)/);
-  assert.match(source, /statusHubRequest\(env, loadToken, `history\?\$\{params\}`, \{ method: "POST" \}\)/);
+  assert.match(source, /statusHubRequest\(env, loadAuthHeaders, "snapshot", \{ method: "POST" \}\)/);
+  assert.match(source, /statusHubRequest\(env, loadAuthHeaders, `history\?\$\{params\}`, \{ method: "POST" \}\)/);
   assert.match(source, /cachedData\(`status-snapshot:v2:\$\{statusSnapshotVersion\}`, 10/);
 });
 
@@ -521,7 +527,7 @@ test("machine load history matches the upstream chart contract", () => {
   assert.match(source, /async function adminMachineHistory<[^>]+>\(env: E, url: URL, deps: ServerDeps<E>\)/);
   assert.match(source, /limit < 10 \|\| limit > 1440/);
   assert.match(source, /rangeHours < 1 \|\| rangeHours > 24/);
-  assert.match(source, /statusHubRequest\(env, loadToken, `history\?\$\{params\}`, \{ method: "POST" \}\)/);
+  assert.match(source, /statusHubRequest\(env, loadAuthHeaders, `history\?\$\{params\}`, \{ method: "POST" \}\)/);
   assert.match(source, /new URLSearchParams\(\{ machine_id: String\(machineId\), limit: String\(limit\) \}\)/);
   assert.match(source, /if \(!statusRows\) return fail\("获取服务器负载历史失败"/);
   assert.match(source, /\.sort\(\(left, right\) => Number\(left\.recorded_at \|\| 0\) - Number\(right\.recorded_at \|\| 0\)\)/);
@@ -1142,7 +1148,7 @@ test("GLM compatibility audit fixes preserve upstream mutations and envelopes", 
 
 test("admin online state prefers StatusHub with a D1 fallback", () => {
   const source = edgeSource();
-  assert.match(source, /statusHubRequest\(env, loadToken, "devices\/list"/);
+  assert.match(source, /statusHubRequest\(env, loadAuthHeaders, "devices\/list"/);
   assert.match(source, /connectionCounts\[userId\].*\+ online/);
   assert.match(source, /count - current\.length/);
   assert.match(source, /liveDevices === null \? Number\(row\.online_count \|\| 0\)/);

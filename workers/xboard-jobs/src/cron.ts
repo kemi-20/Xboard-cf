@@ -1,7 +1,7 @@
 import type { D1Database, D1PreparedStatement, Fetcher, KVNamespace, Queue } from "./types.ts";
 import { now } from "./compat.ts";
 import { primaryDatabase, settings as loadSettings } from "./db.ts";
-import { internalSyncToken } from "./internal-auth.ts";
+import { internalAuthHeaders } from "./internal-auth.ts";
 
 export interface CronEnv { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; NOTIFICATION_EVENTS: Queue; XBOARD_SERVER: Fetcher; INTERNAL_SYNC_TOKEN?: string; }
 
@@ -308,12 +308,12 @@ async function openProcessingOrder(env: CronEnv, order: Record<string, any>, ts:
   const results = await env.XBOARD_DB.batch(statements);
   if (Number((results.at(-1)?.meta as any)?.changes || 0) !== 1) return;
   await optionalKvPut(env, `user_version:${user.id}`, String(ts));
-  const syncToken = await internalSyncToken(env);
-  if (syncToken) {
+  const authHeaders = await internalAuthHeaders(env);
+  if (authHeaders["x-xboard-internal-token"]) {
     try {
       await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/sync", {
         method: "POST",
-        headers: { "content-type": "application/json", "x-xboard-internal-token": syncToken },
+        headers: { "content-type": "application/json", ...authHeaders },
         body: JSON.stringify({ scope: "user", user_id: Number(user.id) })
       });
     } catch {}
@@ -354,7 +354,7 @@ async function checkOrders(env: CronEnv, ts: number) {
 }
 
 async function checkTrafficExceeded(env: CronEnv) {
-  const token = await internalSyncToken(env);
+  const authHeaders = await internalAuthHeaders(env);
   while (true) {
     const pending = await env.XBOARD_DB.prepare("SELECT u.id, u.banned, u.transfer_enable, u.u, u.d FROM v2_traffic_pending_check p JOIN v2_user u ON u.id = p.user_id ORDER BY p.updated_at ASC LIMIT 1000").all<any>();
     const rows = pending.results || [];
@@ -363,7 +363,7 @@ async function checkTrafficExceeded(env: CronEnv) {
     if (ids.length) {
       const response = await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/sync", {
         method: "POST",
-        headers: { "content-type": "application/json", "x-xboard-internal-token": token },
+        headers: { "content-type": "application/json", ...authHeaders },
         body: JSON.stringify({ scope: "users", user_ids: ids })
       });
       if (!response.ok) throw new Error(`Traffic exceeded sync failed: HTTP ${response.status}`);
@@ -393,11 +393,11 @@ async function resetLogs(env: CronEnv, ts: number) {
 async function acquireTaskLock(env: CronEnv, task: string, ts: number) {
   const doClaim = `do:${crypto.randomUUID()}`;
   try {
-    const token = await internalSyncToken(env);
-    if (token) {
+    const authHeaders = await internalAuthHeaders(env);
+    if (authHeaders["x-xboard-internal-token"]) {
       const response = await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/status/locks/acquire", {
         method: "POST",
-        headers: { "content-type": "application/json", "x-xboard-internal-token": token },
+        headers: { "content-type": "application/json", ...authHeaders },
         body: JSON.stringify({ name: task, claim: doClaim, timestamp: ts, ttl: 1800 })
       });
       if (response.ok) {
@@ -419,10 +419,10 @@ async function acquireTaskLock(env: CronEnv, task: string, ts: number) {
 async function releaseTaskLock(env: CronEnv, task: string, claim: string, ts: number) {
   if (claim.startsWith("do:")) {
     try {
-      const token = await internalSyncToken(env);
-      if (token) await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/status/locks/release", {
+      const authHeaders = await internalAuthHeaders(env);
+      if (authHeaders["x-xboard-internal-token"]) await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/status/locks/release", {
         method: "POST",
-        headers: { "content-type": "application/json", "x-xboard-internal-token": token },
+        headers: { "content-type": "application/json", ...authHeaders },
         body: JSON.stringify({ name: task, claim })
       });
     } catch { /* The DO lock expires automatically. */ }

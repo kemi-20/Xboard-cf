@@ -25,13 +25,52 @@ export type StatusSnapshot = {
 };
 
 type StatusEnv = { XBOARD_SERVER: Fetcher };
-type TokenLoader = () => Promise<string>;
+type AuthHeaderLoader = () => Promise<Record<string, string>>;
 
 let statusSnapshotVersion = 0;
 let liveDeviceSnapshotCache: { value: Record<string, string[]>; expiresAt: number } | null = null;
 let lastGoodStatusSnapshot: { value: StatusSnapshot; expiresAt: number } | null = null;
+let lastGoodPersistedAt = 0;
+const LAST_GOOD_STATUS_URL = "https://xboard-cache.internal/status-snapshot-last-good-v2";
 
-async function statusHubRequest(env: StatusEnv, loadToken: TokenLoader, path: string, init: RequestInit = {}) {
+function validSnapshot(value: unknown): value is StatusSnapshot {
+  const snapshot = value as StatusSnapshot | null;
+  return Boolean(snapshot && snapshot.machines && typeof snapshot.machines === "object" && !Array.isArray(snapshot.machines)
+    && snapshot.nodes && typeof snapshot.nodes === "object" && !Array.isArray(snapshot.nodes));
+}
+
+async function persistLastGoodStatus(value: StatusSnapshot) {
+  const current = Date.now();
+  if (current - lastGoodPersistedAt < 60_000) return;
+  lastGoodPersistedAt = current;
+  const cache = (globalThis as any).caches?.default;
+  if (!cache) return;
+  try {
+    await cache.put(new Request(LAST_GOOD_STATUS_URL), new Response(JSON.stringify({ value, savedAt: current }), {
+      headers: { "content-type": "application/json", "cache-control": "public, max-age=900" }
+    }));
+  } catch {}
+}
+
+async function loadLastGoodStatus() {
+  const current = Date.now();
+  if (lastGoodStatusSnapshot && lastGoodStatusSnapshot.expiresAt > current) return lastGoodStatusSnapshot.value;
+  const cache = (globalThis as any).caches?.default;
+  if (!cache) return null;
+  try {
+    const response = await cache.match(new Request(LAST_GOOD_STATUS_URL));
+    if (!response) return null;
+    const stored = await response.json() as { value?: unknown; savedAt?: unknown };
+    const savedAt = Number(stored.savedAt || 0);
+    if (!validSnapshot(stored.value) || savedAt <= 0 || current - savedAt > 900_000) return null;
+    lastGoodStatusSnapshot = { value: stored.value, expiresAt: savedAt + 900_000 };
+    return stored.value;
+  } catch {
+    return null;
+  }
+}
+
+async function statusHubRequest(env: StatusEnv, loadAuthHeaders: AuthHeaderLoader, path: string, init: RequestInit = {}) {
   return env.XBOARD_SERVER.fetch(`https://xboard-server.internal/internal/status/${path}`, {
     ...init,
     cache: "no-store",
@@ -39,14 +78,14 @@ async function statusHubRequest(env: StatusEnv, loadToken: TokenLoader, path: st
       ...(init.headers || {}),
       "cache-control": "no-store, no-cache, must-revalidate",
       "pragma": "no-cache",
-      "x-xboard-internal-token": await loadToken()
+      ...await loadAuthHeaders()
     }
   });
 }
 
-export async function statusSnapshot(env: StatusEnv, loadToken: TokenLoader): Promise<StatusSnapshot> {
+export async function statusSnapshot(env: StatusEnv, loadAuthHeaders: AuthHeaderLoader): Promise<StatusSnapshot> {
   return cachedData(`status-snapshot:v2:${statusSnapshotVersion}`, 10, async () => {
-    const response = await statusHubRequest(env, loadToken, "snapshot", { method: "POST" });
+    const response = await statusHubRequest(env, loadAuthHeaders, "snapshot", { method: "POST" });
     if (!response.ok) throw new Error(`StatusHub returned ${response.status}`);
     const payload = await response.json() as { data?: Omit<StatusSnapshot, "available" | "stale"> };
     if (!payload.data || typeof payload.data.machines !== "object" || !payload.data.machines || Array.isArray(payload.data.machines)
@@ -55,20 +94,27 @@ export async function statusSnapshot(env: StatusEnv, loadToken: TokenLoader): Pr
     }
     const value = { machines: payload.data.machines, nodes: payload.data.nodes, available: true, stale: false };
     lastGoodStatusSnapshot = { value, expiresAt: Date.now() + 900_000 };
+    await persistLastGoodStatus(value);
     return value;
-  }, 0).catch(() => {
-    if (lastGoodStatusSnapshot && lastGoodStatusSnapshot.expiresAt > Date.now()) {
-      return { ...lastGoodStatusSnapshot.value, available: false, stale: true };
-    }
+  }, 0).catch(async () => {
+    const lastGood = await loadLastGoodStatus();
+    if (lastGood) return { ...lastGood, available: false, stale: true };
     return { machines: {}, nodes: {}, available: false, stale: false };
   });
 }
 
-export async function clearStatus(env: StatusEnv, loadToken: TokenLoader, kind: "machine" | "node", id: number) {
+export function resetStatusClientMemoryForTest() {
+  statusSnapshotVersion += 1;
+  liveDeviceSnapshotCache = null;
+  lastGoodStatusSnapshot = null;
+  lastGoodPersistedAt = 0;
+}
+
+export async function clearStatus(env: StatusEnv, loadAuthHeaders: AuthHeaderLoader, kind: "machine" | "node", id: number) {
   statusSnapshotVersion += 1;
   liveDeviceSnapshotCache = null;
   try {
-    await statusHubRequest(env, loadToken, "clear", {
+    await statusHubRequest(env, loadAuthHeaders, "clear", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ kind, id })
@@ -78,12 +124,12 @@ export async function clearStatus(env: StatusEnv, loadToken: TokenLoader, kind: 
   }
 }
 
-export async function liveDeviceSnapshot(env: StatusEnv, loadToken: TokenLoader): Promise<Record<string, string[]> | null> {
+export async function liveDeviceSnapshot(env: StatusEnv, loadAuthHeaders: AuthHeaderLoader): Promise<Record<string, string[]> | null> {
   if (liveDeviceSnapshotCache && liveDeviceSnapshotCache.expiresAt > Date.now()) return liveDeviceSnapshotCache.value;
   const value: Record<string, string[]> = {};
   let available = false;
   try {
-    const response = await statusHubRequest(env, loadToken, "devices/list", {
+    const response = await statusHubRequest(env, loadAuthHeaders, "devices/list", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ timestamp: now() })
@@ -101,7 +147,7 @@ export async function liveDeviceSnapshot(env: StatusEnv, loadToken: TokenLoader)
     // A node connection snapshot below may still provide current device counts.
   }
 
-  const runtime = await statusSnapshot(env, loadToken);
+  const runtime = await statusSnapshot(env, loadAuthHeaders);
   const cutoff = now() - 900;
   const connectionCounts: Record<string, number> = {};
   for (const node of Object.values(runtime.nodes || {})) {
@@ -123,8 +169,8 @@ export async function liveDeviceSnapshot(env: StatusEnv, loadToken: TokenLoader)
   return value;
 }
 
-export async function liveOnlineSummary(env: StatusEnv, loadToken: TokenLoader) {
-  const devices = await liveDeviceSnapshot(env, loadToken);
+export async function liveOnlineSummary(env: StatusEnv, loadAuthHeaders: AuthHeaderLoader) {
+  const devices = await liveDeviceSnapshot(env, loadAuthHeaders);
   if (devices === null) return null;
   const counts = Object.values(devices).map(ips => ips.length).filter(Boolean);
   return { users: counts.length, devices: counts.reduce((total, count) => total + count, 0) };
@@ -132,7 +178,7 @@ export async function liveOnlineSummary(env: StatusEnv, loadToken: TokenLoader) 
 
 export async function machineHistory(
   env: StatusEnv,
-  loadToken: TokenLoader,
+  loadAuthHeaders: AuthHeaderLoader,
   machineId: number,
   limit: number,
   rangeHours: number | null
@@ -140,7 +186,7 @@ export async function machineHistory(
   const params = new URLSearchParams({ machine_id: String(machineId), limit: String(limit) });
   if (rangeHours !== null) params.set("range_hours", String(rangeHours));
   return cachedData(`machine-history:${machineId}:${limit}:${rangeHours ?? "all"}`, 60, async () => {
-    const response = await statusHubRequest(env, loadToken, `history?${params}`, { method: "POST" });
+    const response = await statusHubRequest(env, loadAuthHeaders, `history?${params}`, { method: "POST" });
     if (!response.ok) throw new Error(`StatusHub returned ${response.status}`);
     const payload = await response.json() as { data?: Record<string, unknown>[] };
     return Array.isArray(payload.data) ? payload.data : [];

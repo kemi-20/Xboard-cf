@@ -108,7 +108,8 @@ test("TrafficStatsHub deduplicates a retried batch and updates only involved use
 test("mail templates override fallbacks and provider credentials stay protocol-specific", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.doesNotMatch(source, /if \(payload\.html \|\| payload\.text\) return payload/);
-  assert.match(source, /const subjectTemplate = payload\.subject_override \|\| \(row \? template\.subject : payload\.subject \|\| template\.subject\)/);
+  assert.match(source, /const subjectTemplate = row \? template\.subject : payload\.subject \|\| template\.subject/);
+  assert.match(source, /log_subject: String\(payload\.subject \|\| subject\)/);
   assert.match(source, /setting\(env, "email_password"\)/);
   assert.doesNotMatch(source, /resend_api_key/);
   assert.match(source, /replace\(\/\[<>\]\/g, ""\)/);
@@ -346,6 +347,7 @@ test("database mail templates use safe variables and preserve text line breaks",
 test("test mail returns the upstream mail log contract when the provider rejects the request", async () => {
   const originalFetch = globalThis.fetch;
   const statements = [];
+  let providerPayload = null;
   const settings = [
     { name: "app_name", value: "XBoard" },
     { name: "app_url", value: "https://example.com" },
@@ -371,7 +373,10 @@ test("test mail returns the upstream mail log contract when the provider rejects
     },
     async batch(batch) { return Promise.all(batch.map(statement => statement.run())); }
   };
-  globalThis.fetch = async () => new Response("provider unavailable", { status: 503 });
+  globalThis.fetch = async (_input, init) => {
+    providerPayload = JSON.parse(String(init.body));
+    return new Response("provider unavailable", { status: 503 });
+  };
   try {
     const response = await jobsWorker.fetch(new Request("https://jobs.internal/internal/mail/test", {
       method: "POST",
@@ -384,7 +389,10 @@ test("test mail returns the upstream mail log contract when the provider rejects
     assert.equal(payload.data.subject, "This is xboard test email");
     assert.equal(payload.data.template_name, "db:notify");
     assert.match(payload.data.error, /Maileroo 503/);
+    assert.equal(providerPayload.subject, "XBoard notice");
+    assert.match(providerPayload.html, /https:\/\/example\.com/);
     assert.ok(statements.some(item => item.sql.includes("INSERT INTO v2_mail_log")));
+    assert.equal(statements.some(item => item.sql.includes("v2_job_logs")), false);
   } finally {
     globalThis.fetch = originalFetch;
   }

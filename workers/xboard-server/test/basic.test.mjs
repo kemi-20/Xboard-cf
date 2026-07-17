@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import serverWorker from "../src/index.ts";
 import { OFFICIAL_HTTP_ROUTES, OFFICIAL_WS_EVENTS } from "../src/contracts.ts";
 import { appendMachineHistory, normalizeOnlineCounts, REGISTERED_HTTP_ROUTES, StatusHub } from "../src/index.ts";
 import { invalidateSettingsCache, settings } from "../src/db.ts";
@@ -8,6 +9,29 @@ import { invalidateSettingsCache, settings } from "../src/db.ts";
 test("xboard-server has an entrypoint", () => {
   assert.ok(fs.existsSync("src/index.ts"));
   assert.match(fs.readFileSync("src/index.ts", "utf8"), /export default/);
+});
+
+test("internal endpoints accept the D1 fallback during a partial Secret rollout", async () => {
+  const db = {
+    withSession() { return this; },
+    prepare() {
+      return {
+        bind() { return this; },
+        async all() { return { results: [
+          { name: "server_token", value: "public-node-token" },
+          { name: "internal_sync_token", value: "database-internal-token" }
+        ] }; }
+      };
+    }
+  };
+  const response = await serverWorker.fetch(new Request("https://server.internal/internal/settings/invalidate", {
+    method: "POST",
+    headers: {
+      "x-xboard-internal-token": "new-worker-secret",
+      "x-xboard-internal-token-fallback": "database-internal-token"
+    }
+  }), { XBOARD_DB: db, INTERNAL_SYNC_TOKEN: "old-worker-secret" });
+  assert.equal(response.status, 200);
 });
 
 test("device state keeps the upstream five-minute activity window without KV heartbeats", () => {

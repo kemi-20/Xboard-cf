@@ -8,6 +8,7 @@ const SETTINGS_SNAPSHOT_TTL_SECONDS = 86_400;
 const SETTINGS_CACHE_SCOPE = "jobs";
 const SETTINGS_NAMES = [
   "app_name",
+  "app_url",
   "email_driver",
   "email_password",
   "email_username",

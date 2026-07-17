@@ -2,8 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 
-import { internalSyncToken, invalidateInternalTokenCache } from "../src/internal/auth.ts";
-import { clearStatus, statusSnapshot } from "../src/internal/status-client.ts";
+import { internalAuthHeaders, internalSyncToken, invalidateInternalTokenCache } from "../src/internal/auth.ts";
+import { resetStatusClientMemoryForTest, statusSnapshot } from "../src/internal/status-client.ts";
 import { nodeAvailableStatus, statusTimeout } from "../src/admin/servers.ts";
 import { shouldNotifyNodeSync } from "../src/internal/sync-client.ts";
 
@@ -49,7 +49,21 @@ test("Worker Secret is preferred without reading D1", async () => {
   assert.equal(token, "worker-secret");
 });
 
+test("internal authentication carries a D1 fallback during partial Secret rollout", async () => {
+  invalidateInternalTokenCache();
+  const db = settingsDatabase({ server_token: "public-node-token", internal_sync_token: "database-internal-token" });
+  const headers = await internalAuthHeaders({ XBOARD_DB: db, INTERNAL_SYNC_TOKEN: "worker-secret" });
+  assert.equal(headers["x-xboard-internal-token"], "worker-secret");
+  assert.equal(headers["x-xboard-internal-token-fallback"], "database-internal-token");
+});
+
 test("status snapshots retain the last successful value during a transient StatusHub failure", async () => {
+  const originalCaches = globalThis.caches;
+  const cacheEntries = new Map();
+  globalThis.caches = { default: {
+    async put(request, response) { cacheEntries.set(request.url, response.clone()); },
+    async match(request) { return cacheEntries.get(request.url)?.clone(); }
+  } };
   let snapshotRequests = 0;
   const env = {
     XBOARD_SERVER: {
@@ -66,16 +80,20 @@ test("status snapshots retain the last successful value during a transient Statu
       }
     }
   };
-  const loadToken = async () => "internal-token";
-  const first = await statusSnapshot(env, loadToken);
-  assert.equal(first.available, true);
-  assert.equal(first.stale, false);
-  assert.equal(first.machines["1"].last_seen_at, 100);
-  await clearStatus(env, loadToken, "machine", 99);
-  const fallback = await statusSnapshot(env, loadToken);
-  assert.equal(fallback.available, false);
-  assert.equal(fallback.stale, true);
-  assert.equal(fallback.machines["1"].last_seen_at, 100);
+  const loadAuthHeaders = async () => ({ "x-xboard-internal-token": "internal-token" });
+  try {
+    const first = await statusSnapshot(env, loadAuthHeaders);
+    assert.equal(first.available, true);
+    assert.equal(first.stale, false);
+    assert.equal(first.machines["1"].last_seen_at, 100);
+    resetStatusClientMemoryForTest();
+    const fallback = await statusSnapshot(env, loadAuthHeaders);
+    assert.equal(fallback.available, false);
+    assert.equal(fallback.stale, true);
+    assert.equal(fallback.machines["1"].last_seen_at, 100);
+  } finally {
+    globalThis.caches = originalCaches;
+  }
 });
 
 test("status timeout leaves scheduling tolerance above the configured polling interval", () => {

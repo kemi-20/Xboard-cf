@@ -1,7 +1,7 @@
 import type { D1Database, Fetcher, KVNamespace } from "./types";
 import { invalidateSettingsCache } from "./db";
 import { body, fail, json, now, ok, randomString } from "./compat";
-import { internalSyncToken, invalidateInternalTokenCache } from "./internal/auth";
+import { internalAuthHeaders, invalidateInternalTokenCache } from "./internal/auth";
 
 interface MigrationEnv {
   XBOARD_DB: D1Database;
@@ -72,10 +72,9 @@ function unixTime(value: unknown) {
 async function resetServerRuntime(env: MigrationEnv) {
   try {
     invalidateInternalTokenCache();
-    const token = await internalSyncToken(env);
-    if (!token) return;
-    await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/settings/invalidate", { method: "POST", headers: { "x-xboard-internal-token": token } });
-    await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/status/reset", { method: "POST", headers: { "x-xboard-internal-token": token } });
+    const headers = await internalAuthHeaders(env);
+    await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/settings/invalidate", { method: "POST", headers });
+    await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/status/reset", { method: "POST", headers });
   } catch { /* Nodes repopulate runtime state after migration or rollback. */ }
 }
 

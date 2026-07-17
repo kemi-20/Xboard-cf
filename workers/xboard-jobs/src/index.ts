@@ -2,7 +2,7 @@ import type { D1Database, D1PreparedStatement, DurableObjectNamespace, Fetcher, 
 import { now, ok } from "./compat.ts";
 import { primaryDatabase, settings as loadSettings } from "./db.ts";
 import { runScheduled } from "./cron.ts";
-import { internalSyncToken } from "./internal-auth.ts";
+import { databaseInternalSyncToken } from "./internal-auth.ts";
 export { TrafficStatsHub } from "./traffic-stats.ts";
 
 export interface Env {
@@ -15,6 +15,17 @@ export interface Env {
   BREVO_API_KEY?: string;
   TELEGRAM_BOT_TOKEN?: string;
   INTERNAL_SYNC_TOKEN?: string;
+}
+
+async function internalRequestAuthorized(env: Env, request: Request) {
+  const supplied = [
+    request.headers.get("x-xboard-internal-token") || "",
+    request.headers.get("x-xboard-internal-token-fallback") || ""
+  ].filter(Boolean);
+  const secret = String(env.INTERNAL_SYNC_TOKEN || "").trim();
+  if (secret && supplied.includes(secret)) return true;
+  const databaseToken = await databaseInternalSyncToken(env, false);
+  return Boolean(databaseToken && supplied.includes(databaseToken));
 }
 
 const SHANGHAI_OFFSET = 8 * 3600;
@@ -144,7 +155,7 @@ async function resolveMailContent(env: Env, payload: any) {
   const flatTemplateVars = Object.fromEntries(Object.entries(templateValue).filter(([key]) => !["vars", "content_mode"].includes(key)));
   const vars = payload.template_value?.vars || payload.vars || flatTemplateVars;
   const renderVars = row ? safeMailVars(vars, payload.template_value?.content_mode || payload.content_mode) : vars;
-  const subjectTemplate = payload.subject_override || (row ? template.subject : payload.subject || template.subject);
+  const subjectTemplate = row ? template.subject : payload.subject || template.subject;
   const subject = render(String(subjectTemplate || ""), renderVars);
   const renderedContent = render(String(template.content), renderVars);
   const text = row || (!payload.html && !payload.text) ? renderedContent : render(String(payload.text || ""), vars);
@@ -156,7 +167,7 @@ async function resolveMailContent(env: Env, payload: any) {
   return {
     ...payload,
     template_name: row ? `db:${name}` : `mail.default.${name}`,
-    log_subject: String(payload.subject_override || payload.subject || subject),
+    log_subject: String(payload.subject || subject),
     subject,
     text: text || undefined,
     html
@@ -391,9 +402,9 @@ async function traffic(env: Env, event: any) {
   await trafficBatch(env, [event]);
 }
 
-async function mail(env: Env, event: any) {
-  const claim = await claimedToken(env, event.event_id, "mail", event);
-  if (!claim) return;
+async function mail(env: Env, event: any, trackJob = true) {
+  const claim = trackJob ? await claimedToken(env, event.event_id, "mail", event) : null;
+  if (trackJob && !claim) return;
   let payload = event.payload || {};
   let config: Record<string, unknown> = {};
   try {
@@ -441,10 +452,12 @@ async function mail(env: Env, event: any) {
     const responseText = await response.text();
     if (!response.ok) throw new Error(`${providerName} ${response.status}: ${responseText.slice(0, 500)}`);
     const ts = now();
-    await completeClaim(env, event.event_id, claim, recipients.map(email =>
+    const logStatements = recipients.map(email =>
       env.XBOARD_DB.prepare("INSERT INTO v2_mail_log(email, subject, template_name, error, created_at, updated_at) VALUES (?, ?, ?, NULL, ?, ?)")
         .bind(email, String(payload.log_subject || payload.subject), String(payload.template_name), ts, ts)
-    ));
+    );
+    if (trackJob) await completeClaim(env, event.event_id, claim!, logStatements);
+    else await env.XBOARD_DB.batch(logStatements);
     return { email: recipients[0], subject: String(payload.log_subject || payload.subject), template_name: String(payload.template_name), error: null, config };
   } catch (error) {
     const target = payload.to ?? payload.email;
@@ -456,7 +469,7 @@ async function mail(env: Env, event: any) {
           .bind(email, String(payload.log_subject || payload.subject || ""), String(payload.template_name || "mail.default.notify"), String((error as any)?.message || error), ts, ts)));
       } catch (logError) { console.error("Failed to write mail failure log", { error: logError }); }
     }
-    await failClaim(env, event.event_id, claim, error);
+    if (trackJob) await failClaim(env, event.event_id, claim!, error);
     if (payload.capture_error) {
       return {
         email: recipients[0] || String(payload.email || ""),
@@ -530,8 +543,7 @@ export default {
     env = { ...env, XBOARD_DB: primaryDatabase(env.XBOARD_DB) };
     const path = new URL(request.url).pathname;
     if (request.method === "POST" && path === "/internal/mail/test") {
-      const token = await internalSyncToken(env, false);
-      if (!token || request.headers.get("x-xboard-internal-token") !== token) {
+      if (!await internalRequestAuthorized(env, request)) {
         return new Response(JSON.stringify({ message: "Unauthorized" }), { status: 401, headers: { "content-type": "application/json" } });
       }
       let email = "";
@@ -547,12 +559,12 @@ export default {
           payload: {
             to: email,
             template_name: "notify",
-            subject_override: "This is xboard test email",
+            subject: "This is xboard test email",
             vars: { name: await setting(env, "app_name") || "XBoard", content: "This is xboard test email", url: await setting(env, "app_url") || "" },
             content_mode: "text",
             capture_error: true
           }
-        });
+        }, false);
         return ok(result);
       } catch (error) {
         return ok({ email, subject: "This is xboard test email", template_name: "mail.default.notify", error: String((error as Error)?.message || error), config: {} });

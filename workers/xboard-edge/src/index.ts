@@ -47,7 +47,7 @@ import {
 } from "./admin/servers";
 import { handleUserTickets } from "./user/tickets";
 import { handleUserOrders } from "./user/orders";
-import { internalSyncToken, invalidateInternalTokenCache } from "./internal/auth";
+import { internalAuthHeaders, invalidateInternalTokenCache } from "./internal/auth";
 import { sendTestMail } from "./internal/jobs-client";
 import { invalidateServerSettings, nodeSyncIntent, notifyNodeSync } from "./internal/sync-client";
 
@@ -458,7 +458,7 @@ async function ensureBootstrap(env: Env) {
     frontend_theme_sidebar: "light", frontend_theme_header: "dark", frontend_theme_color: "default",
     currency: "CNY", currency_symbol: "¥", try_out_plan_id: 1, try_out_hour: 1,
     plan_change_enable: 1, reset_traffic_method: 0, surplus_enable: 1, default_remind_expire: 1, default_remind_traffic: 1,
-    server_token: "xboard-cf-server-token-change-me", server_pull_interval: 300, server_push_interval: 300, server_ws_enable: 1,
+    server_token: randomString(32), server_pull_interval: 300, server_push_interval: 300, server_ws_enable: 1,
     server_ws_url: "", device_limit_mode: 0, payment_enabled: 0, invite_force: 0, invite_commission: 10,
     invite_gen_limit: 5, invite_never_expire: 0, commission_first_time_enable: 1, commission_auto_check_enable: 1,
     commission_withdraw_limit: 100, commission_withdraw_method: ["USDT", "支付宝"], email_verify: 0, safe_mode_enable: 0,
@@ -1081,7 +1081,7 @@ function serverDeps() {
     nullableNumber,
     statusSnapshot,
     machineHistory: (env: Env, machineId: number, limit: number, rangeHours: number | null) =>
-      runtimeMachineHistory(env, () => internalSyncToken(env), machineId, limit, rangeHours)
+      runtimeMachineHistory(env, () => internalAuthHeaders(env), machineId, limit, rangeHours)
   };
 }
 
@@ -1124,11 +1124,11 @@ function adminRouteRows(env: Env) {
   return loadAdminRouteRows(env, serverDeps());
 }
 function statusSnapshot(env: Env) {
-  return runtimeStatusSnapshot(env, () => internalSyncToken(env));
+  return runtimeStatusSnapshot(env, () => internalAuthHeaders(env));
 }
 
 function clearStatus(env: Env, kind: "machine" | "node", id: number) {
-  return clearRuntimeStatus(env, () => internalSyncToken(env), kind, id);
+  return clearRuntimeStatus(env, () => internalAuthHeaders(env), kind, id);
 }
 
 async function optionalKvGet(env: Env, key: string) {
@@ -1144,11 +1144,11 @@ async function optionalKvPutTtl(env: Env, key: string, value: string, expiration
 }
 
 function liveDeviceSnapshot(env: Env) {
-  return runtimeDeviceSnapshot(env, () => internalSyncToken(env));
+  return runtimeDeviceSnapshot(env, () => internalAuthHeaders(env));
 }
 
 function liveOnlineSummary(env: Env) {
-  return runtimeOnlineSummary(env, () => internalSyncToken(env));
+  return runtimeOnlineSummary(env, () => internalAuthHeaders(env));
 }
 
 function adminServerRows(env: Env) {
@@ -2726,7 +2726,7 @@ async function adminApi(request: Request, env: Env, path: string) {
   if (request.method === "POST" && route === "/config/testSendMail") {
     const recipient = String((admin as { email?: unknown }).email || "").trim();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipient)) return fail("Email format is incorrect", 422, 422);
-    return ok(await sendTestMail(env, await internalSyncToken(env), recipient));
+    return ok(await sendTestMail(env, recipient));
   }
   if (request.method === "POST" && route === "/config/setTelegramWebhook") {
     const input = await body<Record<string, any>>(request); const all = await settings(env.XBOARD_DB, env.XBOARD_KV);

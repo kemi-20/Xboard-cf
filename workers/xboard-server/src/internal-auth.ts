@@ -7,9 +7,7 @@ export type InternalAuthEnv = {
 
 let cachedToken: { value: string; expiresAt: number } | null = null;
 
-export async function internalToken(env: InternalAuthEnv, forceRefresh = false) {
-  const secret = String(env.INTERNAL_SYNC_TOKEN || "").trim();
-  if (secret) return secret;
+export async function databaseInternalToken(env: InternalAuthEnv, forceRefresh = false) {
   if (!forceRefresh && cachedToken && cachedToken.expiresAt > Date.now()) return cachedToken.value;
   const result = await env.XBOARD_DB.prepare("SELECT name, value FROM v2_settings WHERE name IN ('internal_sync_token', 'server_token')")
     .all<{ name: string; value: string }>();
@@ -18,6 +16,11 @@ export async function internalToken(env: InternalAuthEnv, forceRefresh = false) 
   if (!token || token === values.server_token) return null;
   cachedToken = { value: token, expiresAt: Date.now() + 300_000 };
   return token;
+}
+
+export async function internalToken(env: InternalAuthEnv, forceRefresh = false) {
+  const secret = String(env.INTERNAL_SYNC_TOKEN || "").trim();
+  return secret || databaseInternalToken(env, forceRefresh);
 }
 
 export function invalidateInternalTokenCache() {

@@ -2,7 +2,7 @@ import type { D1Database, KVNamespace, Queue, DurableObjectState, ExecutionConte
 import { now } from "./compat.ts";
 import { invalidateSettingsCache, primaryDatabase, settings as loadSettings } from "./db.ts";
 import { cachedData } from "./cache.ts";
-import { internalToken, invalidateInternalTokenCache } from "./internal-auth.ts";
+import { databaseInternalToken, invalidateInternalTokenCache } from "./internal-auth.ts";
 import {
   availableUser, billableTraffic, buildNodeConfig, isValidNodeType, normalizeNodeType,
   parseJson, parseTraffic, responseEtag, type Row
@@ -78,10 +78,15 @@ function statusHub(env: Env) {
 }
 
 async function internalRequestAuthorized(env: Env, request: Request) {
-  const supplied = request.headers.get("x-xboard-internal-token") || "";
-  let configured = await internalToken(env);
-  if (supplied && supplied !== configured && !env.INTERNAL_SYNC_TOKEN) configured = await internalToken(env, true);
-  return Boolean(configured && supplied === configured);
+  const supplied = [
+    request.headers.get("x-xboard-internal-token") || "",
+    request.headers.get("x-xboard-internal-token-fallback") || ""
+  ].filter(Boolean);
+  const secret = String(env.INTERNAL_SYNC_TOKEN || "").trim();
+  if (secret && supplied.includes(secret)) return true;
+  let databaseToken = await databaseInternalToken(env);
+  if (supplied.length && !supplied.includes(String(databaseToken || ""))) databaseToken = await databaseInternalToken(env, true);
+  return Boolean(databaseToken && supplied.includes(databaseToken));
 }
 
 async function reportStatus(env: Env, kind: "machine" | "node", id: number, state: Row, history = false) {

@@ -12,9 +12,7 @@ function generatedToken() {
   return [...bytes].map(value => value.toString(16).padStart(2, "0")).join("");
 }
 
-export async function internalSyncToken(env: InternalAuthEnv, create = true) {
-  const secret = String(env.INTERNAL_SYNC_TOKEN || "").trim();
-  if (secret) return secret;
+export async function databaseInternalSyncToken(env: InternalAuthEnv, create = true) {
   if (cachedDatabaseToken && cachedDatabaseToken.expiresAt > Date.now()) return cachedDatabaseToken.value;
 
   const result = await env.XBOARD_DB.prepare("SELECT name, value FROM v2_settings WHERE name IN ('internal_sync_token', 'server_token')")
@@ -42,6 +40,20 @@ export async function internalSyncToken(env: InternalAuthEnv, create = true) {
   if (!token || token === serverToken) throw new Error("A distinct internal synchronization token is unavailable");
   cachedDatabaseToken = { value: token, expiresAt: Date.now() + 300_000 };
   return token;
+}
+
+export async function internalSyncToken(env: InternalAuthEnv, create = true) {
+  const secret = String(env.INTERNAL_SYNC_TOKEN || "").trim();
+  return secret || databaseInternalSyncToken(env, create);
+}
+
+export async function internalAuthHeaders(env: InternalAuthEnv) {
+  const primary = await internalSyncToken(env);
+  const fallback = await databaseInternalSyncToken(env);
+  return {
+    "x-xboard-internal-token": primary,
+    ...(fallback !== primary ? { "x-xboard-internal-token-fallback": fallback } : {})
+  };
 }
 
 export function invalidateInternalTokenCache() {

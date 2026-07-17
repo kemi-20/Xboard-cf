@@ -1,6 +1,7 @@
 import type { Fetcher } from "../types";
+import { internalAuthHeaders, type InternalAuthEnv } from "./auth";
 
-type JobsClientEnv = { XBOARD_JOBS: Fetcher };
+type JobsClientEnv = InternalAuthEnv & { XBOARD_JOBS: Fetcher };
 
 export type TestMailResult = {
   email: string;
@@ -17,10 +18,10 @@ export type TestMailResult = {
   };
 };
 
-export async function sendTestMail(env: JobsClientEnv, token: string, email: string): Promise<TestMailResult> {
+export async function sendTestMail(env: JobsClientEnv, email: string): Promise<TestMailResult> {
   const response = await env.XBOARD_JOBS.fetch("https://xboard-jobs.internal/internal/mail/test", {
     method: "POST",
-    headers: { "content-type": "application/json", "x-xboard-internal-token": token },
+    headers: { "content-type": "application/json", ...await internalAuthHeaders(env) },
     body: JSON.stringify({ email })
   });
   const payload = await response.json().catch(() => ({})) as { data?: TestMailResult; message?: string };

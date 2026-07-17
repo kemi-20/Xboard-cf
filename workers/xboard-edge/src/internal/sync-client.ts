@@ -1,6 +1,6 @@
 import { body } from "../compat.ts";
 import type { D1Database, Fetcher } from "../types.ts";
-import { internalSyncToken, type InternalAuthEnv } from "./auth.ts";
+import { internalAuthHeaders, type InternalAuthEnv } from "./auth.ts";
 
 type SyncEnv = InternalAuthEnv & {
   XBOARD_DB: D1Database;
@@ -11,10 +11,9 @@ export type NodeSyncIntent = { scope: "all" } | { scope: "user"; user_id: number
 
 export async function invalidateServerSettings(env: SyncEnv) {
   try {
-    const token = await internalSyncToken(env);
     await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/settings/invalidate", {
       method: "POST",
-      headers: { "x-xboard-internal-token": token }
+      headers: await internalAuthHeaders(env)
     });
   } catch {
     // Other workers refresh their short settings cache naturally if the service is unavailable.
@@ -25,7 +24,7 @@ export async function notifyNodeSync(env: SyncEnv, intent: NodeSyncIntent = { sc
   try {
     await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/sync", {
       method: "POST",
-      headers: { "content-type": "application/json", "x-xboard-internal-token": await internalSyncToken(env) },
+      headers: { "content-type": "application/json", ...await internalAuthHeaders(env) },
       body: JSON.stringify(intent)
     });
   } catch {
