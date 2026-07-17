@@ -1407,9 +1407,9 @@ async function trafficRank(env: Env, url: URL) {
   const type = String(url.searchParams.get("type"));
   const start = Number(url.searchParams.get("start_time") || now() - 7 * 86400);
   const end = Number(url.searchParams.get("end_time") || now());
-  const startBucket = Math.floor(start / 30);
-  const endBucket = Math.floor(end / 30);
-  return cachedData(`traffic-rank:${type}:${startBucket}:${endBucket}`, 30, async () => {
+  const startBucket = Math.floor(start / 300);
+  const endBucket = Math.floor(end / 300);
+  return cachedData(`traffic-rank:${type}:${startBucket}:${endBucket}`, 300, async () => {
   const previousStart = start - Math.max(0, end - start);
   const calculateChange = (value: number, previousValue: number) => previousValue > 0
     ? Math.round(((value - previousValue) / previousValue) * 1000) / 10

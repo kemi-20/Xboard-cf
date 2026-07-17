@@ -540,6 +540,9 @@ test("traffic rankings use one period aggregation and a short non-KV cache", () 
   const source = fs.readFileSync("src/index.ts", "utf8");
   const rank = source.slice(source.indexOf("async function trafficRank"), source.indexOf("async function planById"));
   assert.match(rank, /cachedData\(`traffic-rank:/);
+  assert.match(rank, /Math\.floor\(start \/ 300\)/);
+  assert.match(rank, /Math\.floor\(end \/ 300\)/);
+  assert.match(rank, /cachedData\(`traffic-rank:[\s\S]*?, 300, async \(\) =>/);
   assert.match(rank, /now\(\) - 7 \* 86400/);
   assert.match(rank, /WITH traffic AS/);
   assert.match(rank, /SUM\(CASE WHEN record_at >= \?/);
