@@ -32,7 +32,16 @@ const setStep = value => document.querySelectorAll(".step").forEach(element => {
   const step = Number(element.dataset.step);
   element.classList.toggle("active", step === value);
   element.classList.toggle("done", step < value);
+  if (step === value) element.setAttribute("aria-current", "step");
+  else element.removeAttribute("aria-current");
 });
+
+function revealSection(selector) {
+  const element = $(selector);
+  if (!element) return;
+  const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+  requestAnimationFrame(() => element.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "start" }));
+}
 
 function log(message, level = "info") {
   const area = $("#log");
@@ -272,6 +281,7 @@ async function inspect() {
     $("#preflight").hidden = false;
     $("#file-status").textContent = redisFile ? `${sqliteFile.name} + ${redisFile.name}` : `${sqliteFile.name}（未选择 Redis）`;
     setStep(2);
+    revealSection("#preflight");
   } finally { $("#inspect").disabled = false; }
 }
 
@@ -378,7 +388,10 @@ async function migrateRedis() {
 
 function updateProgress(label, total = state.total) {
   $("#progress-label").textContent = label;
-  $("#progress-bar").style.width = `${total ? Math.min(100, state.done / total * 100) : 100}%`;
+  const percent = total ? Math.min(100, state.done / total * 100) : 100;
+  $("#progress-bar").style.width = `${percent}%`;
+  $("#progress").setAttribute("aria-valuenow", String(Math.round(percent)));
+  $("#progress-value").textContent = `${Math.round(percent)}%`;
 }
 
 async function recordClientFailure(error) {
@@ -395,6 +408,7 @@ function showFailure(error) {
   $("#progress").classList.add("failed");
   $("#progress-label").innerHTML = "<span class=\"error\">迁移失败，流程已立即中断</span>";
   $("#result").hidden = false;
+  $("#running").setAttribute("aria-busy", "false");
   $("#report").innerHTML = "";
   const box = document.createElement("div");
   box.className = "error-box";
@@ -410,11 +424,13 @@ function showFailure(error) {
     $("#report").append(note);
   }
   log(`失败: ${error.message}`, "error");
+  revealSection("#result");
 }
 
 async function migrate() {
   if ($("#mode").value === "overwrite" && !window.confirm("完整迁入会删除当前 D1 的全部旧业务数据，并以所选 SQLite 数据替换。确认继续吗？")) return;
   $("#migrate").disabled = true; $("#running").hidden = false; $("#result").hidden = true; setStep(3);
+  $("#running").setAttribute("aria-busy", "true");
   state.done = 0; state.runId = null; state.migrationToken = null; state.snapshotComplete = false; state.skipBackup = $("#skip-backup").checked; state.prepared = false; state.phase = "start"; state.table = null; state.offset = 0;
   $("#log").textContent = ""; $("#progress").classList.remove("failed"); $("#rollback").hidden = true; $("#rollback-status").textContent = "";
   try {
@@ -447,10 +463,12 @@ async function migrate() {
     state.phase = "finish"; state.table = null; state.offset = 0;
     const report = await api("/finish", { method: "POST", body: JSON.stringify({ run_id: state.runId }) });
     updateProgress("迁移完成"); setStep(4); $("#result").hidden = false;
+    $("#running").setAttribute("aria-busy", "false");
     $("#report").innerHTML = `<p class="success">任务 ${state.runId} 已完成，当前主题已固定为 Xboard。</p><p>源数据接收数量校验通过。</p>${report.target_counts ? renderCounts(report.target_counts) : ""}`;
     $("#rollback").hidden = true;
     log("迁移完成，设置和节点缓存版本已刷新");
     state.migrationToken = null;
+    revealSection("#result");
   } catch (error) {
     await recordClientFailure(error);
     showFailure(error);

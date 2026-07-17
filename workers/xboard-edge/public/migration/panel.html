@@ -2,52 +2,119 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
   <title>XBoard 数据迁移</title>
-  <style>
-    :root{color-scheme:light;--bg:#f6f7f9;--panel:#fff;--line:#dfe3e8;--text:#1f2937;--muted:#667085;--primary:#1769aa;--danger:#b42318;--success:#067647}
-    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}button,input,select{font:inherit}
-    header{height:58px;border-bottom:1px solid var(--line);background:var(--panel);display:flex;align-items:center;justify-content:space-between;padding:0 24px;position:sticky;top:0;z-index:2}
-    header h1{font-size:17px;margin:0}header a{color:var(--primary);text-decoration:none}.layout{max-width:1120px;margin:24px auto;padding:0 20px;display:grid;grid-template-columns:240px 1fr;gap:20px}
-    nav{border-right:1px solid var(--line);padding-right:20px}.step{padding:10px 12px;margin-bottom:4px;border-radius:6px;color:var(--muted)}.step.active{background:#eaf2f8;color:#0b4f7d;font-weight:600}.step.done{color:var(--success)}
-    main{min-width:0}.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:20px;margin-bottom:16px}.panel h2{font-size:16px;margin:0 0 16px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
-    label{display:block;color:var(--muted);font-size:12px;margin-bottom:6px}.field input,.field select{width:100%;height:38px;border:1px solid #cbd2d9;border-radius:6px;padding:0 10px;background:#fff}.source{display:flex;gap:16px}.source label{font-size:14px;color:var(--text);display:flex;align-items:center;gap:7px}.check-field{grid-column:1/-1}.check-field label{display:flex;align-items:flex-start;gap:8px;font-size:14px;color:var(--text);cursor:pointer}.check-field input{width:16px;height:16px;margin:2px 0 0;padding:0;flex:0 0 auto}.check-field span{display:block}.check-field small{display:block;color:var(--danger);margin-top:2px}
-    .actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:18px}.button{border:1px solid #b8c0c8;background:#fff;border-radius:6px;height:38px;padding:0 14px;cursor:pointer}.button.primary{background:var(--primary);border-color:var(--primary);color:#fff}.button.danger{background:var(--danger);border-color:var(--danger);color:#fff}.button:disabled{opacity:.45;cursor:not-allowed}
-    .summary{width:100%;border-collapse:collapse}.summary th,.summary td{text-align:left;border-bottom:1px solid #edf0f2;padding:8px}.summary th{font-size:12px;color:var(--muted);font-weight:600}.summary td.num{text-align:right;font-variant-numeric:tabular-nums}
-    .progress{height:8px;background:#e8ebee;border-radius:4px;overflow:hidden;margin:12px 0}.progress span{display:block;height:100%;width:0;background:var(--primary);transition:width .2s}.progress.failed span{background:var(--danger)}.log{height:230px;overflow:auto;background:#111827;color:#d1d5db;border-radius:6px;padding:12px;font:12px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap}.log .error-line{color:#fda29b}.muted{color:var(--muted)}.error{color:var(--danger);white-space:pre-wrap}.success{color:var(--success)}.warning{border-left:3px solid #d97706;background:#fffbeb;color:#92400e;padding:10px 12px;margin:12px 0}.warning strong{display:block;margin-bottom:4px}.error-box{border-left:3px solid var(--danger);background:#fef3f2;color:#7a271a;padding:12px;margin:12px 0;white-space:pre-wrap}
-    @media(max-width:760px){.layout{grid-template-columns:1fr}nav{border-right:0;border-bottom:1px solid var(--line);padding:0 0 12px;display:flex;overflow:auto}.step{white-space:nowrap}.grid{grid-template-columns:1fr}}
-  </style>
+  <link rel="stylesheet" href="/migration/styles.css">
 </head>
 <body>
-  <header><h1>XBoard 数据迁移</h1><a id="back" href="#">返回后台</a></header>
-  <div class="layout">
-    <nav><div class="step active" data-step="1">1. 选择备份</div><div class="step" data-step="2">2. 数据预检</div><div class="step" data-step="3">3. 执行迁移</div><div class="step" data-step="4">4. 完成校验</div></nav>
-    <main>
-      <section class="panel">
-        <h2>导出当前数据</h2>
-        <p class="muted">生成标准 SQLite3 数据库，表结构、字段和索引与原版 XBoard 一致，可直接用于迁回原版。邮件凭据为空，所有插件、插件配置、支付渠道和服务器机器负载历史不导出，主题固定为 Xboard。</p>
-        <div class="actions"><button class="button" id="export">手动导出 SQLite3</button><span id="export-status" class="muted"></span></div>
-      </section>
-      <section class="panel">
-        <h2>迁移源</h2>
-        <div class="grid">
-          <div class="field"><label for="sqlite-file">SQLite3 数据库（必选）</label><input id="sqlite-file" type="file" accept=".db,.sqlite,.sqlite3" required></div>
-          <div class="field"><label for="redis-file">Redis RDB / JSON（可选）</label><input id="redis-file" type="file" accept=".rdb,.json,application/json"></div>
-          <div class="field"><label for="mode">迁入方式</label><select id="mode"><option value="overwrite">完整迁入（删除原数据后切换）</option><option value="merge">合并并保留 D1 现有记录</option></select></div>
-          <div id="mode-note" class="warning check-field"><strong>完整迁入会删除当前数据</strong>迁移前备份完成后，将清空 D1 中现有的用户、登录凭据、套餐、节点、服务器、设置、订单、统计、礼品卡及其他业务记录，再严格导入所选 SQLite 数据。旧运行日志、待检查任务和负载历史会在成功切换时删除。</div>
-          <div class="field check-field"><label for="skip-backup"><input id="skip-backup" type="checkbox"><span>跳过完整迁移前备份<small>用户和登录凭据仍会强制备份；其他业务表不建立快照，迁移失败时无法一键完整还原。</small></span></label></div>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <ellipse cx="12" cy="5" rx="7" ry="3"></ellipse>
+            <path d="M5 5v6c0 1.66 3.13 3 7 3 1.1 0 2.14-.11 3.06-.31"></path>
+            <path d="M5 11v6c0 1.66 3.13 3 7 3 .72 0 1.41-.05 2.05-.14"></path>
+            <path d="M19 5v5"></path>
+            <path d="M18 14v7"></path>
+            <path d="m15.5 18.5 2.5 2.5 2.5-2.5"></path>
+          </svg>
+        </span>
+        <div>
+          <p class="brand-context">系统设置</p>
+          <h1>XBoard 数据迁移</h1>
         </div>
-        <div class="actions"><button class="button primary" id="inspect">开始预检</button><span id="file-status" class="muted"></span></div>
+      </div>
+      <a id="back" class="back-link" href="#"><span aria-hidden="true">&#8592;</span> 返回后台</a>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="journey" aria-label="迁移步骤">
+      <div class="journey-heading">
+        <p class="eyebrow">迁移流程</p>
+        <p>每一步完成后才会进入下一阶段。</p>
+      </div>
+      <nav class="steps">
+        <div class="step active" data-step="1" aria-current="step"><span class="step-index">1</span><span class="step-copy"><strong>选择备份</strong><small>指定源文件与策略</small></span></div>
+        <div class="step" data-step="2"><span class="step-index">2</span><span class="step-copy"><strong>数据预检</strong><small>核对表与记录数量</small></span></div>
+        <div class="step" data-step="3"><span class="step-index">3</span><span class="step-copy"><strong>执行迁移</strong><small>备份并写入数据</small></span></div>
+        <div class="step" data-step="4"><span class="step-index">4</span><span class="step-copy"><strong>完成校验</strong><small>验证结果或还原</small></span></div>
+      </nav>
+    </aside>
+
+    <main>
+      <div class="page-intro">
+        <p class="eyebrow">数据工具</p>
+        <h2>平滑迁入或迁回原版</h2>
+        <p>在浏览器本地读取备份文件，确认预检结果后再写入 Cloudflare。迁移过程中不会上传原始 SQLite 或 Redis 文件。</p>
+      </div>
+
+      <section class="panel export-panel" aria-labelledby="export-title">
+        <div class="section-heading">
+          <div>
+            <p class="section-kicker">可逆操作</p>
+            <h2 id="export-title">导出当前数据</h2>
+          </div>
+          <span class="status-badge">原版兼容</span>
+        </div>
+        <p class="muted">生成标准 SQLite3 数据库，表结构、字段和索引与原版 XBoard 一致，可直接用于迁回原版。邮件凭据为空，所有插件、插件配置、支付渠道和服务器机器负载历史不导出，主题固定为 Xboard。</p>
+        <div class="actions"><button class="button" id="export" type="button">手动导出 SQLite3</button><span id="export-status" class="muted status-text" aria-live="polite"></span></div>
       </section>
-      <section class="panel" id="preflight" hidden>
-        <h2>预检结果</h2>
+
+      <section class="panel source-panel" aria-labelledby="source-title">
+        <div class="section-heading">
+          <div>
+            <p class="section-kicker">步骤 1</p>
+            <h2 id="source-title">迁移源</h2>
+          </div>
+        </div>
+        <div class="grid">
+          <div class="field file-field">
+            <label for="sqlite-file">SQLite3 数据库（必选）</label>
+            <input id="sqlite-file" type="file" accept=".db,.sqlite,.sqlite3" required>
+            <small>支持 .db、.sqlite 和 .sqlite3</small>
+          </div>
+          <div class="field file-field">
+            <label for="redis-file">Redis RDB / JSON（可选）</label>
+            <input id="redis-file" type="file" accept=".rdb,.json,application/json">
+            <small>仅恢复仍有意义的临时运行状态</small>
+          </div>
+          <div class="field mode-field">
+            <label for="mode">迁入方式</label>
+            <select id="mode"><option value="overwrite">完整迁入（删除原数据后切换）</option><option value="merge">合并并保留 D1 现有记录</option></select>
+          </div>
+          <div id="mode-note" class="notice warning check-field" role="note"><strong>完整迁入会删除当前数据</strong><span>迁移前备份完成后，将清空 D1 中现有的用户、登录凭据、套餐、节点、服务器、设置、订单、统计、礼品卡及其他业务记录，再严格导入所选 SQLite 数据。旧运行日志、待检查任务和负载历史会在成功切换时删除。</span></div>
+          <div class="field check-field backup-option"><label for="skip-backup"><input id="skip-backup" type="checkbox"><span><strong>跳过完整迁移前备份</strong><small>用户和登录凭据仍会强制备份；其他业务表不建立快照，迁移失败时无法一键完整还原。</small></span></label></div>
+        </div>
+        <div class="actions"><button class="button primary" id="inspect" type="button">开始预检</button><span id="file-status" class="muted status-text" aria-live="polite"></span></div>
+      </section>
+
+      <section class="panel" id="preflight" aria-labelledby="preflight-title" hidden>
+        <div class="section-heading">
+          <div><p class="section-kicker">步骤 2</p><h2 id="preflight-title">预检结果</h2></div>
+          <span class="status-badge success-badge">文件已读取</span>
+        </div>
         <div id="preflight-content"></div>
-        <div class="actions"><button class="button primary" id="migrate">执行迁移</button><span class="muted" id="backup-note">执行前会自动导出当前数据，并在 D1 内建立可一键还原的快照。</span></div>
+        <div class="actions"><button class="button primary" id="migrate" type="button">执行迁移</button><span class="muted status-text" id="backup-note">执行前会自动导出当前数据，并在 D1 内建立可一键还原的快照。</span></div>
       </section>
-      <section class="panel" id="running" hidden>
-        <h2>迁移进度</h2><div id="progress-label" class="muted">准备中</div><div id="progress" class="progress"><span id="progress-bar"></span></div><div id="log" class="log"></div>
+
+      <section class="panel running-panel" id="running" aria-labelledby="running-title" aria-busy="true" hidden>
+        <div class="section-heading">
+          <div><p class="section-kicker">步骤 3</p><h2 id="running-title">迁移进度</h2></div>
+          <span class="activity-indicator"><i aria-hidden="true"></i>正在处理</span>
+        </div>
+        <div class="progress-meta"><span id="progress-label" class="muted">准备中</span><span id="progress-value">0%</span></div>
+        <div id="progress" class="progress" role="progressbar" aria-label="迁移进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="progress-bar"></span></div>
+        <div class="log-wrap"><div class="log-title">执行记录</div><div id="log" class="log" role="log" aria-live="polite"></div></div>
       </section>
-      <section class="panel" id="result" hidden><h2>迁移报告</h2><div id="report"></div><div class="actions"><button class="button danger" id="rollback" hidden>一键还原到迁移前</button><span id="rollback-status" class="muted"></span></div></section>
+
+      <section class="panel result-panel" id="result" aria-labelledby="result-title" hidden>
+        <div class="section-heading"><div><p class="section-kicker">步骤 4</p><h2 id="result-title">迁移报告</h2></div></div>
+        <div id="report"></div>
+        <div class="actions"><button class="button danger" id="rollback" type="button" hidden>一键还原到迁移前</button><span id="rollback-status" class="muted status-text" aria-live="polite"></span></div>
+      </section>
     </main>
   </div>
   <script src="/migration/sql-wasm.js"></script>

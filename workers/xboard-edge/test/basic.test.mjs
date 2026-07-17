@@ -1060,6 +1060,24 @@ test("statistics and mail templates preserve the upstream contracts", () => {
   assert.match(jobsClient, /template_name: options\.templateName/);
 });
 
+test("migration page keeps the complete workflow in a responsive accessible shell", () => {
+  const page = fs.readFileSync("public/migration/panel.html", "utf8");
+  const style = fs.readFileSync("public/migration/styles.css", "utf8");
+  const app = fs.readFileSync("public/migration/app.js", "utf8");
+  for (const id of ["export", "sqlite-file", "redis-file", "mode", "skip-backup", "inspect", "preflight", "migrate", "running", "progress", "log", "result", "rollback"]) {
+    assert.match(page, new RegExp(`id="${id}"`));
+  }
+  assert.match(page, /href="\/migration\/styles\.css"/);
+  assert.match(page, /role="progressbar"/);
+  assert.match(page, /aria-live="polite"/);
+  assert.match(style, /prefers-reduced-motion: reduce/);
+  assert.match(style, /prefers-reduced-transparency: reduce/);
+  assert.match(style, /prefers-contrast: more/);
+  assert.match(style, /env\(safe-area-inset-bottom\)/);
+  assert.match(app, /element\.setAttribute\("aria-current", "step"\)/);
+  assert.match(app, /setAttribute\("aria-valuenow"/);
+});
+
 test("system settings stay locked until their server values load", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   const guard = fs.readFileSync("public/assets/settings-load-guard.js", "utf8");
