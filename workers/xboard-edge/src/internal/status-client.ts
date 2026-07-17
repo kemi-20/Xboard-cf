@@ -16,13 +16,19 @@ let liveDeviceSnapshotCache: { value: Record<string, string[]>; expiresAt: numbe
 async function statusHubRequest(env: StatusEnv, loadToken: TokenLoader, path: string, init: RequestInit = {}) {
   return env.XBOARD_SERVER.fetch(`https://xboard-server.internal/internal/status/${path}`, {
     ...init,
-    headers: { ...(init.headers || {}), "x-xboard-internal-token": await loadToken() }
+    cache: "no-store",
+    headers: {
+      ...(init.headers || {}),
+      "cache-control": "no-store, no-cache, must-revalidate",
+      "pragma": "no-cache",
+      "x-xboard-internal-token": await loadToken()
+    }
   });
 }
 
 export async function statusSnapshot(env: StatusEnv, loadToken: TokenLoader): Promise<StatusSnapshot> {
   return cachedData(`status-snapshot:${statusSnapshotVersion}`, 10, async () => {
-    const response = await statusHubRequest(env, loadToken, "snapshot");
+    const response = await statusHubRequest(env, loadToken, "snapshot", { method: "POST" });
     if (!response.ok) throw new Error(`StatusHub returned ${response.status}`);
     const payload = await response.json() as { data?: StatusSnapshot };
     return payload.data || { machines: {}, nodes: {} };
@@ -105,7 +111,7 @@ export async function machineHistory(
   const params = new URLSearchParams({ machine_id: String(machineId), limit: String(limit) });
   if (rangeHours !== null) params.set("range_hours", String(rangeHours));
   return cachedData(`machine-history:${machineId}:${limit}:${rangeHours ?? "all"}`, 60, async () => {
-    const response = await statusHubRequest(env, loadToken, `history?${params}`);
+    const response = await statusHubRequest(env, loadToken, `history?${params}`, { method: "POST" });
     if (!response.ok) throw new Error(`StatusHub returned ${response.status}`);
     const payload = await response.json() as { data?: Record<string, unknown>[] };
     return Array.isArray(payload.data) ? payload.data : [];

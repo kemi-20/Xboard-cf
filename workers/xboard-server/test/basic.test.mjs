@@ -89,6 +89,15 @@ test("node and machine runtime status persist in the global StatusHub", () => {
   assert.doesNotMatch(source, /INSERT INTO v2_server_machine_load_history/);
 });
 
+test("internal runtime status responses cannot be frozen by Runtime Cache", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /function noStoreResponse\(response: Response\)/);
+  assert.match(source, /headers\.set\("cache-control", "no-store, no-cache, must-revalidate"\)/);
+  assert.match(source, /url\.pathname === "\/snapshot" && \(request\.method === "GET" \|\| request\.method === "POST"\)/);
+  assert.match(source, /url\.pathname === "\/history" && \(request\.method === "GET" \|\| request\.method === "POST"\)/);
+  assert.match(source, /return noStoreResponse\(await statusHub\(env\)\.fetch/);
+});
+
 test("machine load history remains bounded to the latest 24 hours", () => {
   const recent = 2_000_000_000;
   const first = { cpu: 10, recorded_at: recent - 299 };

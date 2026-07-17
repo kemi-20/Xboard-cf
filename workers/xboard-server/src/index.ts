@@ -605,6 +605,18 @@ function wsMessage(event: string, data: Row = {}) {
   return JSON.stringify({ event, data, timestamp: now() });
 }
 
+function noStoreResponse(response: Response) {
+  const headers = new Headers(response.headers);
+  headers.set("cache-control", "no-store, no-cache, must-revalidate");
+  headers.set("pragma", "no-cache");
+  headers.set("expires", "0");
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  });
+}
+
 export function appendMachineHistory(history: Row[], point: Row, recordedAt: number) {
   const cutoff = recordedAt - 86400;
   return history
@@ -821,8 +833,8 @@ export class StatusHub {
       if (current?.claim === claim) await this.state.storage.delete(key);
       return json({ data: true });
     }
-    if (url.pathname === "/snapshot" && request.method === "GET") return json({ data: await this.snapshot() });
-    if (url.pathname === "/history" && request.method === "GET") {
+    if (url.pathname === "/snapshot" && (request.method === "GET" || request.method === "POST")) return json({ data: await this.snapshot() });
+    if (url.pathname === "/history" && (request.method === "GET" || request.method === "POST")) {
       const machineId = Number(url.searchParams.get("machine_id") || 0);
       const limit = Math.min(1440, Math.max(10, Number(url.searchParams.get("limit") || 60)));
       const rangeHours = Number(url.searchParams.get("range_hours") || 0);
@@ -1142,7 +1154,7 @@ export default {
       const target = new URL(request.url);
       target.hostname = "status-hub.internal";
       target.pathname = `/${url.pathname.slice("/internal/status/".length)}`;
-      return statusHub(env).fetch(new Request(target.toString(), request));
+      return noStoreResponse(await statusHub(env).fetch(new Request(target.toString(), request)));
     }
     if (url.pathname === "/ws") {
       if (!booleanSetting(await setting(env, "server_ws_enable", "1"), true)) return websocketError("websocket disabled");

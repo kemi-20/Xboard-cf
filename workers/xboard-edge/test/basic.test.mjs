@@ -237,6 +237,15 @@ test("repeated read models use coalesced Cache API snapshots", () => {
   assert.match(source, /content_version/);
 });
 
+test("runtime status bypasses platform caches while retaining a short Edge snapshot", () => {
+  const source = fs.readFileSync("src/internal/status-client.ts", "utf8");
+  assert.match(source, /cache: "no-store"/);
+  assert.match(source, /"cache-control": "no-store, no-cache, must-revalidate"/);
+  assert.match(source, /statusHubRequest\(env, loadToken, "snapshot", \{ method: "POST" \}\)/);
+  assert.match(source, /statusHubRequest\(env, loadToken, `history\?\$\{params\}`, \{ method: "POST" \}\)/);
+  assert.match(source, /cachedData\(`status-snapshot:\$\{statusSnapshotVersion\}`, 10/);
+});
+
 test("machine saves invalidate versioned machine and server list caches", () => {
   const source = edgeSource();
   const start = source.indexOf("async function saveMachine");
@@ -509,7 +518,7 @@ test("machine load history matches the upstream chart contract", () => {
   assert.match(source, /async function adminMachineHistory<[^>]+>\(env: E, url: URL, deps: ServerDeps<E>\)/);
   assert.match(source, /limit < 10 \|\| limit > 1440/);
   assert.match(source, /rangeHours < 1 \|\| rangeHours > 24/);
-  assert.match(source, /statusHubRequest\(env, loadToken, `history\?\$\{params\}`\)/);
+  assert.match(source, /statusHubRequest\(env, loadToken, `history\?\$\{params\}`, \{ method: "POST" \}\)/);
   assert.match(source, /new URLSearchParams\(\{ machine_id: String\(machineId\), limit: String\(limit\) \}\)/);
   assert.match(source, /if \(!statusRows\) return fail\("获取服务器负载历史失败"/);
   assert.match(source, /\.sort\(\(left, right\) => Number\(left\.recorded_at \|\| 0\) - Number\(right\.recorded_at \|\| 0\)\)/);
