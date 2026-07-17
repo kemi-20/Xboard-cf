@@ -206,14 +206,15 @@ test("server groups include the user and node counts expected by the official ad
 
 test("audited compatibility fixes match upstream order, ticket and statistics behavior", () => {
   const source = edgeSource();
+  const statistics = fs.readFileSync("src/admin/statistics.ts", "utf8");
   assert.match(source, /async function orderSurplus/);
   assert.match(source, /surplus_amount, surplus_credit, surplus_order_ids/);
   assert.match(source, /VALUES \(\?, \?, \?, 0, 0, \?, \?, \?\)/);
   assert.match(source, /UPDATE v2_ticket SET reply_status = 0/);
-  assert.match(source, /SELECT COALESCE\(SUM\(online_count\), 0\) AS c FROM v2_user WHERE online_count > 0 AND last_online_at >=/);
-  assert.match(source, /SELECT COUNT\(\*\) AS c FROM v2_user WHERE online_count > 0 AND last_online_at >=/);
-  assert.match(source, /SELECT COALESCE\(SUM\(get_amount\), 0\)/);
-  assert.doesNotMatch(source, /COALESCE\(SUM\(COALESCE\(get_amount, amount, 0\)\)/);
+  assert.match(statistics, /online_count > 0 AND last_online_at >= \? THEN 1 ELSE 0 END/);
+  assert.match(statistics, /online_count > 0 AND last_online_at >= \? THEN online_count ELSE 0 END/);
+  assert.match(statistics, /SUM\(CASE WHEN created_at >= \? AND created_at < \? THEN get_amount ELSE 0 END\)/);
+  assert.doesNotMatch(statistics, /COALESCE\(get_amount, amount, 0\)/);
   assert.match(source, /coupon\.limit_use !== null[\s\S]*Number\(coupon\.limit_use\) <= 0/);
   assert.match(source, /const hasCapacity = \(row: Record<string, any>\)/);
 });
@@ -299,6 +300,37 @@ test("bootstrap never overwrites an existing customized default plan", () => {
 test("cache version bumps cannot turn successful D1 saves into API errors", () => {
   const source = fs.readFileSync("src/kv.ts", "utf8");
   assert.match(source, /try[\s\S]*await kv\.put\(key, String\(Date\.now\(\)\)\)[\s\S]*catch/);
+  assert.doesNotMatch(source, /export async function cached/);
+});
+
+test("high-traffic admin statistics use aggregate and batched D1 reads", () => {
+  const source = edgeSource();
+  const statistics = fs.readFileSync("src/admin/statistics.ts", "utf8");
+  const override = source.slice(source.indexOf('route === "/stat/getOverride"'), source.indexOf('path.includes("/stat/getStats")'));
+  assert.match(override, /XBOARD_DB\.batch\(\[/);
+  assert.match(override, /SUM\(CASE WHEN record_at >= \?/);
+  assert.doesNotMatch(override, /await firstNumber/);
+  const resetStats = source.slice(source.indexOf('route === "/traffic-reset/stats"'), source.indexOf('route === "/traffic-reset/reset-user"'));
+  assert.match(resetStats, /SUM\(CASE WHEN trigger_source = 'manual'/);
+  assert.equal((resetStats.match(/FROM v2_traffic_reset_logs/g) || []).length, 1);
+  assert.match(statistics, /XBOARD_DB\.batch\(\[/);
+  assert.match(statistics, /current_month_new_users/);
+  assert.match(statistics, /current_month_commission_payout/);
+  assert.doesNotMatch(statistics, /await deps\.firstNumber/);
+});
+
+test("Redis migration snapshots and writes each batch without per-key D1 queries", () => {
+  const source = fs.readFileSync("src/migration.ts", "utf8");
+  const section = source.slice(source.indexOf("async function importRedis"), source.indexOf("async function finishMigration"));
+  assert.match(section, /key_name IN \(\$\{keys\.map/);
+  assert.match(section, /XBOARD_DB\.batch\(missing\.map/);
+  assert.match(section, /Promise\.all\(\[\.\.\.finalValues\]/);
+  assert.doesNotMatch(section, /WHERE run_id = \? AND key_name = \?"/);
+});
+
+test("unused Worker-local KV helpers stay deleted", () => {
+  assert.equal(fs.existsSync("../xboard-jobs/src/kv.ts"), false);
+  assert.equal(fs.existsSync("../xboard-server/src/kv.ts"), false);
 });
 
 test("worker settings use memory, versioned KV snapshots and D1 fallback", () => {
@@ -853,7 +885,8 @@ test("node sync and error handling avoid unrelated work and SQL disclosure", () 
   const source = edgeSource();
   const giftCards = fs.readFileSync("src/gift-card.ts", "utf8");
   assert.match(source, /pathname\.endsWith\(suffix\)/);
-  assert.match(source, /pendingCommission[\s\S]*SUM\(commission_balance\)/);
+  assert.match(source, /SUM\(commission_balance\)[\s\S]*pendingCommission/);
+  assert.match(source, /v2_order WHERE status = 3 AND commission_status = 0 AND invite_user_id = \?/);
   assert.match(source, /保存服务器失败，请检查字段后重试/);
   assert.doesNotMatch(source, /保存服务器失败: \$\{fallbackError/);
   assert.match(giftCards, /gift card redeem failed/);
@@ -1010,7 +1043,7 @@ test("audited notice, ranking and migration edge cases match upstream", () => {
   const source = edgeSource();
   const migration = fs.readFileSync("src/migration.ts", "utf8");
   assert.match(source, /SELECT \* FROM v2_notice WHERE show = 1 ORDER BY sort ASC, id DESC LIMIT \? OFFSET \?/);
-  assert.match(source, /return json\(\{ data: result\.results \|\| \[\], total \}\)/);
+  assert.match(source, /return json\(\{ data: result\.results \|\| \[\], total: Number\(\(totalResult\.results\?\.\[0\]/);
   assert.match(source, /previousValue/);
   assert.match(source, /change: calculateChange\(value, previousValue\)/);
   assert.match(source, /monthStart\(\)\)\.all(?:<Record<string, any>>)?\(\)/);

@@ -1,6 +1,6 @@
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import type { D1Database, KVNamespace } from "./types.ts";
-import { fail, now } from "./compat.ts";
+import { fail, now, sha256Hex } from "./compat.ts";
 import { cached } from "./kv.ts";
 import { replicaDatabase, settings as loadSettings } from "./db.ts";
 
@@ -1158,8 +1158,7 @@ async function build(request: Request, env: Env, token: string) {
 }
 
 async function bodyEtag(body: string) {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body));
-  return `"${Array.from(new Uint8Array(digest)).map(value => value.toString(16).padStart(2, "0")).join("")}"`;
+  return `"${await sha256Hex(body)}"`;
 }
 
 function matchesConfiguredSubscribePath(pathname: string, configuredPath: unknown) {

@@ -560,6 +560,19 @@ async function nodesForGroups(env: Env, groupIds: Set<number>) {
   );
 }
 
+async function mapConcurrent<T, R>(items: T[], limit: number, work: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(Math.max(1, limit), items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor++;
+      results[index] = await work(items[index]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 async function syncUserChange(env: Env, userId: number, oldGroupId?: number) {
   const user = await env.XBOARD_DB.prepare("SELECT * FROM v2_user WHERE id = ?").bind(userId).first<Row>();
   const currentGroupId = Number(user?.group_id || 0);
@@ -567,12 +580,13 @@ async function syncUserChange(env: Env, userId: number, oldGroupId?: number) {
   const canAdd = userIsAvailable(user);
   let sent = 0;
   const nodes = await nodesForGroups(env, groups);
-  for (const node of nodes) {
+  const counts = await mapConcurrent(nodes, 8, async node => {
     const nodeGroups = new Set(parseJson<unknown[]>(node.group_ids, []).map(Number));
     const action = canAdd && nodeGroups.has(currentGroupId) ? "add" : "remove";
     const users = action === "add" && user ? [availableUser(user)] : [{ id: userId }];
-    sent += await pushNodeEvent(env, node, "sync.user.delta", { action, users });
-  }
+    return pushNodeEvent(env, node, "sync.user.delta", { action, users });
+  });
+  sent += counts.reduce((sum, count) => sum + count, 0);
   return sent;
 }
 
@@ -589,25 +603,27 @@ async function syncUsersChange(env: Env, userIds: number[]) {
   const groups = new Set([...groupByUser.values()].filter(Boolean));
   let sent = 0;
   const nodes = await nodesForGroups(env, groups);
-  for (const node of nodes) {
+  const counts = await mapConcurrent(nodes, 8, async node => {
     const nodeGroups = new Set(parseJson<unknown[]>(node.group_ids, []).map(Number));
     const affected = ids.filter(id => nodeGroups.has(groupByUser.get(id) || 0)).map(id => ({ id }));
-    if (!affected.length) continue;
-    sent += await pushNodeEvent(env, node, "sync.user.delta", { action: "remove", users: affected });
-  }
+    if (!affected.length) return 0;
+    return pushNodeEvent(env, node, "sync.user.delta", { action: "remove", users: affected });
+  });
+  sent += counts.reduce((sum, count) => sum + count, 0);
   return sent;
 }
 
 async function syncAll(env: Env) {
   const result = await env.XBOARD_DB.prepare("SELECT * FROM v2_server WHERE enabled = 1").all<Row>();
-  for (const node of result.results || []) {
-    await pushNodeEvent(env, node, "sync.config", { config: await nodeConfig(env, node) });
-    await pushNodeEvent(env, node, "sync.users", { users: await nodeUsers(env, node) });
-  }
+  await mapConcurrent(result.results || [], 8, async node => {
+    const [config, users] = await Promise.all([nodeConfig(env, node), nodeUsers(env, node)]);
+    await pushNodeEvent(env, node, "sync.config", { config });
+    await pushNodeEvent(env, node, "sync.users", { users });
+  });
   const machines = await env.XBOARD_DB.prepare("SELECT * FROM v2_server_machine").all<Row>();
-  for (const machine of machines.results || []) {
-    await pushDo(env, `machine:${machine.id}`, "sync.nodes", { nodes: (await machineNodes(env, machine)).nodes });
-  }
+  await mapConcurrent(machines.results || [], 8, async machine =>
+    pushDo(env, `machine:${machine.id}`, "sync.nodes", { nodes: (await machineNodes(env, machine)).nodes })
+  );
 }
 
 function wsMessage(event: string, data: Row = {}) {
@@ -908,8 +924,9 @@ export class NodeHub {
 
   private async fullSync(env: Env, socket: WebSocket, node: Row, machineMode = false) {
     const suffix = machineMode ? { node_id: Number(node.id) } : {};
-    socket.send(wsMessage("sync.config", { config: await nodeConfig(env, node), ...suffix }));
-    socket.send(wsMessage("sync.users", { users: await nodeUsers(env, node), ...suffix }));
+    const [config, users] = await Promise.all([nodeConfig(env, node), nodeUsers(env, node)]);
+    socket.send(wsMessage("sync.config", { config, ...suffix }));
+    socket.send(wsMessage("sync.users", { users, ...suffix }));
   }
 
   async fetch(request: Request): Promise<Response> {

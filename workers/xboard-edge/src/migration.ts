@@ -1,6 +1,6 @@
 import type { D1Database, Fetcher, KVNamespace } from "./types";
 import { invalidateSettingsCache } from "./db";
-import { body, fail, json, now, ok, randomString } from "./compat";
+import { body, fail, json, now, ok, randomString, sha256Hex } from "./compat";
 import { internalAuthHeaders, invalidateInternalTokenCache } from "./internal/auth";
 
 interface MigrationEnv {
@@ -29,7 +29,6 @@ const CRITICAL_BACKUP_TABLES = ["v2_user", "personal_access_tokens"] as const;
 const SKIPPED_SOURCE_TABLES = ["v2_log", "v2_server_machine_load_history"] as const;
 
 const tableSet = new Set<string>(MIGRATION_TABLES);
-const tableOrder = Object.fromEntries(MIGRATION_TABLES.map((table, index) => [table, index]));
 const DELETE_TABLES = [...MIGRATION_TABLES].reverse();
 const COMPLETE_RESET_TABLES = ["v2_log", "v2_server_machine_load_history", "v2_job_logs", "v2_traffic_pending_check", "v2_traffic_dedup", "v2_traffic_stats_outbox"] as const;
 
@@ -322,11 +321,6 @@ async function markMigrationFailed(env: MigrationEnv, runId: string, message: st
   return error;
 }
 
-async function sha256(value: string) {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
-}
-
 export async function authorizeMigration(request: Request, env: MigrationEnv, route: string) {
   if (!route.startsWith("/migration/") || route === "/migration/start" || route === "/migration/status") return null;
   const accessToken = request.headers.get("x-migration-token") || "";
@@ -338,7 +332,7 @@ export async function authorizeMigration(request: Request, env: MigrationEnv, ro
   const run = await migrationRun(env, runId);
   const allowedStatuses: MigrationStatus[] = ["running", "failed", "rolling_back", "rollback_failed"];
   if (!run || !allowedStatuses.includes(String(run.status) as MigrationStatus) || !run.access_token_hash) return null;
-  return String(run.access_token_hash) === await sha256(accessToken) ? Number(run.admin_id || 0) : null;
+  return String(run.access_token_hash) === await sha256Hex(accessToken) ? Number(run.admin_id || 0) : null;
 }
 
 async function tableCount(db: D1Database, table: string) {
@@ -378,7 +372,7 @@ async function startMigration(request: Request, env: MigrationEnv, adminId: numb
   const backupTables = skipBackup ? [...CRITICAL_BACKUP_TABLES] : [...MIGRATION_TABLES];
   const snapshotCounts = await tableCounts(env.XBOARD_DB, backupTables);
   await env.XBOARD_DB.prepare("INSERT INTO v2_migration_runs(id,source_type,source_name,source_size,mode,status,source_counts,progress,access_token_hash,admin_id,snapshot_counts,snapshot_complete,skip_backup,started_at,created_at,updated_at) VALUES (?,?,?,?,?,'running',?,'{}',?,?,?,?,?,?,?,?)")
-    .bind(runId, sourceType, String(input.source_name || ""), Number(input.source_size || 0), normalizeMode(input.mode), JSON.stringify(sourceCounts), await sha256(migrationToken), adminId, JSON.stringify(snapshotCounts), 0, skipBackup ? 1 : 0, ts, ts, ts).run();
+    .bind(runId, sourceType, String(input.source_name || ""), Number(input.source_size || 0), normalizeMode(input.mode), JSON.stringify(sourceCounts), await sha256Hex(migrationToken), adminId, JSON.stringify(snapshotCounts), 0, skipBackup ? 1 : 0, ts, ts, ts).run();
   await logMigration(env, runId, skipBackup ? `开始 ${sourceType.toUpperCase()} 迁移，等待强制账号备份` : `开始 ${sourceType.toUpperCase()} 迁移，等待完整迁移前快照`, undefined, { source_counts: sourceCounts, snapshot_counts: snapshotCounts, backup_tables: backupTables, mode: normalizeMode(input.mode), skip_backup: skipBackup });
   return ok({ run_id: runId, migration_token: migrationToken, mode: normalizeMode(input.mode), tables: MIGRATION_TABLES, backup_tables: backupTables, backup_counts: snapshotCounts, skip_backup: skipBackup });
 }
@@ -614,21 +608,29 @@ async function importRedis(request: Request, env: MigrationEnv) {
   let imported = 0;
   let skipped = 0;
   try {
+    const mappedEntries: Array<{ key: string; value: string }> = [];
     for (const entry of entries) {
       const mapped = mapRedisEntry(String(entry.key || ""), entry.value);
       if (!mapped) { skipped++; continue; }
-      if (!Number(run.skip_backup || 0)) {
-        const existingSnapshot = await env.XBOARD_DB.prepare("SELECT key_name FROM v2_migration_kv_snapshots WHERE run_id = ? AND key_name = ?")
-          .bind(runId, mapped.key).first();
-        if (!existingSnapshot) {
-          const previous = await env.XBOARD_KV.get(mapped.key);
-          await env.XBOARD_DB.prepare("INSERT INTO v2_migration_kv_snapshots(run_id,key_name,existed,value,created_at) VALUES (?,?,?,?,?)")
-            .bind(runId, mapped.key, previous === null ? 0 : 1, previous, now()).run();
-        }
-      }
-      await env.XBOARD_KV.put(mapped.key, mapped.value, { expirationTtl: 3600 });
-      imported++;
+      mappedEntries.push(mapped);
     }
+    const finalValues = new Map(mappedEntries.map(entry => [entry.key, entry.value]));
+    if (!Number(run.skip_backup || 0) && finalValues.size) {
+      const keys = [...finalValues.keys()];
+      const existing = await env.XBOARD_DB.prepare(`SELECT key_name FROM v2_migration_kv_snapshots WHERE run_id = ? AND key_name IN (${keys.map(() => "?").join(",")})`)
+        .bind(runId, ...keys).all<{ key_name: string }>();
+      const captured = new Set((existing.results || []).map(row => String(row.key_name)));
+      const missing = keys.filter(key => !captured.has(key));
+      if (missing.length) {
+        const previous = await Promise.all(missing.map(key => env.XBOARD_KV.get(key)));
+        await env.XBOARD_DB.batch(missing.map((key, index) =>
+          env.XBOARD_DB.prepare("INSERT INTO v2_migration_kv_snapshots(run_id,key_name,existed,value,created_at) VALUES (?,?,?,?,?)")
+            .bind(runId, key, previous[index] === null ? 0 : 1, previous[index], now())
+        ));
+      }
+    }
+    await Promise.all([...finalValues].map(([key, value]) => env.XBOARD_KV.put(key, value, { expirationTtl: 3600 })));
+    imported = mappedEntries.length;
   } catch (error) {
     const details = { phase: "redis_import", received: entries.length, imported, skipped, error: errorMessage(error) };
     await markMigrationFailed(env, runId, "Redis/KV 批次写入失败", details);
@@ -893,5 +895,3 @@ export async function handleAdminMigration(request: Request, env: MigrationEnv, 
   if (route === "/migration/finish" && request.method === "POST") return finishMigration(request, env);
   return null;
 }
-
-export function migrationTables() { return [...MIGRATION_TABLES].sort((a, b) => tableOrder[a] - tableOrder[b]); }

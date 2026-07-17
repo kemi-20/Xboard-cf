@@ -252,10 +252,15 @@ test("invalid type filters behave like upstream and do not hide all nodes", () =
 
 test("subscription generation uses Cache API without writing payloads to KV", () => {
   const source = fs.readFileSync("src/subscription/kv.ts", "utf8");
-  assert.match(source, /crypto\.subtle\.digest\("SHA-256"/);
+  const compat = fs.readFileSync("src/subscription/compat.ts", "utf8");
+  assert.match(source, /import \{ sha256Hex \} from "\.\/compat\.ts"/);
+  assert.match(compat, /crypto\.subtle\.digest\("SHA-256"/);
   assert.match(source, /await cache\.match\(request\)/);
   assert.match(source, /const value = await load\(\)/);
   assert.match(source, /await cache\.put\(request/);
+  assert.match(source, /freshUntil/);
+  assert.match(source, /staleUntil/);
+  assert.match(source, /catch \(error\)[\s\S]*stale\.staleUntil > Date\.now\(\)[\s\S]*return stale\.value/);
   assert.doesNotMatch(source, /_kv\.(?:get|put)\(/);
 });
 

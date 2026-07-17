@@ -58,6 +58,15 @@ test("node configuration and user snapshots use Cache API after authentication",
   assert.match(cache, /const pending = new Map/);
 });
 
+test("independent node and machine fanout is concurrent but capped", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  assert.match(source, /async function mapConcurrent/);
+  assert.match(source, /mapConcurrent\(nodes, 8/);
+  assert.match(source, /mapConcurrent\(machines\.results \|\| \[\], 8/);
+  assert.match(source, /const \[config, users\] = await Promise\.all/);
+  assert.match(source, /await pushNodeEvent\(env, node, "sync\.config"[\s\S]*await pushNodeEvent\(env, node, "sync\.users"/);
+});
+
 test("websocket settings accept both SQLite booleans and numeric flags", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /function booleanSetting\(value: unknown, fallback = false\)/);

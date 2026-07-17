@@ -9,7 +9,6 @@ export type StatisticsDeps<E extends StatisticsEnv> = {
   monthStart: (timestamp?: number) => number;
   adminServerRows: (env: E) => Promise<Record<string, any>[]>;
   liveOnlineSummary: (env: E) => Promise<{ users: number; devices: number } | null>;
-  firstNumber: (env: E, sql: string) => Promise<number>;
 };
 
 const APP_TIMEZONE_OFFSET = 8 * 3600;
@@ -25,26 +24,58 @@ export async function adminStats<E extends StatisticsEnv>(env: E, deps: Statisti
   const month = deps.monthStart();
   const lastMonth = deps.monthStart(month - 1);
   const twoMonthsAgo = deps.monthStart(lastMonth - 1);
-  const nodes = await deps.adminServerRows(env);
-  const liveOnline = await deps.liveOnlineSummary(env);
-  const totalUsers = await deps.firstNumber(env, "SELECT COUNT(*) AS c FROM v2_user");
-  const activeUsers = await deps.firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE expired_at IS NULL OR expired_at >= ${current}`);
-  const currentMonthNewUsers = await deps.firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE created_at >= ${month} AND created_at < ${current}`);
-  const lastMonthNewUsers = await deps.firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE created_at >= ${lastMonth} AND created_at < ${month}`);
-  const todayIncome = await deps.firstNumber(env, `SELECT COALESCE(SUM(total_amount), 0) AS c FROM v2_order WHERE created_at >= ${today} AND created_at < ${current} AND status NOT IN (0,2)`);
-  const yesterdayIncome = await deps.firstNumber(env, `SELECT COALESCE(SUM(total_amount), 0) AS c FROM v2_order WHERE created_at >= ${yesterday} AND created_at < ${today} AND status NOT IN (0,2)`);
-  const currentMonthIncome = await deps.firstNumber(env, `SELECT COALESCE(SUM(total_amount), 0) AS c FROM v2_order WHERE created_at >= ${month} AND created_at < ${current} AND status NOT IN (0,2)`);
-  const lastMonthIncome = await deps.firstNumber(env, `SELECT COALESCE(SUM(total_amount), 0) AS c FROM v2_order WHERE created_at >= ${lastMonth} AND created_at < ${month} AND status NOT IN (0,2)`);
-  const twoMonthsAgoIncome = await deps.firstNumber(env, `SELECT COALESCE(SUM(total_amount), 0) AS c FROM v2_order WHERE created_at >= ${twoMonthsAgo} AND created_at < ${lastMonth} AND status NOT IN (0,2)`);
-  const currentMonthCommissionPayout = await deps.firstNumber(env, `SELECT COALESCE(SUM(get_amount), 0) AS c FROM v2_commission_log WHERE created_at >= ${month} AND created_at < ${current}`);
-  const lastMonthCommissionPayout = await deps.firstNumber(env, `SELECT COALESCE(SUM(get_amount), 0) AS c FROM v2_commission_log WHERE created_at >= ${lastMonth} AND created_at < ${month}`);
-  const twoMonthsAgoCommission = await deps.firstNumber(env, `SELECT COALESCE(SUM(get_amount), 0) AS c FROM v2_commission_log WHERE created_at >= ${twoMonthsAgo} AND created_at < ${lastMonth}`);
-  const monthUpload = await deps.firstNumber(env, `SELECT COALESCE(SUM(u), 0) AS c FROM v2_stat_server WHERE record_at >= ${month} AND record_at < ${current}`);
-  const monthDownload = await deps.firstNumber(env, `SELECT COALESCE(SUM(d), 0) AS c FROM v2_stat_server WHERE record_at >= ${month} AND record_at < ${current}`);
-  const todayUpload = await deps.firstNumber(env, `SELECT COALESCE(SUM(u), 0) AS c FROM v2_stat_server WHERE record_at >= ${today} AND record_at < ${current}`);
-  const todayDownload = await deps.firstNumber(env, `SELECT COALESCE(SUM(d), 0) AS c FROM v2_stat_server WHERE record_at >= ${today} AND record_at < ${current}`);
-  const totalUpload = await deps.firstNumber(env, "SELECT COALESCE(SUM(u), 0) AS c FROM v2_stat_server");
-  const totalDownload = await deps.firstNumber(env, "SELECT COALESCE(SUM(d), 0) AS c FROM v2_stat_server");
+  const metricsPromise = env.XBOARD_DB.batch([
+    env.XBOARD_DB.prepare(`SELECT COUNT(*) AS total_users,
+      COALESCE(SUM(CASE WHEN expired_at IS NULL OR expired_at >= ? THEN 1 ELSE 0 END), 0) AS active_users,
+      COALESCE(SUM(CASE WHEN created_at >= ? AND created_at < ? THEN 1 ELSE 0 END), 0) AS current_month_new_users,
+      COALESCE(SUM(CASE WHEN created_at >= ? AND created_at < ? THEN 1 ELSE 0 END), 0) AS last_month_new_users,
+      COALESCE(SUM(CASE WHEN online_count > 0 AND last_online_at >= ? THEN 1 ELSE 0 END), 0) AS online_users,
+      COALESCE(SUM(CASE WHEN online_count > 0 AND last_online_at >= ? THEN online_count ELSE 0 END), 0) AS online_devices
+      FROM v2_user`).bind(current, month, current, lastMonth, month, current - 600, current - 600),
+    env.XBOARD_DB.prepare(`SELECT
+      COALESCE(SUM(CASE WHEN created_at >= ? AND created_at < ? AND status NOT IN (0,2) THEN total_amount ELSE 0 END), 0) AS today_income,
+      COALESCE(SUM(CASE WHEN created_at >= ? AND created_at < ? AND status NOT IN (0,2) THEN total_amount ELSE 0 END), 0) AS yesterday_income,
+      COALESCE(SUM(CASE WHEN created_at >= ? AND created_at < ? AND status NOT IN (0,2) THEN total_amount ELSE 0 END), 0) AS current_month_income,
+      COALESCE(SUM(CASE WHEN created_at >= ? AND created_at < ? AND status NOT IN (0,2) THEN total_amount ELSE 0 END), 0) AS last_month_income,
+      COALESCE(SUM(CASE WHEN created_at >= ? AND created_at < ? AND status NOT IN (0,2) THEN total_amount ELSE 0 END), 0) AS two_months_ago_income,
+      COALESCE(SUM(CASE WHEN commission_status = 0 AND invite_user_id IS NOT NULL AND status = 3 AND commission_balance > 0 THEN 1 ELSE 0 END), 0) AS commission_pending_total
+      FROM v2_order`).bind(today, current, yesterday, today, month, current, lastMonth, month, twoMonthsAgo, lastMonth),
+    env.XBOARD_DB.prepare(`SELECT
+      COALESCE(SUM(CASE WHEN created_at >= ? AND created_at < ? THEN get_amount ELSE 0 END), 0) AS current_month_commission_payout,
+      COALESCE(SUM(CASE WHEN created_at >= ? AND created_at < ? THEN get_amount ELSE 0 END), 0) AS last_month_commission_payout,
+      COALESCE(SUM(CASE WHEN created_at >= ? AND created_at < ? THEN get_amount ELSE 0 END), 0) AS two_months_ago_commission
+      FROM v2_commission_log`).bind(month, current, lastMonth, month, twoMonthsAgo, lastMonth),
+    env.XBOARD_DB.prepare(`SELECT
+      COALESCE(SUM(CASE WHEN record_at >= ? AND record_at < ? THEN u ELSE 0 END), 0) AS month_upload,
+      COALESCE(SUM(CASE WHEN record_at >= ? AND record_at < ? THEN d ELSE 0 END), 0) AS month_download,
+      COALESCE(SUM(CASE WHEN record_at >= ? AND record_at < ? THEN u ELSE 0 END), 0) AS today_upload,
+      COALESCE(SUM(CASE WHEN record_at >= ? AND record_at < ? THEN d ELSE 0 END), 0) AS today_download,
+      COALESCE(SUM(u), 0) AS total_upload, COALESCE(SUM(d), 0) AS total_download
+      FROM v2_stat_server`).bind(month, current, month, current, today, current, today, current),
+    env.XBOARD_DB.prepare("SELECT COUNT(*) AS ticket_pending_total FROM v2_ticket WHERE status = 0")
+  ]);
+  const [nodes, liveOnline, metricResults] = await Promise.all([
+    deps.adminServerRows(env),
+    deps.liveOnlineSummary(env),
+    metricsPromise
+  ]);
+  const row = (index: number) => (metricResults[index]?.results?.[0] || {}) as Record<string, any>;
+  const users = row(0), orders = row(1), commissions = row(2), traffic = row(3), tickets = row(4);
+  const totalUsers = Number(users.total_users || 0);
+  const activeUsers = Number(users.active_users || 0);
+  const currentMonthNewUsers = Number(users.current_month_new_users || 0);
+  const lastMonthNewUsers = Number(users.last_month_new_users || 0);
+  const todayIncome = Number(orders.today_income || 0);
+  const yesterdayIncome = Number(orders.yesterday_income || 0);
+  const currentMonthIncome = Number(orders.current_month_income || 0);
+  const lastMonthIncome = Number(orders.last_month_income || 0);
+  const twoMonthsAgoIncome = Number(orders.two_months_ago_income || 0);
+  const currentMonthCommissionPayout = Number(commissions.current_month_commission_payout || 0);
+  const lastMonthCommissionPayout = Number(commissions.last_month_commission_payout || 0);
+  const twoMonthsAgoCommission = Number(commissions.two_months_ago_commission || 0);
+  const monthUpload = Number(traffic.month_upload || 0), monthDownload = Number(traffic.month_download || 0);
+  const todayUpload = Number(traffic.today_upload || 0), todayDownload = Number(traffic.today_download || 0);
+  const totalUpload = Number(traffic.total_upload || 0), totalDownload = Number(traffic.total_download || 0);
   const growth = (value: number, previous: number) => previous > 0 ? Math.round(((value - previous) / previous) * 1000) / 10 : 0;
   return {
     todayIncome,
@@ -56,14 +87,14 @@ export async function adminStats<E extends StatisticsEnv>(env: E, deps: Statisti
     currentMonthCommissionPayout,
     lastMonthCommissionPayout,
     commissionGrowth: growth(lastMonthCommissionPayout, twoMonthsAgoCommission),
-    ticketPendingTotal: await deps.firstNumber(env, "SELECT COUNT(*) AS c FROM v2_ticket WHERE status = 0"),
-    commissionPendingTotal: await deps.firstNumber(env, "SELECT COUNT(*) AS c FROM v2_order WHERE commission_status = 0 AND invite_user_id IS NOT NULL AND status = 3 AND commission_balance > 0"),
+    ticketPendingTotal: Number(tickets.ticket_pending_total || 0),
+    commissionPendingTotal: Number(orders.commission_pending_total || 0),
     currentMonthNewUsers,
     userGrowth: growth(currentMonthNewUsers, lastMonthNewUsers),
     totalUsers,
     activeUsers,
-    onlineUsers: liveOnline?.users ?? await deps.firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE online_count > 0 AND last_online_at >= ${current - 600}`),
-    onlineDevices: liveOnline?.devices ?? await deps.firstNumber(env, `SELECT COALESCE(SUM(online_count), 0) AS c FROM v2_user WHERE online_count > 0 AND last_online_at >= ${current - 600}`),
+    onlineUsers: liveOnline?.users ?? Number(users.online_users || 0),
+    onlineDevices: liveOnline?.devices ?? Number(users.online_devices || 0),
     onlineNodes: nodes.filter(node => Number(node.available_status) > 0).length,
     todayTraffic: { upload: todayUpload, download: todayDownload, total: todayUpload + todayDownload },
     monthTraffic: { upload: monthUpload, download: monthDownload, total: monthUpload + monthDownload },

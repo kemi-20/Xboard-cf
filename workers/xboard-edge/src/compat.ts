@@ -55,6 +55,11 @@ export function randomString(length = 32): string {
   return result;
 }
 
+export async function sha256Hex(value: string) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
 function leftRotate(value: number, amount: number) {
   return (value << amount) | (value >>> (32 - amount));
 }

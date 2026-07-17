@@ -80,6 +80,19 @@ function booleanSetting(value: unknown, fallback = false) {
   return value === 1 || value === "1" || String(value).toLowerCase() === "true";
 }
 
+async function usersByIds(env: CronEnv, ids: number[]) {
+  const unique = [...new Set(ids.map(Number).filter(id => id > 0))];
+  if (!unique.length) return new Map<number, Record<string, any>>();
+  const statements = [];
+  for (let offset = 0; offset < unique.length; offset += 100) {
+    const chunk = unique.slice(offset, offset + 100);
+    statements.push(env.XBOARD_DB.prepare(`SELECT id, invite_user_id FROM v2_user WHERE id IN (${chunk.map(() => "?").join(",")})`).bind(...chunk));
+  }
+  const results = await env.XBOARD_DB.batch(statements);
+  const users = results.flatMap(result => result.results || []) as Record<string, any>[];
+  return new Map(users.map(user => [Number(user.id), user]));
+}
+
 async function sendReminders(env: CronEnv, ts: number, day: number) {
   const config = await loadSettings(env.XBOARD_DB, env.XBOARD_KV);
   if (!booleanSetting(config.remind_mail_enable)) return;
@@ -125,14 +138,22 @@ async function checkCommission(env: CronEnv, ts: number) {
   const shares = settings.distribution ? [settings.l1, settings.l2, settings.l3] : [100];
   while (true) {
     const orders = await env.XBOARD_DB.prepare("SELECT id, user_id, invite_user_id, trade_no, total_amount, commission_balance FROM v2_order WHERE commission_status = 1 AND invite_user_id IS NOT NULL ORDER BY id ASC LIMIT 500").all<Record<string, any>>();
-    if (!(orders.results || []).length) break;
-    for (const order of orders.results || []) {
+    const page = orders.results || [];
+    if (!page.length) break;
+    const inviters = new Map<number, Record<string, any>>();
+    let levelIds = page.map(order => Number(order.invite_user_id || 0)).filter(Boolean);
+    for (let depth = 0; depth < shares.length && levelIds.length; depth++) {
+      const level = await usersByIds(env, levelIds.filter(id => !inviters.has(id)));
+      for (const [id, user] of level) inviters.set(id, user);
+      levelIds = [...level.values()].map(user => Number(user.invite_user_id || 0)).filter(Boolean);
+    }
+    for (const order of page) {
       let inviterId = Number(order.invite_user_id);
       let actual = 0;
       const statements = [];
       for (const share of shares) {
         if (!inviterId) continue;
-        const inviter = await env.XBOARD_DB.prepare("SELECT id, invite_user_id FROM v2_user WHERE id = ?").bind(inviterId).first<Record<string, any>>();
+        const inviter = inviters.get(inviterId);
         if (!inviter) continue;
         const amount = Number(order.commission_balance || 0) * share / 100;
         if (!amount) continue;
@@ -160,6 +181,7 @@ async function resetTraffic(env: CronEnv, ts: number) {
         AND u.banned = 0 AND (u.expired_at IS NULL OR u.expired_at > ?)
       ORDER BY u.id ASC LIMIT 100`).bind(ts, ts).all<any>();
     if (!(users.results || []).length) break;
+    const versionKeys: string[] = [];
     for (const user of users.results || []) {
       if (user.plan_exists === null || user.plan_exists === undefined) {
         await env.XBOARD_DB.prepare("UPDATE v2_user SET next_reset_at = NULL, updated_at = ? WHERE id = ?").bind(ts, user.id).run();
@@ -175,8 +197,9 @@ async function resetTraffic(env: CronEnv, ts: number) {
         env.XBOARD_DB.prepare(`INSERT INTO v2_traffic_reset_logs(user_id, reset_type, old_u, old_d, old_upload, old_download, old_total, new_upload, new_download, new_total, trigger_source, metadata, reset_time, created_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 'cron', ?, ?, ?)`).bind(user.id, resetTypes[method] || "manual", oldU, oldD, oldU, oldD, oldU + oldD, JSON.stringify({ trigger_source: "cron" }), ts, ts)
       ]);
-      await optionalKvPut(env, `user_version:${user.id}`, String(Date.now()));
+      versionKeys.push(`user_version:${user.id}`);
     }
+    await Promise.all(versionKeys.map(key => optionalKvPut(env, key, String(Date.now()))));
   }
 }
 
@@ -212,12 +235,20 @@ async function statistics(env: CronEnv, ts: number, day: number) {
   const markerId = `schedule:statistics:${recordDay}`;
   const marker = await env.XBOARD_DB.prepare("SELECT status FROM v2_job_logs WHERE event_id = ?").bind(markerId).first<{ status: string }>();
   if (marker?.status === "done") return;
-  const users = await env.XBOARD_DB.prepare("SELECT COUNT(*) AS user_count FROM v2_user").first<any>();
-  const traffic = await env.XBOARD_DB.prepare("SELECT COALESCE(SUM(u), 0) + COALESCE(SUM(d), 0) AS transfer_used FROM v2_stat_server WHERE created_at >= ? AND created_at < ?").bind(recordDay, day).first<any>();
-  const orders = await env.XBOARD_DB.prepare("SELECT COUNT(*) AS order_count, COALESCE(SUM(total_amount), 0) AS order_total FROM v2_order WHERE created_at >= ? AND created_at < ?").bind(recordDay, day).first<any>();
-  const paid = await env.XBOARD_DB.prepare("SELECT COUNT(*) AS paid_count, COALESCE(SUM(total_amount), 0) AS paid_total FROM v2_order WHERE paid_at >= ? AND paid_at < ? AND status NOT IN (0, 2)").bind(recordDay, day).first<any>();
-  const commissions = await env.XBOARD_DB.prepare("SELECT COUNT(*) AS commission_count, COALESCE(SUM(get_amount), 0) AS commission_total FROM v2_commission_log WHERE created_at >= ? AND created_at < ?").bind(recordDay, day).first<any>();
-  const registrations = await env.XBOARD_DB.prepare("SELECT COUNT(*) AS register_count, COALESCE(SUM(CASE WHEN invite_user_id IS NOT NULL THEN 1 ELSE 0 END), 0) AS invite_count FROM v2_user WHERE created_at >= ? AND created_at < ?").bind(recordDay, day).first<any>();
+  const [usersResult, trafficResult, ordersResult, paidResult, commissionsResult, registrationsResult] = await env.XBOARD_DB.batch([
+    env.XBOARD_DB.prepare("SELECT COUNT(*) AS user_count FROM v2_user"),
+    env.XBOARD_DB.prepare("SELECT COALESCE(SUM(u), 0) + COALESCE(SUM(d), 0) AS transfer_used FROM v2_stat_server WHERE created_at >= ? AND created_at < ?").bind(recordDay, day),
+    env.XBOARD_DB.prepare("SELECT COUNT(*) AS order_count, COALESCE(SUM(total_amount), 0) AS order_total FROM v2_order WHERE created_at >= ? AND created_at < ?").bind(recordDay, day),
+    env.XBOARD_DB.prepare("SELECT COUNT(*) AS paid_count, COALESCE(SUM(total_amount), 0) AS paid_total FROM v2_order WHERE paid_at >= ? AND paid_at < ? AND status NOT IN (0, 2)").bind(recordDay, day),
+    env.XBOARD_DB.prepare("SELECT COUNT(*) AS commission_count, COALESCE(SUM(get_amount), 0) AS commission_total FROM v2_commission_log WHERE created_at >= ? AND created_at < ?").bind(recordDay, day),
+    env.XBOARD_DB.prepare("SELECT COUNT(*) AS register_count, COALESCE(SUM(CASE WHEN invite_user_id IS NOT NULL THEN 1 ELSE 0 END), 0) AS invite_count FROM v2_user WHERE created_at >= ? AND created_at < ?").bind(recordDay, day)
+  ]);
+  const users = usersResult.results?.[0] as any;
+  const traffic = trafficResult.results?.[0] as any;
+  const orders = ordersResult.results?.[0] as any;
+  const paid = paidResult.results?.[0] as any;
+  const commissions = commissionsResult.results?.[0] as any;
+  const registrations = registrationsResult.results?.[0] as any;
   const userCount = Number(users?.user_count || 0);
   const transferUsedTotal = Number(traffic?.transfer_used || 0);
   const existing = await env.XBOARD_DB.prepare("SELECT id FROM v2_stat WHERE record_at = ? AND record_type = 'd' ORDER BY id ASC LIMIT 1").bind(recordDay).first<any>();

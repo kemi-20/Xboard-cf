@@ -1,6 +1,6 @@
 import type { D1Database, KVNamespace } from "./types";
 import bcrypt from "bcryptjs";
-import { getBearer, md5, token, now } from "./compat";
+import { getBearer, md5, token, now, sha256Hex } from "./compat";
 
 function equalText(actual: string, expected: string) {
   const a = new TextEncoder().encode(actual);
@@ -11,12 +11,7 @@ function equalText(actual: string, expected: string) {
   return different === 0;
 }
 
-async function sha256(value: string) {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
-}
-
-export const sessionTokenDigest = sha256;
+export const sessionTokenDigest = sha256Hex;
 
 async function verifyPbkdf2(password: string, encoded: string) {
   const [scheme, digest, iterationsRaw, salt, expected] = encoded.split("$");
@@ -32,9 +27,9 @@ export async function verifyPassword(password: string, encoded: string, algorith
   const algo = String(algorithm || "").toLowerCase();
   if (algo === "pbkdf2") return verifyPbkdf2(password, encoded);
   if (algo === "md5") return equalText(md5(password), encoded);
-  if (algo === "sha256") return equalText(await sha256(password), encoded);
+  if (algo === "sha256") return equalText(await sha256Hex(password), encoded);
   if (algo === "md5salt") return equalText(md5(password + String(salt || "")), encoded);
-  if (algo === "sha256salt") return equalText(await sha256(password + String(salt || "")), encoded);
+  if (algo === "sha256salt") return equalText(await sha256Hex(password + String(salt || "")), encoded);
   if (/^\$2[aby]\$/.test(encoded)) return bcrypt.compare(password, encoded);
   return !encoded.includes("$") && equalText(password, encoded);
 }
@@ -47,7 +42,7 @@ export async function createSession(db: D1Database, kv: KVNamespace, user: { id:
   const value = token(32);
   const issuedAt = now();
   await db.prepare("INSERT INTO personal_access_tokens(tokenable_id, name, token, abilities, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-    .bind(user.id, admin ? "admin" : "user", await sha256(value), admin ? '["admin"]' : '["user"]', issuedAt + 31536000, issuedAt, issuedAt).run();
+    .bind(user.id, admin ? "admin" : "user", await sha256Hex(value), admin ? '["admin"]' : '["user"]', issuedAt + 31536000, issuedAt, issuedAt).run();
   try {
     await kv.put(`${admin ? "admin_session" : "session"}:${value}`, JSON.stringify({ id: user.id, email: user.email, is_admin: !!user.is_admin, created_at: now() }), { expirationTtl: 86400 * 7 });
   } catch {
@@ -59,7 +54,7 @@ export async function createSession(db: D1Database, kv: KVNamespace, user: { id:
 export async function currentUser(request: Request, db: D1Database, kv: KVNamespace, admin = false): Promise<any | null> {
   const bearer = getBearer(request);
   if (!bearer) return null;
-  const hashed = await sha256(bearer);
+  const hashed = await sha256Hex(bearer);
   const cached = await kv.get(`${admin ? "admin_session" : "session"}:${bearer}`);
   if (cached) {
     const session = JSON.parse(cached);

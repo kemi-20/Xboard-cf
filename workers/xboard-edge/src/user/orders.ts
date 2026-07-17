@@ -13,7 +13,7 @@ export type OrderDeps<E extends OrderEnv> = {
   cancelOrder: (env: E, order: Record<string, any>, timestamp: number) => Promise<boolean>;
   normalizeOrderPeriod: (value: unknown) => string;
   userIsAvailable: (user: Record<string, any>) => boolean;
-  firstNumber: (env: E, sql: string) => Promise<number>;
+  firstNumber: (env: E, sql: string, bindings?: unknown[]) => Promise<number>;
   canonicalCouponPeriods: (value: unknown) => string[];
   couponResource: (row: Record<string, any>) => Record<string, any>;
   orderSurplus: (env: E, user: Record<string, any>, settingsValues: Record<string, any>) => Promise<{ amount: number; orderIds: number[] }>;
@@ -88,7 +88,7 @@ export async function handleUserOrders<E extends OrderEnv>(
         if (!Number(plan.show) && Number(plan.renew) && !activeUser) return fail("该订阅已过期，请更换其他订阅", 400, 400);
       }
       if (plan.capacity_limit !== null && plan.capacity_limit !== undefined) {
-        const count = await deps.firstNumber(env, `SELECT COUNT(*) AS c FROM v2_user WHERE plan_id = ${planId} AND (expired_at IS NULL OR expired_at >= ${now()})`);
+        const count = await deps.firstNumber(env, "SELECT COUNT(*) AS c FROM v2_user WHERE plan_id = ? AND (expired_at IS NULL OR expired_at >= ?)", [planId, now()]);
         if (count >= Number(plan.capacity_limit) && Number((user as any).plan_id) !== planId) return fail("该订阅已售罄", 400, 400);
       }
       let totalAmount = Math.trunc(price * 100);

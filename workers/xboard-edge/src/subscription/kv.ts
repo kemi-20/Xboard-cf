@@ -1,29 +1,26 @@
 import type { KVNamespace } from "./types.ts";
-export async function bump(kv: KVNamespace, key: string) {
-  await kv.put(key, String(Date.now()));
-}
-const memory = new Map<string, { value: unknown; expiresAt: number }>();
+import { sha256Hex } from "./compat.ts";
+type Entry = { value: unknown; freshUntil: number; staleUntil: number };
+
+const memory = new Map<string, Entry>();
 const pending = new Map<string, Promise<unknown>>();
 
-async function digest(value: string) {
-  const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return Array.from(new Uint8Array(bytes)).map(byte => byte.toString(16).padStart(2, "0")).join("");
-}
-
-export async function cached<T>(_kv: KVNamespace, key: string, ttl: number, load: () => Promise<T>, shouldCache: (value: T) => boolean = () => true): Promise<T> {
-  const cacheKey = await digest(key);
+export async function cached<T>(_kv: KVNamespace, key: string, ttl: number, load: () => Promise<T>, shouldCache: (value: T) => boolean = () => true, staleSeconds = ttl * 2): Promise<T> {
+  const cacheKey = await sha256Hex(key);
   const current = Date.now();
   const local = memory.get(cacheKey);
-  if (local && local.expiresAt > current) return local.value as T;
+  if (local && local.freshUntil > current) return local.value as T;
   const cache = (globalThis as any).caches?.default;
   const request = new Request(`https://xboard-subscription-cache.internal/${cacheKey}`);
   if (cache) {
     try {
       const hit = await cache.match(request);
       if (hit) {
-        const value = await hit.json() as T;
-        memory.set(cacheKey, { value, expiresAt: current + ttl * 1000 });
-        return value;
+        const stored = await hit.json() as Entry;
+        if (stored && typeof stored === "object" && "freshUntil" in stored && stored.staleUntil > current) {
+          memory.set(cacheKey, stored);
+          if (stored.freshUntil > current) return stored.value as T;
+        }
       }
     } catch {
       // Subscription generation remains available when Cache API is unavailable.
@@ -32,19 +29,30 @@ export async function cached<T>(_kv: KVNamespace, key: string, ttl: number, load
   let promise = pending.get(cacheKey) as Promise<T> | undefined;
   if (!promise) {
     promise = (async () => {
-      const value = await load();
-      if (!shouldCache(value)) return value;
-      memory.set(cacheKey, { value, expiresAt: Date.now() + ttl * 1000 });
-      if (cache) {
-        try {
-          await cache.put(request, new Response(JSON.stringify(value), {
-            headers: { "content-type": "application/json", "cache-control": `public, max-age=${ttl}` }
-          }));
-        } catch {
-          // D1 and the generated subscription remain authoritative.
+      try {
+        const value = await load();
+        if (!shouldCache(value)) return value;
+        const stored = {
+          value,
+          freshUntil: Date.now() + ttl * 1000,
+          staleUntil: Date.now() + (ttl + Math.max(0, staleSeconds)) * 1000
+        };
+        memory.set(cacheKey, stored);
+        if (cache) {
+          try {
+            await cache.put(request, new Response(JSON.stringify(stored), {
+              headers: { "content-type": "application/json", "cache-control": `public, max-age=${ttl + Math.max(0, staleSeconds)}` }
+            }));
+          } catch {
+            // D1 and the generated subscription remain authoritative.
+          }
         }
+        return value;
+      } catch (error) {
+        const stale = memory.get(cacheKey);
+        if (stale && stale.staleUntil > Date.now()) return stale.value as T;
+        throw error;
       }
-      return value;
     })().finally(() => pending.delete(cacheKey));
     pending.set(cacheKey, promise);
   }

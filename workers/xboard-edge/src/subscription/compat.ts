@@ -37,6 +37,10 @@ export function token(bytes = 32): string {
   crypto.getRandomValues(data);
   return [...data].map(x => x.toString(16).padStart(2, "0")).join("");
 }
+export async function sha256Hex(value: string) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+}
 export function getBearer(request: Request): string | null {
   const h = request.headers.get("authorization") || "";
   if (h.toLowerCase().startsWith("bearer ")) return h.slice(7).trim();

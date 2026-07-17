@@ -42,6 +42,23 @@ test("migrated boolean settings accept true/false and one/zero strings", () => {
   assert.match(source, /booleanSetting\(await setting\(env, "commission_auto_check_enable"/);
 });
 
+test("every cron-controlled setting is included in the Jobs settings snapshot", () => {
+  const db = fs.readFileSync("src/db.ts", "utf8");
+  for (const name of [
+    "remind_mail_enable",
+    "commission_auto_check_enable",
+    "commission_distribution_enable",
+    "commission_distribution_l1",
+    "commission_distribution_l2",
+    "commission_distribution_l3",
+    "withdraw_close_enable",
+    "reset_traffic_method",
+    "new_order_event_id",
+    "renew_order_event_id",
+    "change_order_event_id"
+  ]) assert.match(db, new RegExp(`"${name}"`), `missing ${name}`);
+});
+
 test("scheduled reminders enqueue the official expiry and traffic notifications", () => {
   const source = fs.readFileSync("src/cron.ts", "utf8");
   assert.match(source, /remind_mail_enable/);
@@ -87,6 +104,9 @@ test("cron implements the official order, ticket, commission and traffic checks"
   assert.match(source, /online_count > 0 AND \(last_online_at IS NULL OR last_online_at < \?\)/);
   assert.doesNotMatch(source, /UPDATE v2_gift_card_code SET status = 2/);
   assert.match(source, /while \(true\)[\s\S]*commission_status = 1/);
+  assert.match(source, /async function usersByIds/);
+  assert.match(source, /env\.XBOARD_DB\.batch\(statements\)/);
+  assert.match(source, /await Promise\.all\(versionKeys\.map/);
   assert.match(source, /DELETE FROM v2_traffic_pending_check WHERE user_id IN \([\s\S]*LIMIT 1000/);
   assert.match(source, /DELETE FROM failed_jobs WHERE failed_at < \?/);
   assert.match(source, /DELETE FROM v2_job_logs WHERE COALESCE\(updated_at, created_at\) < \?/);
