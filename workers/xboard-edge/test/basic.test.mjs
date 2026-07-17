@@ -222,6 +222,16 @@ test("repeated read models use coalesced Cache API snapshots", () => {
   assert.match(source, /content_version/);
 });
 
+test("machine saves invalidate versioned machine and server list caches", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const start = source.indexOf("async function saveMachine");
+  const end = source.indexOf("function nullableNumber", start);
+  const saveMachine = source.slice(start, end);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  assert.equal((saveMachine.match(/bump\(env\.XBOARD_KV, "servers_version"\)/g) || []).length, 2);
+});
+
 test("success responses preserve the upstream ApiResponse envelope", () => {
   const script = `
     const { ok } = await import("./src/compat.ts");

@@ -1921,12 +1921,14 @@ async function saveMachine(request: Request, env: Env) {
     const result = await env.XBOARD_DB.prepare("UPDATE v2_server_machine SET name = ?, notes = ?, is_active = ?, enabled = ?, updated_at = ? WHERE id = ?")
       .bind(name, notes, isActive, isActive, ts, id).run();
     if (!result.success) return fail("保存服务器失败", 500, 500);
+    await bump(env.XBOARD_KV, "servers_version");
     return ok(true);
   }
   const machineToken = randomString(32);
   const result = await env.XBOARD_DB.prepare("INSERT INTO v2_server_machine(name, notes, token, enabled, is_active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
     .bind(name, notes, machineToken, isActive, isActive, ts, ts).run();
   if (!result.success) return fail("保存服务器失败", 500, 500);
+  await bump(env.XBOARD_KV, "servers_version");
   const machine = await env.XBOARD_DB.prepare("SELECT id FROM v2_server_machine WHERE token = ?").bind(machineToken).first<{ id: number }>();
   return ok({ id: machine?.id, token: machineToken, install_command: await machineInstallCommand(request, env, machineToken, Number(machine?.id)) });
 }
