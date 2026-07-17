@@ -67,9 +67,9 @@ test("node and machine runtime status persist in the global StatusHub", () => {
   assert.match(source, /env\.STATUS_HUB\.idFromName\(STATUS_HUB_ID\)/);
   assert.match(source, /updatedAt - Number\(this\.persistedStatusAt\.get\(key\) \|\| 0\) >= 60/);
   assert.match(source, /updatedAt - lastRecordedAt >= 300/);
-  assert.match(source, /RUNTIME_ANALYTICS\.writeDataPoint/);
-  assert.match(source, /url\.pathname === "\/history\/backfill"/);
-  assert.doesNotMatch(source, /await this\.state\.storage\.put\(historyKey, nextHistory\)/);
+  assert.match(source, /await this\.state\.storage\.put\(`history:\$\{id\}`, nextHistory\)/);
+  assert.doesNotMatch(source, /RUNTIME_ANALYTICS/);
+  assert.doesNotMatch(wrangler, /analytics_engine_datasets/);
   assert.match(wrangler, /name = "STATUS_HUB"/);
   assert.match(wrangler, /class_name = "StatusHub"/);
   assert.match(wrangler, /tag = "v2"[\s\S]*new_sqlite_classes = \["StatusHub"\]/);
@@ -77,7 +77,7 @@ test("node and machine runtime status persist in the global StatusHub", () => {
   assert.doesNotMatch(source, /INSERT INTO v2_server_machine_load_history/);
 });
 
-test("legacy machine load history remains bounded for backfill compatibility", () => {
+test("machine load history remains bounded to the latest 24 hours", () => {
   const recent = 2_000_000_000;
   const first = { cpu: 10, recorded_at: recent - 299 };
   const second = { cpu: 20, recorded_at: recent };
@@ -110,10 +110,9 @@ function statusHubStorage() {
   };
 }
 
-test("StatusHub coalesces heartbeat storage while sending load history only to Analytics Engine", async () => {
+test("StatusHub coalesces heartbeat storage and persists five-minute load history", async () => {
   const storage = statusHubStorage();
-  const analyticsPoints = [];
-  const hub = new StatusHub({ storage }, { RUNTIME_ANALYTICS: { writeDataPoint: point => analyticsPoints.push(point) } });
+  const hub = new StatusHub({ storage }, {});
   const originalNow = Date.now;
   let clock = 2_000_000_000_000;
   Date.now = () => clock;
@@ -161,19 +160,11 @@ test("StatusHub coalesces heartbeat storage while sending load history only to A
     await machineReport();
     clock += 60_000;
     await machineReport();
-    assert.equal(storage.writes.filter(key => key === "history:3").length, 0);
-    assert.equal(analyticsPoints.filter(point => point.indexes?.[0] === "machine:3").length, 1);
+    assert.equal(storage.writes.filter(key => key === "history:3").length, 1);
     clock += 241_000;
     await machineReport();
-    assert.equal(storage.writes.filter(key => key === "history:3").length, 0);
-    assert.equal(analyticsPoints.filter(point => point.indexes?.[0] === "machine:3").length, 2);
-
-    storage.rows.set("history:9", [{ cpu: 1, recorded_at: 100 }, { cpu: 2, recorded_at: 200 }]);
-    const migrated = await hub.fetch(new Request("https://status-hub.internal/history/backfill", {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ limit: 20 })
-    }));
-    assert.equal((await migrated.json()).data.migrated, 2);
-    assert.equal(storage.rows.has("history:9"), false);
+    assert.equal(storage.writes.filter(key => key === "history:3").length, 2);
+    assert.equal(storage.rows.get("history:3").length, 2);
 
     const acquire = claim => hub.fetch(new Request("https://status-hub.internal/locks/acquire", {
       method: "POST", headers: { "content-type": "application/json" },

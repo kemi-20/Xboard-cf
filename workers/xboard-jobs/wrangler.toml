@@ -18,14 +18,6 @@ class_name = "TrafficStatsHub"
 tag = "v1"
 new_sqlite_classes = ["TrafficStatsHub"]
 
-[[analytics_engine_datasets]]
-binding = "USER_TRAFFIC_ANALYTICS"
-dataset = "xboard_user_traffic"
-
-[[analytics_engine_datasets]]
-binding = "SERVER_TRAFFIC_ANALYTICS"
-dataset = "xboard_server_traffic"
-
 [[queues.producers]]
 binding = "NOTIFICATION_EVENTS"
 queue = "notification-events"

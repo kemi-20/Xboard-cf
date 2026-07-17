@@ -35,9 +35,6 @@ export interface DurableObjectState {
 export interface DurableObjectNamespace { idFromName(name: string): DurableObjectId; get(id: DurableObjectId): DurableObjectStub; }
 export interface DurableObjectId {}
 export interface DurableObjectStub { fetch(input: RequestInfo, init?: RequestInit): Promise<Response>; }
-export interface AnalyticsEngineDataset {
-  writeDataPoint(event: { indexes?: string[]; blobs?: string[]; doubles?: number[] }): void;
-}
 export interface ExecutionContext { waitUntil(promise: Promise<unknown>): void; }
 export interface WebSocketPairConstructor { new(): { 0: WebSocket; 1: WebSocket }; }
 declare global {

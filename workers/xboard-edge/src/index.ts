@@ -7,7 +7,6 @@ import { handleAdminGiftCard, handleUserGiftCard } from "./gift-card";
 import { authorizeMigration, handleAdminMigration } from "./migration";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { handleSubscriptionRequest } from "./subscription/index.ts";
-import { analyticsData } from "./analytics.ts";
 
 export interface Env {
   XBOARD_DB: D1Database;
@@ -17,15 +16,12 @@ export interface Env {
   XBOARD_SERVER: Fetcher;
   XBOARD_JOBS: Fetcher;
   NOTIFICATION_EVENTS: Queue;
-  CLOUDFLARE_ACCOUNT_ID?: string;
-  ANALYTICS_API_TOKEN?: string;
   PUBLIC_READ_DB?: D1Database;
   SETTINGS_MEMORY_SCOPE?: string;
 }
 
 const responseDataCache = new Map<string, { value: unknown; expiresAt: number }>();
 let storageOptimizationReady = false;
-let analyticsCutoverCache: { live: number; backfillStart: number; backfillEnd: number; expiresAt: number } | null = null;
 let trafficMaterializedAt = 0;
 
 async function cachedData<T>(key: string, ttlSeconds: number, loader: () => Promise<T>): Promise<T> {
@@ -54,24 +50,6 @@ async function cachedData<T>(key: string, ttlSeconds: number, loader: () => Prom
     } catch {}
   }
   return value;
-}
-
-async function analyticsCutover(env: Env) {
-  if (analyticsCutoverCache && analyticsCutoverCache.expiresAt > Date.now()) return analyticsCutoverCache;
-  const rows = await env.XBOARD_DB.prepare("SELECT name, value FROM v2_settings WHERE name IN ('analytics_cutover_at','analytics_backfill_start','analytics_backfill_end')").all<{ name: string; value: string }>();
-  const values = Object.fromEntries((rows.results || []).map(row => [row.name, Number(row.value || 0)]));
-  analyticsCutoverCache = {
-    live: Number(values.analytics_cutover_at || Number.MAX_SAFE_INTEGER),
-    backfillStart: Number(values.analytics_backfill_start || 0),
-    backfillEnd: Number(values.analytics_backfill_end || 0),
-    expiresAt: Date.now() + 300_000
-  };
-  return analyticsCutoverCache;
-}
-
-async function analyticsRangeAvailable(env: Env, start: number, end: number) {
-  const coverage = await analyticsCutover(env);
-  return start >= coverage.live || (coverage.backfillStart > 0 && start >= coverage.backfillStart && end <= coverage.backfillEnd);
 }
 
 async function materializeCurrentTraffic(env: Env) {
@@ -234,7 +212,6 @@ const adminRouteMethods: Record<string, string[]> = {
   "/payment/fetch": ["GET"], "/payment/getPaymentMethods": ["GET"], "/payment/getPaymentForm": ["POST"], "/payment/save": ["POST"], "/payment/drop": ["POST"], "/payment/show": ["POST"], "/payment/sort": ["POST"],
   "/system/getSystemStatus": ["GET"], "/system/getQueueStats": ["GET"], "/system/getQueueWorkload": ["GET"], "/system/getQueueMasters": ["GET"],
   "/system/getHorizonFailedJobs": ["GET"], "/system/getAuditLog": ["GET", "POST"],
-  "/system/backfillAnalytics": ["POST"],
   "/theme/getThemes": ["GET"], "/theme/upload": ["POST"], "/theme/delete": ["POST"], "/theme/saveThemeConfig": ["POST"], "/theme/getThemeConfig": ["POST"],
   "/plugin/types": ["GET"], "/plugin/getPlugins": ["GET"], "/plugin/upload": ["POST"], "/plugin/delete": ["POST"], "/plugin/install": ["POST"],
   "/plugin/uninstall": ["POST"], "/plugin/enable": ["POST"], "/plugin/disable": ["POST"], "/plugin/config": ["GET", "POST"], "/plugin/upgrade": ["POST"],
@@ -1415,20 +1392,6 @@ async function trafficRank(env: Env, url: URL) {
   const calculateChange = (value: number, previousValue: number) => previousValue > 0
     ? Math.round(((value - previousValue) / previousValue) * 1000) / 10
     : 0;
-  if (await analyticsRangeAvailable(env, previousStart, end)) {
-    const route = type === "node" ? "/internal/traffic/server-rank" : "/internal/traffic/rank";
-    const rows = await analyticsData<Record<string, any>[]>(env, route, { start, end, previous_start: previousStart, limit: 10 });
-    if (rows?.length) {
-      const ids = rows.map(row => Number(type === "node" ? row.server_id : row.user_id)).filter(Boolean);
-      const names = ids.length ? await env.XBOARD_DB.prepare(`SELECT id, ${type === "node" ? "name" : "email AS name"} FROM ${type === "node" ? "v2_server" : "v2_user"} WHERE id IN (${ids.map(() => "?").join(",")})`).bind(...ids).all<{ id: number; name: string }>() : { results: [] as { id: number; name: string }[] };
-      const byId = new Map((names.results || []).map(row => [Number(row.id), row.name]));
-      return rows.map(row => {
-        const id = Number(type === "node" ? row.server_id : row.user_id);
-        const value = Number(row.total || 0); const previousValue = Number(row.previous_total || 0);
-        return { id: String(id), name: byId.get(id) || `${type === "node" ? "Node" : "User"} ${id}`, value, previousValue, change: calculateChange(value, previousValue), timestamp: new Date(end * 1000).toISOString() };
-      });
-    }
-  }
   if (type === "node") {
     try {
       const rows = await env.XBOARD_DB.prepare(
@@ -1879,10 +1842,6 @@ async function adminMachineHistory(env: Env, url: URL) {
 
   const machine = await env.XBOARD_DB.prepare("SELECT id FROM v2_server_machine WHERE id = ?").bind(machineId).first();
   if (!machine) return fail("服务器不存在", 422, 422);
-  const end = now();
-  const aeRows = await analyticsData<Record<string, unknown>[]>(env, "/internal/runtime/load", {
-    entity_id: machineId, start: end - (rangeHours || 24) * 3600, end, limit
-  });
   const params = new URLSearchParams({ machine_id: String(machineId), limit: String(limit) });
   if (rangeHours !== null) params.set("range_hours", String(rangeHours));
   let statusRows: Record<string, unknown>[] | null = null;
@@ -1893,19 +1852,8 @@ async function adminMachineHistory(env: Env, url: URL) {
       statusRows = Array.isArray(payload.data) ? payload.data : [];
     }
   } catch {}
-  if (!statusRows && !aeRows) return fail("获取服务器负载历史失败", 500, 500);
-
-  const merged = new Map<number, Record<string, unknown>>();
-  for (const row of statusRows || []) {
-    const recordedAt = Number(row.recorded_at || 0);
-    if (recordedAt) merged.set(recordedAt, row);
-  }
-  // AE contains the post-cutover copy, so prefer it when both stores contain the same sample.
-  for (const row of aeRows || []) {
-    const recordedAt = Number(row.recorded_at || 0);
-    if (recordedAt) merged.set(recordedAt, row);
-  }
-  return ok([...merged.values()]
+  if (!statusRows) return fail("获取服务器负载历史失败", 500, 500);
+  return ok(statusRows
     .sort((left, right) => Number(left.recorded_at || 0) - Number(right.recorded_at || 0))
     .slice(-limit));
 }
@@ -3465,23 +3413,6 @@ async function adminApi(request: Request, env: Env, path: string) {
   if (!admin) return fail("未授权", 401, 401);
   const auditRequest = request.method === "POST" ? request.clone() : request;
   const response = await (async () => {
-  if (request.method === "POST" && route === "/system/backfillAnalytics") {
-    const callJobs = async (dataset: "user" | "server") => {
-      const response = await env.XBOARD_JOBS.fetch(`https://xboard-jobs.internal/internal/analytics/backfill?dataset=${dataset}&limit=20`, { method: "POST" });
-      if (!response.ok) throw new Error(`Traffic analytics backfill failed (${response.status})`);
-      const payload = await response.json() as { data?: Record<string, unknown> };
-      return payload.data || {};
-    };
-    const user = await callJobs("user");
-    const server = await callJobs("server");
-    const runtimeResponse = await statusHubRequest(env, "history/backfill", {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ limit: 20 })
-    });
-    if (!runtimeResponse.ok) throw new Error(`Runtime analytics backfill failed (${runtimeResponse.status})`);
-    const runtimePayload = await runtimeResponse.json() as { data?: Record<string, unknown> };
-    analyticsCutoverCache = null;
-    return ok({ user, server, runtime: runtimePayload.data || {} });
-  }
   const migrationResponse = await handleAdminMigration(request.clone(), env, route, Number((admin as any).id || 0));
   if (migrationResponse) return migrationResponse;
   const giftCardResponse = await handleAdminGiftCard(request.clone(), env.XBOARD_DB, route, Number((admin as any).id || 0));
@@ -3607,17 +3538,6 @@ async function adminApi(request: Request, env: Env, path: string) {
   if (request.method === "GET" && (route === "/stat/getServerLastRank" || route === "/stat/getServerYesterdayRank")) {
     const start = route.endsWith("YesterdayRank") ? dayStart() - 86400 : 0;
     const end = route.endsWith("YesterdayRank") ? dayStart() : dayStart() + 172800;
-    if (await analyticsRangeAvailable(env, start, end)) {
-      const aeRows = await analyticsData<Record<string, any>[]>(env, "/internal/traffic/server-rank", { start, end, limit: 100 });
-      if (aeRows?.length) {
-        const ids = [...new Set(aeRows.map(row => Number(row.server_id)).filter(Boolean))];
-        const names = ids.length ? await env.XBOARD_DB.prepare(`SELECT s.id, COALESCE(parent.name, s.name) AS name
-          FROM v2_server s LEFT JOIN v2_server parent ON parent.id = s.parent_id
-          WHERE s.id IN (${ids.map(() => "?").join(",")})`).bind(...ids).all<{ id: number; name: string }>() : { results: [] as { id: number; name: string }[] };
-        const byId = new Map((names.results || []).map(row => [Number(row.id), row.name]));
-        return ok(aeRows.map(row => ({ server_name: byId.get(Number(row.server_id)) || `Node ${row.server_id}`, server_id: Number(row.server_id), server_type: row.server_type, u: Number(row.u || 0), d: Number(row.d || 0), total: Number(row.total || 0) })));
-      }
-    }
     const result = await env.XBOARD_DB.prepare(`SELECT s.id AS server_id, COALESCE(parent.name, s.name) AS server_name,
       s.type AS server_type, COALESCE(SUM(stat.u), 0) AS u, COALESCE(SUM(stat.d), 0) AS d
       FROM v2_server s JOIN v2_stat_server stat ON stat.server_id = s.id
@@ -3655,10 +3575,6 @@ async function adminApi(request: Request, env: Env, path: string) {
     const start = Number(url.searchParams.get("start_time") || 0);
     const end = Number(url.searchParams.get("end_time") || now());
     if (type === "server_traffic_rank") {
-      if (await analyticsRangeAvailable(env, start, end)) {
-        const aeRows = await analyticsData<Record<string, any>[]>(env, "/internal/traffic/server-rank", { start, end, limit });
-        if (aeRows?.length) return ok(aeRows);
-      }
       const result = await env.XBOARD_DB.prepare(`SELECT server_id, server_type, COALESCE(SUM(u),0) AS u, COALESCE(SUM(d),0) AS d, COALESCE(SUM(u+d),0) AS total FROM v2_stat_server WHERE record_at >= ? AND record_at < ? AND COALESCE(record_type,'d') = 'd' GROUP BY server_id, server_type ORDER BY total DESC LIMIT ?`)
         .bind(start, end, limit).all();
       return ok(result.results || []);
@@ -3669,15 +3585,6 @@ async function adminApi(request: Request, env: Env, path: string) {
       return ok(result.results || []);
     }
     if (type !== "user_consumption_rank") return fail("统计类型无效", 422, 422);
-    if (await analyticsRangeAvailable(env, start, end)) {
-      const aeRows = await analyticsData<Record<string, any>[]>(env, "/internal/traffic/rank", { start, end, limit });
-      if (aeRows?.length) {
-        const ids = aeRows.map(row => Number(row.user_id)).filter(Boolean);
-        const users = ids.length ? await env.XBOARD_DB.prepare(`SELECT id, email FROM v2_user WHERE id IN (${ids.map(() => "?").join(",")})`).bind(...ids).all<{ id: number; email: string }>() : { results: [] as { id: number; email: string }[] };
-        const emails = new Map((users.results || []).map(row => [Number(row.id), row.email]));
-        return ok(aeRows.map(row => ({ ...row, email: emails.get(Number(row.user_id)) || null })));
-      }
-    }
     const result = await env.XBOARD_DB.prepare(`SELECT su.user_id, u.email, COALESCE(SUM(su.u),0) AS u, COALESCE(SUM(su.d),0) AS d, COALESCE(SUM(su.u+su.d),0) AS total FROM v2_stat_user su LEFT JOIN v2_user u ON u.id = su.user_id WHERE su.record_at >= ? AND su.record_at < ? AND COALESCE(su.record_type,'d') = 'd' GROUP BY su.user_id, u.email ORDER BY total DESC LIMIT ?`)
       .bind(start, end, limit).all();
     return ok(result.results || []);

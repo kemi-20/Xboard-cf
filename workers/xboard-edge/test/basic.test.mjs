@@ -354,12 +354,12 @@ test("bootstrap keeps Cloudflare tenant identifiers out of the repository", () =
   const bootstrap = fs.readFileSync("../../scripts/prepare-cloudflare-ci.mjs", "utf8");
   assert.match(workflow, /permissions:\s+contents: read/);
   assert.doesNotMatch(workflow, /git (?:add|commit|push)/);
-  assert.match(workflow, /working-directory: workers\/xboard-edge[\s\S]*wrangler secret put ANALYTICS_API_TOKEN/);
-  assert.match(workflow, /wrangler secret put CLOUDFLARE_ACCOUNT_ID/);
+  assert.doesNotMatch(workflow, /ANALYTICS_API_TOKEN/);
+  assert.doesNotMatch(workflow, /CLOUDFLARE_ANALYTICS_TOKEN/);
   assert.match(workflow, /run: npm run deploy/);
   assert.doesNotMatch(workflow, /workers\/xboard-analytics/);
   assert.match(bootstrap, /\["xboard-edge", "xboard-server", "xboard-jobs"\]/);
-  assert.match(bootstrap, /GITHUB_ENV/);
+  assert.doesNotMatch(bootstrap, /GITHUB_ENV/);
   assert.match(bootstrap, /body: JSON\.stringify\(\{ name, primary_location_hint: "apac" \}\)/);
   assert.match(bootstrap, /read_replication: \{ mode: "auto" \}/);
   assert.match(bootstrap, /if \(existing\) return \{ database: existing, created: false \}/);
@@ -458,12 +458,10 @@ test("machine load history matches the upstream chart contract", () => {
   assert.match(source, /rangeHours < 1 \|\| rangeHours > 24/);
   assert.match(source, /statusHubRequest\(env, `history\?\$\{params\}`\)/);
   assert.match(source, /new URLSearchParams\(\{ machine_id: String\(machineId\), limit: String\(limit\) \}\)/);
-  assert.match(source, /for \(const row of statusRows \|\| \[\]\)/);
-  assert.match(source, /for \(const row of aeRows \|\| \[\]\)/);
+  assert.match(source, /if \(!statusRows\) return fail\("获取服务器负载历史失败"/);
   assert.match(source, /\.sort\(\(left, right\) => Number\(left\.recorded_at \|\| 0\) - Number\(right\.recorded_at \|\| 0\)\)/);
   assert.match(source, /return adminMachineHistory\(env, new URL\(request\.url\)\)/);
-  assert.match(source, /"\/system\/backfillAnalytics": \["POST"\]/);
-  assert.match(source, /history\/backfill/);
+  assert.doesNotMatch(source, /backfillAnalytics/);
 });
 
 test("login sessions fall back to D1 when KV writes fail", () => {
@@ -961,13 +959,10 @@ test("audited admin and user mutations reject stale or partial operations", () =
 
 test("statistics and mail templates preserve the upstream contracts", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
-  const analytics = fs.readFileSync("src/analytics.ts", "utf8");
   assert.match(source, /route\.endsWith\("YesterdayRank"\) \? dayStart\(\) - 86400 : 0/);
   assert.match(source, /server_name: row\.server_name, server_id: Number\(row\.server_id\), server_type: row\.server_type/);
-  assert.match(source, /import \{ analyticsData \} from "\.\/analytics\.ts"/);
-  assert.match(analytics, /catch \{[\s\S]*return null;/);
-  assert.doesNotMatch(source, /XBOARD_ANALYTICS/);
-  assert.match(source, /SELECT s\.id, COALESCE\(parent\.name, s\.name\) AS name[\s\S]*LEFT JOIN v2_server parent ON parent\.id = s\.parent_id/);
+  assert.doesNotMatch(source, /analyticsData|ANALYTICS_API_TOKEN|XBOARD_ANALYTICS/);
+  assert.match(source, /SELECT s\.id AS server_id, COALESCE\(parent\.name, s\.name\) AS server_name[\s\S]*LEFT JOIN v2_server parent ON parent\.id = s\.parent_id/);
   assert.match(source, /type === "server_traffic_rank"/);
   assert.match(source, /type === "invite_rank"/);
   assert.match(source, /Number\(row\.paid_total \|\| 0\) \/ 100/);

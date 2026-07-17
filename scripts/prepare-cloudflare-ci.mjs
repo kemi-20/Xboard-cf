@@ -101,6 +101,4 @@ const output = process.env.GITHUB_OUTPUT;
 if (output) {
   await writeFile(output, `account_id=${account.id}\ndatabase_id=${databaseId}\nkv_id=${kv.id}\n`, { flag: "a" });
 }
-const githubEnv = process.env.GITHUB_ENV;
-if (githubEnv) await writeFile(githubEnv, `CLOUDFLARE_ACCOUNT_ID=${account.id}\n`, { flag: "a" });
 process.stdout.write(`Cloudflare resources ready for account ${account.name} (${account.id}).\n`);

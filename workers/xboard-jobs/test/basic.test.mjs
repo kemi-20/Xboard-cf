@@ -55,16 +55,14 @@ test("traffic statistics use one-row Outbox batches and a global durable aggrega
   assert.doesNotMatch(source, /v2_stat_user[\s\S]*u = u \+ excluded\.u/);
   assert.match(hub, /class TrafficStatsHub/);
   assert.match(hub, /processed:/);
-  assert.match(hub, /bucket:/);
   assert.match(hub, /now\(\) - last >= 3600/);
   assert.match(hub, /input\.force === true/);
-  assert.match(hub, /private flushChain: Promise<void> = Promise\.resolve\(\)/);
-  assert.match(hub, /const run = this\.flushChain\.then\(\(\) => this\.flushBucketsNow\(force\)\)/);
+  assert.match(hub, /private async scheduleHourlyMaterialization\(\)/);
+  assert.match(hub, /const legacyBuckets = await this\.state\.storage\.list\(\{ prefix: "bucket:" \}\)/);
+  assert.doesNotMatch(hub, /writeDataPoint/);
   assert.match(wrangler, /name = "TRAFFIC_STATS_HUB"/);
-  assert.match(wrangler, /dataset = "xboard_user_traffic"/);
-  assert.match(source, /async function backfillTrafficAnalytics/);
-  assert.match(source, /"d1_backfill"/);
-  assert.match(source, /boundedLimit = Math\.min\(20/);
+  assert.doesNotMatch(wrangler, /analytics_engine_datasets/);
+  assert.doesNotMatch(source, /backfillTrafficAnalytics/);
   const first = await __test.stableBatchId(["b", "a"]);
   const second = await __test.stableBatchId(["a", "b"]);
   assert.equal(first, second);
@@ -88,47 +86,13 @@ test("TrafficStatsHub deduplicates a retried batch and updates only involved use
     prepare() { return { bind() { return this; }, async all() { return { success: true, results: [] }; }, async first() { return null; }, async run() { return { success: true }; } }; },
     async batch() { return []; }
   };
-  const points = [];
-  const hub = new TrafficStatsHub({ storage }, { XBOARD_DB: db, USER_TRAFFIC_ANALYTICS: { writeDataPoint: point => points.push(point) }, SERVER_TRAFFIC_ANALYTICS: { writeDataPoint: point => points.push(point) } });
+  const hub = new TrafficStatsHub({ storage }, { XBOARD_DB: db });
   const payload = { batch_id: "stable", user_aggregates: [{ userId: 17, serverId: 3, serverType: "vless", u: 10, d: 20, rate: 1 }], server_aggregates: [{ serverId: 3, serverType: "vless", u: 10, d: 20 }], transfer_used: 30, record_at: 1000, created_at: 1200 };
   assert.equal((await hub.fetch(new Request("https://hub/process", { method: "POST", body: JSON.stringify(payload) }))).status, 200);
   assert.equal((await hub.fetch(new Request("https://hub/process", { method: "POST", body: JSON.stringify(payload) }))).status, 200);
   assert.equal(values.get("daily:user:1000:1")["17:3:vless"].u, 10);
   assert.equal(values.get("daily:total:1000"), 30);
   assert.equal([...values.keys()].filter(key => key.startsWith("daily:user:1000:")).length, 1);
-  assert.equal(points.length, 0);
-});
-
-test("TrafficStatsHub does not emit the same bucket during concurrent flush requests", async () => {
-  const values = new Map([["bucket:300", {
-    users: { "1:2:vless": { userId: 1, serverId: 2, serverType: "vless", u: 10, d: 20, rate: 1, events: 1 } },
-    servers: { "2:vless": { serverId: 2, serverType: "vless", u: 10, d: 20, events: 1 } }
-  }]]);
-  let listCalls = 0;
-  const storage = {
-    async get(key) { return values.get(key); },
-    async put(key, value) { values.set(key, value); },
-    async delete(key) { return values.delete(key); },
-    async list(options = {}) {
-      const snapshot = new Map([...values].filter(([key]) => !options.prefix || key.startsWith(options.prefix)));
-      listCalls++;
-      if (listCalls === 1) await new Promise(resolve => setTimeout(resolve, 20));
-      return snapshot;
-    },
-    async setAlarm() {}
-  };
-  const points = [];
-  const hub = new TrafficStatsHub({ storage }, {
-    XBOARD_DB: {},
-    USER_TRAFFIC_ANALYTICS: { writeDataPoint: point => points.push(point) },
-    SERVER_TRAFFIC_ANALYTICS: { writeDataPoint: point => points.push(point) }
-  });
-  await Promise.all([
-    hub.fetch(new Request("https://hub/flush", { method: "POST" })),
-    hub.fetch(new Request("https://hub/flush", { method: "POST" }))
-  ]);
-  assert.equal(points.length, 2);
-  assert.equal(values.has("bucket:300"), false);
 });
 
 test("mail templates override fallbacks and provider credentials stay protocol-specific", () => {

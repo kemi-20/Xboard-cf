@@ -1,4 +1,4 @@
-import type { AnalyticsEngineDataset, D1Database, DurableObjectState, DurableObjectStorage } from "./types.ts";
+import type { D1Database, DurableObjectState, DurableObjectStorage } from "./types.ts";
 import { now } from "./compat.ts";
 import { primaryDatabase } from "./db.ts";
 
@@ -6,13 +6,10 @@ type UserAggregate = { userId: number; serverId: number; serverType: string; u: 
 type ServerAggregate = { serverId: number; serverType: string; u: number; d: number };
 type UserShard = Record<string, UserAggregate>;
 type ServerState = Record<string, ServerAggregate>;
-type BucketState = { users: Record<string, UserAggregate & { events: number }>; servers: Record<string, ServerAggregate & { events: number }> };
 type BatchPayload = { batch_id: string; user_aggregates: UserAggregate[]; server_aggregates: ServerAggregate[]; transfer_used: number; record_at: number; created_at: number };
 
 export interface TrafficStatsEnv {
   XBOARD_DB: D1Database;
-  USER_TRAFFIC_ANALYTICS: AnalyticsEngineDataset;
-  SERVER_TRAFFIC_ANALYTICS: AnalyticsEngineDataset;
 }
 
 const FIVE_MINUTES = 300;
@@ -57,11 +54,18 @@ export class TrafficStatsHub {
   private state: DurableObjectState;
   private env: TrafficStatsEnv;
   private dayPromises = new Map<number, Promise<void>>();
-  private flushChain: Promise<void> = Promise.resolve();
+  private alarmAt = 0;
 
   constructor(state: DurableObjectState, env: TrafficStatsEnv) {
     this.state = state;
     this.env = env;
+  }
+
+  private async scheduleHourlyMaterialization() {
+    const nextHour = (Math.floor(Date.now() / 3_600_000) + 1) * 3_600_000;
+    if (this.alarmAt === nextHour) return;
+    await this.state.storage.setAlarm(nextHour);
+    this.alarmAt = nextHour;
   }
 
   private async ensureDay(recordAt: number) {
@@ -97,59 +101,29 @@ export class TrafficStatsHub {
   private async process(payload: BatchPayload) {
     if (!payload.batch_id || !Number(payload.record_at)) return json({ message: "Invalid traffic batch" }, 422);
     await this.ensureDay(Number(payload.record_at));
-    const bucketStart = Math.floor(Number(payload.created_at || now()) / FIVE_MINUTES) * FIVE_MINUTES;
     const duplicate = await runAtomic(this.state.storage, async storage => {
       if (await storage.get(`processed:${payload.batch_id}`)) return true;
       const involved = [...new Set((payload.user_aggregates || []).map(value => userShard(value.userId)))];
       const shards = new Map<number, UserShard>();
       for (const shard of involved) shards.set(shard, await storage.get<UserShard>(`daily:user:${payload.record_at}:${shard}`) || {});
       const servers = await storage.get<ServerState>(`daily:server:${payload.record_at}`) || {};
-      const bucketKey = `bucket:${bucketStart}`;
-      const bucket = await storage.get<BucketState>(bucketKey) || { users: {}, servers: {} };
       for (const value of payload.user_aggregates || []) {
         mergeUser(shards.get(userShard(value.userId))!, value);
-        const key = userKey(value); const current = bucket.users[key] || { ...value, u: 0, d: 0, events: 0 };
-        current.u += Number(value.u || 0); current.d += Number(value.d || 0); current.events++; bucket.users[key] = current;
       }
       for (const value of payload.server_aggregates || []) {
         mergeServer(servers, value);
-        const key = serverKey(value); const current = bucket.servers[key] || { ...value, u: 0, d: 0, events: 0 };
-        current.u += Number(value.u || 0); current.d += Number(value.d || 0); current.events++; bucket.servers[key] = current;
       }
       const entries: Record<string, unknown> = {
         [`daily:server:${payload.record_at}`]: servers,
         [`daily:total:${payload.record_at}`]: Number(await storage.get<number>(`daily:total:${payload.record_at}`) || 0) + Number(payload.transfer_used || 0),
-        [bucketKey]: bucket,
         [`processed:${payload.batch_id}`]: Number(payload.created_at || now())
       };
       for (const [shard, value] of shards) entries[`daily:user:${payload.record_at}:${shard}`] = value;
       await storage.put(entries);
       return false;
     });
-    await this.state.storage.setAlarm(Date.now() + FIVE_MINUTES * 1000);
+    await this.scheduleHourlyMaterialization();
     return json({ data: { accepted: true, duplicate } });
-  }
-
-  private async flushBuckets(force = false) {
-    const run = this.flushChain.then(() => this.flushBucketsNow(force));
-    this.flushChain = run.then(() => undefined, () => undefined);
-    return run;
-  }
-
-  private async flushBucketsNow(force = false) {
-    const cutoff = force ? Number.MAX_SAFE_INTEGER : Math.floor(now() / FIVE_MINUTES) * FIVE_MINUTES;
-    const buckets = await this.state.storage.list<BucketState>({ prefix: "bucket:" });
-    let flushed = 0;
-    for (const [key, bucket] of buckets) {
-      const bucketStart = Number(key.slice("bucket:".length));
-      if (!Number.isFinite(bucketStart) || bucketStart >= cutoff) continue;
-      const recordDay = new Date(bucketStart * 1000).toISOString().slice(0, 10);
-      for (const value of Object.values(bucket.users || {})) this.env.USER_TRAFFIC_ANALYTICS.writeDataPoint({ indexes: [`user:${value.userId}`], blobs: [value.serverType, String(value.serverId), recordDay, "traffic_queue", "1"], doubles: [value.u, value.d, value.rate, value.events, bucketStart] });
-      for (const value of Object.values(bucket.servers || {})) this.env.SERVER_TRAFFIC_ANALYTICS.writeDataPoint({ indexes: [`server:${value.serverType}:${value.serverId}`], blobs: [value.serverType, String(value.serverId), recordDay, "1"], doubles: [value.u, value.d, value.events, bucketStart] });
-      await this.state.storage.delete(key);
-      flushed++;
-    }
-    return flushed;
   }
 
   private async materialize(recordAt?: number, force = false) {
@@ -184,6 +158,8 @@ export class TrafficStatsHub {
   }
 
   private async cleanup() {
+    const legacyBuckets = await this.state.storage.list({ prefix: "bucket:" });
+    for (const key of legacyBuckets.keys()) await this.state.storage.delete(key);
     const processed = await this.state.storage.list<number>({ prefix: "processed:" });
     for (const [key, createdAt] of processed) if (Number(createdAt || 0) < now() - 7 * DAY) await this.state.storage.delete(key);
     const initialized = await this.state.storage.list<number>({ prefix: "initialized:" });
@@ -199,7 +175,6 @@ export class TrafficStatsHub {
   async fetch(request: Request) {
     const url = new URL(request.url);
     if (url.pathname === "/process" && request.method === "POST") return this.process(await request.json() as BatchPayload);
-    if (url.pathname === "/flush" && request.method === "POST") return json({ data: { flushed: await this.flushBuckets(true) } });
     if (url.pathname === "/materialize" && request.method === "POST") {
       const input = await request.json().catch(() => ({})) as { record_at?: number; force?: boolean };
       return json({ data: { rows: await this.materialize(Number(input.record_at || 0) || undefined, input.force === true) } });
@@ -213,14 +188,14 @@ export class TrafficStatsHub {
   }
 
   async alarm() {
+    this.alarmAt = 0;
     try {
-      await this.flushBuckets();
       const last = Number(await this.state.storage.get<number>("materialization:last") || 0);
       if (now() - last >= 3600) await this.materialize(undefined, true);
       await this.cleanup();
     } finally {
-      const buckets = await this.state.storage.list({ prefix: "bucket:" });
-      if (buckets.size) await this.state.storage.setAlarm(Date.now() + FIVE_MINUTES * 1000);
+      const initialized = await this.state.storage.list({ prefix: "initialized:" });
+      if (initialized.size) await this.scheduleHourlyMaterialization();
     }
   }
 }

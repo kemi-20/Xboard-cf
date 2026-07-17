@@ -16,10 +16,6 @@ binding = "XBOARD_KV"
 binding = "TRAFFIC_EVENTS"
 queue = "traffic-events"
 
-[[analytics_engine_datasets]]
-binding = "RUNTIME_ANALYTICS"
-dataset = "xboard_runtime"
-
 [[durable_objects.bindings]]
 name = "NODE_HUB"
 class_name = "NodeHub"

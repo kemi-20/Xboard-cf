@@ -1,4 +1,4 @@
-import type { AnalyticsEngineDataset, D1Database, KVNamespace, Queue, DurableObjectState, ExecutionContext } from "./types.ts";
+import type { D1Database, KVNamespace, Queue, DurableObjectState, ExecutionContext } from "./types.ts";
 import { now } from "./compat.ts";
 import { invalidateSettingsCache, primaryDatabase, settings as loadSettings } from "./db.ts";
 import {
@@ -12,7 +12,6 @@ export interface Env {
   TRAFFIC_EVENTS: Queue;
   NODE_HUB: any;
   STATUS_HUB: any;
-  RUNTIME_ANALYTICS: AnalyticsEngineDataset;
 }
 
 type AuthContext = { input: Row; node?: Row; machine?: Row };
@@ -611,7 +610,6 @@ export class StatusHub {
   private snapshotLoaded = false;
   private histories = new Map<number, Row[]>();
   private loadedHistories = new Set<number>();
-  private analyticsLoadAt = new Map<number, number>();
   private devices = new Map<number, Row>();
   private devicesLoaded = false;
   private persistedDevicesAt = new Map<number, number>();
@@ -727,19 +725,14 @@ export class StatusHub {
         await this.state.storage.put(key, next);
         this.persistedStatusAt.set(key, updatedAt);
       }
-      if (critical) {
-        try {
-          this.env.RUNTIME_ANALYTICS.writeDataPoint({ indexes: [key], blobs: [input.state.connected === false ? "disconnect" : "status", "", "", "1"], doubles: [0, 0, 0, 0, 0, 0, 0, 0, updatedAt] });
-        } catch { /* Analytics must never block runtime status. */ }
-      }
       if (kind === "machine" && input.history && input.state.load_status && typeof input.state.load_status === "object") {
         const point = this.historyPoint(input.state.load_status as Row, updatedAt);
-        const lastRecordedAt = Number(this.analyticsLoadAt.get(id) || 0);
+        const history = await this.loadHistory(id);
+        const lastRecordedAt = Number(history.at(-1)?.recorded_at || 0);
         if (!lastRecordedAt || updatedAt - lastRecordedAt >= 300) {
-          try {
-            this.env.RUNTIME_ANALYTICS.writeDataPoint({ indexes: [`machine:${id}`], blobs: ["load", "", "", "1"], doubles: [Number(point.cpu || 0), Number(point.mem_used || 0), Number(point.disk_used || 0), Number(point.net_in_speed || 0), Number(point.net_out_speed || 0), 0, 0, 0, updatedAt, Number(point.mem_total || 0), Number(point.disk_total || 0)] });
-            this.analyticsLoadAt.set(id, updatedAt);
-          } catch { /* Analytics must never block machine status. */ }
+          const nextHistory = appendMachineHistory(history, point, updatedAt);
+          this.histories.set(id, nextHistory);
+          await this.state.storage.put(`history:${id}`, nextHistory);
         }
       }
       return json({ data: true });
@@ -826,31 +819,6 @@ export class StatusHub {
         .filter(item => !cutoff || Number(item.recorded_at || 0) >= cutoff)
         .slice(-limit);
       return json({ data: history });
-    }
-    if (url.pathname === "/history/backfill" && request.method === "POST") {
-      const input = await request.json().catch(() => ({})) as { limit?: number };
-      const limit = Math.min(20, Math.max(1, Math.trunc(Number(input.limit || 20))));
-      const histories = await this.state.storage.list<Row[]>({ prefix: "history:" });
-      const entry = [...histories.entries()].find(([, rows]) => Array.isArray(rows) && rows.length > 0);
-      if (!entry) return json({ data: { migrated: 0, remaining: 0, done: true } });
-      const [key, rows] = entry;
-      const machineId = Number(key.slice("history:".length));
-      const batch = rows.slice(0, limit);
-      for (const point of batch) {
-        const recordedAt = Number(point.recorded_at || 0);
-        if (!recordedAt) continue;
-        this.env.RUNTIME_ANALYTICS.writeDataPoint({
-          indexes: [`machine:${machineId}`], blobs: ["load", "", "", "1"],
-          doubles: [Number(point.cpu || 0), Number(point.mem_used || 0), Number(point.disk_used || 0), Number(point.net_in_speed || 0), Number(point.net_out_speed || 0), 0, 0, 0, recordedAt, Number(point.mem_total || 0), Number(point.disk_total || 0)]
-        });
-      }
-      const remainingRows = rows.slice(batch.length);
-      if (remainingRows.length) await this.state.storage.put(key, remainingRows);
-      else await this.state.storage.delete(key);
-      this.histories.delete(machineId);
-      this.loadedHistories.delete(machineId);
-      const remaining = [...histories.entries()].reduce((total, [historyKey, values]) => total + (historyKey === key ? remainingRows.length : values.length), 0);
-      return json({ data: { machine_id: machineId, migrated: batch.length, remaining, done: remaining === 0 } });
     }
     if (url.pathname === "/clear" && request.method === "POST") {
       const input = await request.json() as { kind?: string; id?: number };
