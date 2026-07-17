@@ -18,6 +18,7 @@ export interface Env {
 }
 
 type AuthContext = { input: Row; node?: Row; machine?: Row };
+const ONLINE_RETENTION_SECONDS = 900;
 
 function json(data: unknown, status = 200, headers: HeadersInit = {}) {
   return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json; charset=utf-8", ...headers } });
@@ -252,10 +253,11 @@ function currentRate(node: Row) {
 
 async function enqueueTraffic(env: Env, node: Row, raw: unknown, reportRuntime = true) {
   const payload = parseTraffic(raw);
-  if (!payload.length) return 0;
+  if (!payload.length) return { count: 0, connections: {} as Record<string, number> };
   const ts = now();
   const rate = currentRate(node);
   const billable = billableTraffic(payload);
+  const connections = Object.fromEntries(payload.map(item => [String(item.user_id), 1]));
   const events = [];
   for (let offset = 0; offset < billable.length; offset += 250) {
     events.push({
@@ -271,10 +273,12 @@ async function enqueueTraffic(env: Env, node: Row, raw: unknown, reportRuntime =
     await reportStatus(env, "node", Number(node.id), {
       machine_id: Number(node.machine_id || 0) || null,
       last_push_at: ts,
-      online: payload.length
+      online: payload.length,
+      connections,
+      connections_at: ts
     });
   }
-  return payload.length;
+  return { count: payload.length, connections };
 }
 
 function normalizeDeviceIp(value: unknown) {
@@ -731,7 +735,7 @@ export class StatusHub {
         if (selected && !selected.has(userId)) continue;
         if (!entries || typeof entries !== "object") continue;
         const current = new Set(users[userId] || []);
-        for (const [ip, seenAt] of Object.entries(entries as Row)) if (Number(seenAt) >= timestamp - 300) current.add(ip);
+        for (const [ip, seenAt] of Object.entries(entries as Row)) if (Number(seenAt) >= timestamp - ONLINE_RETENTION_SECONDS) current.add(ip);
         if (current.size) users[userId] = [...current];
       }
     }
@@ -795,7 +799,7 @@ export class StatusHub {
         else delete next[userId];
       }
       for (const [userId, value] of Object.entries(next)) {
-        const active = Object.fromEntries(Object.entries(value as Row).filter(([, seenAt]) => Number(seenAt || 0) > timestamp - 300));
+        const active = Object.fromEntries(Object.entries(value as Row).filter(([, seenAt]) => Number(seenAt || 0) > timestamp - ONLINE_RETENTION_SECONDS));
         if (Object.keys(active).length) next[userId] = active;
         else delete next[userId];
       }
@@ -1115,12 +1119,14 @@ routes.set("POST /api/v2/server/report", async (_request, env, input) => {
   const node = auth.node!;
   const nonEmptyArrayLike = (value: unknown) => Boolean(value && typeof value === "object" && Object.keys(value as Row).length);
   await touchNode(env, node);
-  const trafficCount = nonEmptyArrayLike(input.traffic) ? await enqueueTraffic(env, node, input.traffic, false) : 0;
+  const traffic = nonEmptyArrayLike(input.traffic)
+    ? await enqueueTraffic(env, node, input.traffic, false)
+    : { count: 0, connections: {} as Record<string, number> };
   if (nonEmptyArrayLike(input.alive)) await processAlive(env, Number(node.id), input.alive);
   const runtime: Row = { machine_id: Number(node.machine_id || 0) || null };
-  if (trafficCount > 0) {
+  if (traffic.count > 0) {
     runtime.last_push_at = now();
-    runtime.online = trafficCount;
+    runtime.online = traffic.count;
   }
   const onlineCounts = normalizeOnlineCounts(input.online);
   if (input.online && typeof input.online === "object" && !Array.isArray(input.online)) {
@@ -1128,6 +1134,10 @@ routes.set("POST /api/v2/server/report", async (_request, env, input) => {
     runtime.connections = onlineCounts;
     runtime.connections_at = reportedAt;
     await refreshOnlineUsers(env, onlineCounts, reportedAt);
+  } else if (traffic.count > 0) {
+    const reportedAt = now();
+    runtime.connections = traffic.connections;
+    runtime.connections_at = reportedAt;
   }
   const load = nonEmptyArrayLike(input.status) ? statusState(input.status) : null;
   const metricValues = nonEmptyArrayLike(input.metrics) ? metricsState(input.metrics) : null;

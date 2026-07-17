@@ -34,10 +34,11 @@ test("internal endpoints accept the D1 fallback during a partial Secret rollout"
   assert.equal(response.status, 200);
 });
 
-test("device state keeps the upstream five-minute activity window without KV heartbeats", () => {
+test("device state tolerates three five-minute reporting intervals without KV heartbeats", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /status-hub\.internal\/devices\/report/);
-  assert.match(source, /Number\(seenAt\) >= timestamp - 300/);
+  assert.match(source, /const ONLINE_RETENTION_SECONDS = 900/);
+  assert.match(source, /Number\(seenAt\) >= timestamp - ONLINE_RETENTION_SECONDS/);
   assert.doesNotMatch(source, /`node:devices:\$\{nodeId\}`/);
   assert.doesNotMatch(source, /`user:devices:\$\{userId\}`/);
 });
@@ -334,7 +335,7 @@ test("websocket device state follows the official per-IP contract", () => {
   assert.match(source, /event === "report\.devices"[\s\S]*socket\.send\(wsMessage\("sync\.devices"/);
   assert.match(source, /processAlive\(env, nodeId, data\.devices \?\? data, true\)/);
   assert.match(source, /action === "alivelist"[\s\S]{0,160}aggregateDeviceCounts\(env, await nodeUsers\(env, node\), true\)/);
-  assert.match(source, /Number\(seenAt \|\| 0\) > timestamp - 300/);
+  assert.match(source, /Number\(seenAt \|\| 0\) > timestamp - ONLINE_RETENTION_SECONDS/);
   assert.match(source, /aggregateDevices\(env, users, limitedOnly\)/);
   assert.match(source, /enqueueTraffic\(env, node, traffic\)/);
   assert.match(source, /const nonEmptyArrayLike =/);
@@ -353,6 +354,9 @@ test("HTTP reports retain per-user online connections and clear empty snapshots"
   assert.match(source, /COALESCE\(last_online_at, 0\) < \?/);
   assert.match(source, /\.bind\(count, count, timestamp, Number\(userId\), count, timestamp - 240\)/);
   assert.doesNotMatch(source, /timestamp - 480/);
+  assert.match(source, /connections = Object\.fromEntries\(payload\.map\(item => \[String\(item\.user_id\), 1\]\)\)/);
+  assert.match(source, /else if \(traffic\.count > 0\)[\s\S]{0,180}runtime\.connections = traffic\.connections/);
+  assert.doesNotMatch(source, /refreshOnlineUsers\(env, traffic\.connections/);
   assert.deepEqual(normalizeOnlineCounts({ "1": 2, "2": "3", "3": 0, bad: 4, "-1": 5 }), { "1": 2, "2": 3 });
 });
 

@@ -1,5 +1,5 @@
 import { cachedData } from "../cache";
-import { now } from "../compat";
+import { now, ONLINE_RETENTION_SECONDS } from "../compat";
 import type { D1Database } from "../types";
 
 type StatisticsEnv = { XBOARD_DB: D1Database };
@@ -35,7 +35,7 @@ export async function adminStats<E extends StatisticsEnv>(env: E, deps: Statisti
       COALESCE(SUM(CASE WHEN created_at >= ? AND created_at < ? THEN 1 ELSE 0 END), 0) AS last_month_new_users,
       COALESCE(SUM(CASE WHEN online_count > 0 AND last_online_at >= ? THEN 1 ELSE 0 END), 0) AS online_users,
       COALESCE(SUM(CASE WHEN online_count > 0 AND last_online_at >= ? THEN online_count ELSE 0 END), 0) AS online_devices
-      FROM v2_user`).bind(current, month, current, lastMonth, month, current - 600, current - 600),
+      FROM v2_user`).bind(current, month, current, lastMonth, month, current - ONLINE_RETENTION_SECONDS, current - ONLINE_RETENTION_SECONDS),
     env.XBOARD_DB.prepare(`SELECT
       COALESCE(SUM(CASE WHEN created_at >= ? AND created_at < ? AND status NOT IN (0,2) THEN total_amount ELSE 0 END), 0) AS today_income,
       COALESCE(SUM(CASE WHEN created_at >= ? AND created_at < ? AND status NOT IN (0,2) THEN total_amount ELSE 0 END), 0) AS yesterday_income,

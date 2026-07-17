@@ -266,10 +266,11 @@ async function statistics(env: CronEnv, ts: number, day: number) {
 }
 
 let lastOnlineCleanupWarningAt = 0;
+const ONLINE_RETENTION_SECONDS = 900;
 
 async function cleanupOnlineStatus(env: CronEnv, ts: number) {
   try {
-    await env.XBOARD_DB.prepare("UPDATE v2_user SET online_count = 0 WHERE online_count > 0 AND (last_online_at IS NULL OR last_online_at < ?)").bind(ts - 600).run();
+    await env.XBOARD_DB.prepare("UPDATE v2_user SET online_count = 0 WHERE online_count > 0 AND (last_online_at IS NULL OR last_online_at < ?)").bind(ts - ONLINE_RETENTION_SECONDS).run();
   } catch (error) {
     if (Date.now() - lastOnlineCleanupWarningAt >= 300_000) {
       lastOnlineCleanupWarningAt = Date.now();

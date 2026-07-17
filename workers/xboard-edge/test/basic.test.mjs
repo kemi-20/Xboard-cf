@@ -1252,7 +1252,8 @@ test("admin online state merges StatusHub with recent authoritative D1 state", (
   assert.match(source, /statusHubRequest\(env, loadAuthHeaders, "devices\/list"/);
   assert.match(source, /connectionCounts\[userId\].*\+ online/);
   assert.match(source, /count - current\.length/);
-  assert.match(source, /const persistedCount = Number\(row\.last_online_at \|\| 0\) >= observedAt - 600/);
+  assert.match(fs.readFileSync("src/compat.ts", "utf8"), /ONLINE_RETENTION_SECONDS = 900/);
+  assert.match(source, /const persistedCount = Number\(row\.last_online_at \|\| 0\) >= observedAt - ONLINE_RETENTION_SECONDS/);
   assert.match(source, /online_count: Math\.max\(liveCount, persistedCount\)/);
   assert.match(source, /last_online_at: liveCount > 0 \? observedAt : row\.last_online_at/);
   assert.match(source, /onlineUsers: Math\.max\(Number\(users\.online_users/);

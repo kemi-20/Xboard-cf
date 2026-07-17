@@ -1,4 +1,4 @@
-import { body, now } from "../compat";
+import { body, now, ONLINE_RETENTION_SECONDS } from "../compat";
 import type { D1Database } from "../types";
 
 type UserEnv = { XBOARD_DB: D1Database };
@@ -87,7 +87,7 @@ export async function adminUserList<E extends UserEnv>(env: E, request: Request,
   const observedAt = now();
   const data = await Promise.all(userRows.map(async row => {
     const liveCount = liveDevices?.[String(row.id)]?.length || 0;
-    const persistedCount = Number(row.last_online_at || 0) >= observedAt - 600 ? Number(row.online_count || 0) : 0;
+    const persistedCount = Number(row.last_online_at || 0) >= observedAt - ONLINE_RETENTION_SECONDS ? Number(row.online_count || 0) : 0;
     const usedTraffic = Number(row.u || 0) + Number(row.d || 0);
     return {
       ...deps.safeUser(row),

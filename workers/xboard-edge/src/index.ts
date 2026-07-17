@@ -1,5 +1,5 @@
 import type { D1Database, D1PreparedStatement, ExecutionContext, Fetcher, KVNamespace, Queue } from "./types";
-import { body, fail, json, now, ok, randomString, token, uuid } from "./compat";
+import { body, fail, json, now, ok, ONLINE_RETENTION_SECONDS, randomString, token, uuid } from "./compat";
 import { createSession, currentUser, hashPassword, sessionTokenDigest, verifyPassword } from "./auth";
 import { invalidateSettingsCache, list, primaryDatabase, rows, settings, unconstrainedDatabase } from "./db";
 import { bump } from "./kv";
@@ -2777,7 +2777,7 @@ async function adminApi(request: Request, env: Env, path: string) {
           COALESCE(SUM(CASE WHEN created_at >= ? AND created_at < ? THEN 1 ELSE 0 END), 0) AS month_register_total,
           COALESCE(SUM(CASE WHEN online_count > 0 AND last_online_at >= ? THEN online_count ELSE 0 END), 0) AS online_devices,
           COALESCE(SUM(CASE WHEN online_count > 0 AND last_online_at >= ? THEN 1 ELSE 0 END), 0) AS online_users
-          FROM v2_user`).bind(month, current, current - 600, current - 600),
+          FROM v2_user`).bind(month, current, current - ONLINE_RETENTION_SECONDS, current - ONLINE_RETENTION_SECONDS),
         env.XBOARD_DB.prepare("SELECT COUNT(*) AS ticket_pending_total FROM v2_ticket WHERE status = 0"),
         env.XBOARD_DB.prepare(`SELECT
           COALESCE(SUM(CASE WHEN created_at >= ? AND created_at < ? THEN get_amount ELSE 0 END), 0) AS commission_month_payout,

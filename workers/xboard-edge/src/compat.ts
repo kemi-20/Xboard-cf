@@ -1,4 +1,5 @@
 export const now = () => Math.floor(Date.now() / 1000);
+export const ONLINE_RETENTION_SECONDS = 900;
 export const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), {
   status,
   headers: { "content-type": "application/json; charset=utf-8" }
