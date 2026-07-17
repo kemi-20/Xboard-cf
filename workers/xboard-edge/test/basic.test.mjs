@@ -145,7 +145,7 @@ test("admin UI and API follow the saved secure path", () => {
 });
 
 test("dashboard queue statistics honor the official time windows", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = fs.readFileSync("src/index.ts", "utf8") + fs.readFileSync("src/cache.ts", "utf8");
   assert.match(source, /cachedData\("queue-stats", 60/);
   assert.match(source, /globalThis as any\)\.caches\?\.default/);
   assert.match(source, /status = 'failed' AND COALESCE\(updated_at, created_at\) >= \?/);
@@ -169,7 +169,7 @@ test("registration limits use the Cloudflare visitor IP and preserve it during a
 });
 
 test("admin CRUD routes server resources to their own tables", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = fs.readFileSync("src/index.ts", "utf8") + fs.readFileSync("src/admin/contract.ts", "utf8");
   assert.match(source, /\["\/server\/group\/", "v2_server_group"\]/);
   assert.match(source, /\["\/server\/route\/", "v2_server_route"\]/);
   assert.match(source, /\["\/server\/machine\/", "v2_server_machine"\]/);
@@ -213,7 +213,7 @@ test("server validation keeps public and backend ports independent", () => {
 });
 
 test("repeated read models use coalesced Cache API snapshots", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = fs.readFileSync("src/index.ts", "utf8") + fs.readFileSync("src/cache.ts", "utf8");
   assert.match(source, /const responseDataPromises = new Map/);
   assert.match(source, /admin-stat-override", 15/);
   assert.match(source, /admin-stats", 30/);
@@ -333,7 +333,7 @@ test("settings saves invalidate the xboard-server instance cache", () => {
 });
 
 test("node protocol paths are proxied through the xboard-server service binding", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = fs.readFileSync("src/index.ts", "utf8") + fs.readFileSync("src/node-protocol.ts", "utf8");
   const wrangler = fs.readFileSync("wrangler.toml", "utf8");
   assert.match(source, /isNodeProtocolPath\(url\.pathname, request\.method\)/);
   assert.match(source, /pathname === "\/api\/v2\/server\/machine\/nodes"[\s\S]*method === "POST"/);
@@ -446,7 +446,7 @@ test("admin user and node forms receive upstream-compatible boolean values", () 
 });
 
 test("admin APIs reject non-official paths and methods before loose compatibility handlers", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = fs.readFileSync("src/index.ts", "utf8") + fs.readFileSync("src/admin/contract.ts", "utf8");
   assert.match(source, /function adminRouteAllowed\(route: string, method: string\)/);
   assert.match(source, /if \(!adminRouteAllowed\(route, request\.method\)\) return json\(\{ message: "Not Found" \}, 404\)/);
   assert.match(source, /"\/server\/group\/save": \["POST"\]/);
@@ -618,7 +618,7 @@ test("email settings describe Maileroo and Brevo instead of SMTP or Resend", () 
 
 test("admin migration imports official SQLite data in bounded D1 batches", () => {
   const source = fs.readFileSync("src/migration.ts", "utf8");
-  const index = fs.readFileSync("src/index.ts", "utf8");
+  const index = fs.readFileSync("src/index.ts", "utf8") + fs.readFileSync("src/admin/contract.ts", "utf8");
   assert.match(source, /sourceRows\.length > 100/);
   assert.match(source, /run\.mode === "overwrite" \? "INSERT" : "INSERT OR IGNORE"/);
   assert.match(source, /INSERT OR IGNORE/);
@@ -913,7 +913,7 @@ test("non-payment compatibility endpoints no longer return fake success", () => 
 });
 
 test("quick login, withdrawals and ECH generation are implemented", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = fs.readFileSync("src/index.ts", "utf8") + fs.readFileSync("src/ech.ts", "utf8");
   assert.match(source, /quick_login:\$\{verify\}/);
   assert.match(source, /Commission Withdrawal Request/);
   assert.match(source, /BEGIN \$\{label\}/);
