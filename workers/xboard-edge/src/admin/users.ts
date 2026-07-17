@@ -84,19 +84,24 @@ export async function adminUserList<E extends UserEnv>(env: E, request: Request,
   for (const inviter of inviterRows.results || []) inviters.set(Number(inviter.id), { id: Number(inviter.id), email: String(inviter.email || "") });
   const plans = new Map((planRows.results || []).map((row: any) => [Number(row.id), { ...row, prices: deps.parseJsonObject(row.prices), tags: deps.parseJsonArray(row.tags) }]));
   const groups = new Map((groupRows.results || []).map((row: any) => [Number(row.id), row]));
-  const data = await Promise.all(userRows.map(async row => ({
-    ...deps.safeUser(row),
-    balance: Number(row.balance || 0) / 100,
-    commission_balance: Number(row.commission_balance || 0) / 100,
-    commission_type: Number(row.commission_type ?? 0),
-    total_used: Number(row.u || 0) + Number(row.d || 0),
-    used_traffic: Number(row.u || 0) + Number(row.d || 0),
-    subscribe_url: await deps.subscribeUrl(request, env, row.token),
-    plan: plans.get(Number(row.plan_id || 0)) || null,
-    group: groups.get(Number(row.group_id || 0)) || null,
-    invite_user: inviters.get(Number(row.invite_user_id || 0)) || null,
-    online_count: liveDevices === null ? Number(row.online_count || 0) : (liveDevices[String(row.id)]?.length || 0),
-    last_online_at: liveDevices?.[String(row.id)]?.length ? now() : row.last_online_at
-  })));
+  const observedAt = now();
+  const data = await Promise.all(userRows.map(async row => {
+    const liveCount = liveDevices?.[String(row.id)]?.length || 0;
+    const persistedCount = Number(row.last_online_at || 0) >= observedAt - 600 ? Number(row.online_count || 0) : 0;
+    return {
+      ...deps.safeUser(row),
+      balance: Number(row.balance || 0) / 100,
+      commission_balance: Number(row.commission_balance || 0) / 100,
+      commission_type: Number(row.commission_type ?? 0),
+      total_used: Number(row.u || 0) + Number(row.d || 0),
+      used_traffic: Number(row.u || 0) + Number(row.d || 0),
+      subscribe_url: await deps.subscribeUrl(request, env, row.token),
+      plan: plans.get(Number(row.plan_id || 0)) || null,
+      group: groups.get(Number(row.group_id || 0)) || null,
+      invite_user: inviters.get(Number(row.invite_user_id || 0)) || null,
+      online_count: Math.max(liveCount, persistedCount),
+      last_online_at: liveCount > 0 ? observedAt : row.last_online_at
+    };
+  }));
   return deps.paginated(data, Number(countResult?.count || 0), page, pageSize);
 }

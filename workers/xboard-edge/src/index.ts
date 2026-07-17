@@ -2792,8 +2792,8 @@ async function adminApi(request: Request, env: Env, path: string) {
         commission_month_payout: Number(commissions.commission_month_payout || 0),
         commission_last_month_payout: Number(commissions.commission_last_month_payout || 0),
         online_nodes: nodes.filter(node => Number((node as any).available_status) > 0).length,
-        online_devices: liveOnline?.devices ?? Number(users.online_devices || 0),
-        online_users: liveOnline?.users ?? Number(users.online_users || 0),
+        online_devices: Math.max(Number(users.online_devices || 0), Number(liveOnline?.devices || 0)),
+        online_users: Math.max(Number(users.online_users || 0), Number(liveOnline?.users || 0)),
         today_traffic: { upload: todayU, download: todayD, total: todayU + todayD },
         month_traffic: { upload: monthU, download: monthD, total: monthU + monthD },
         total_traffic: { upload: totalU, download: totalD, total: totalU + totalD }

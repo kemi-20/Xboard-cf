@@ -1147,7 +1147,7 @@ test("RX compatibility fixes preserve upstream CRUD, plans, Telegram and filters
   const wrangler = fs.readFileSync("wrangler.toml", "utf8");
   assert.match(source, /const validServerTypes = new Set/);
   assert.match(source, /type === "shadowsocks"\) return requiredString\("cipher"/);
-  assert.match(source, /liveDevices === null \? Number\(row\.online_count \|\| 0\)/);
+  assert.match(source, /online_count: Math\.max\(liveCount, persistedCount\)/);
   assert.match(source, /INSERT INTO v2_knowledge\(title,category,body,language,show/);
   assert.match(source, /route === "\/server\/route\/drop"/);
   assert.match(source, /DELETE FROM v2_server_route WHERE id = \?/);
@@ -1232,15 +1232,16 @@ test("GLM compatibility audit fixes preserve upstream mutations and envelopes", 
   assert.match(schema, /CREATE TABLE IF NOT EXISTS v2_stat_server[\s\S]*record_type TEXT NOT NULL DEFAULT 'd'/);
 });
 
-test("admin online state prefers StatusHub with a D1 fallback", () => {
+test("admin online state merges StatusHub with recent authoritative D1 state", () => {
   const source = edgeSource();
   assert.match(source, /statusHubRequest\(env, loadAuthHeaders, "devices\/list"/);
   assert.match(source, /connectionCounts\[userId\].*\+ online/);
   assert.match(source, /count - current\.length/);
-  assert.match(source, /liveDevices === null \? Number\(row\.online_count \|\| 0\)/);
-  assert.match(source, /last_online_at: liveDevices\?\.\[String\(row\.id\)\]\?\.length \? now\(\) : row\.last_online_at/);
-  assert.match(source, /onlineUsers: liveOnline\?\.users \?\?/);
-  assert.match(source, /online_devices: liveOnline\?\.devices \?\?/);
+  assert.match(source, /const persistedCount = Number\(row\.last_online_at \|\| 0\) >= observedAt - 600/);
+  assert.match(source, /online_count: Math\.max\(liveCount, persistedCount\)/);
+  assert.match(source, /last_online_at: liveCount > 0 \? observedAt : row\.last_online_at/);
+  assert.match(source, /onlineUsers: Math\.max\(Number\(users\.online_users/);
+  assert.match(source, /online_devices: Math\.max\(Number\(users\.online_devices/);
 });
 
 test("current audit findings preserve upstream admin, plan, reset and Telegram contracts", () => {
