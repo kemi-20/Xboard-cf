@@ -1404,8 +1404,8 @@ async function orderStats(env: Env, url: URL) {
 }
 
 async function trafficRank(env: Env, url: URL) {
-  const type = url.searchParams.get("type") || "user";
-  const start = Number(url.searchParams.get("start_time") || 0);
+  const type = String(url.searchParams.get("type"));
+  const start = Number(url.searchParams.get("start_time") || now() - 7 * 86400);
   const end = Number(url.searchParams.get("end_time") || now());
   const startBucket = Math.floor(start / 30);
   const endBucket = Math.floor(end / 30);
@@ -1433,9 +1433,7 @@ async function trafficRank(env: Env, url: URL) {
         const value = Number(row.value || 0); const previousValue = Number(row.previousValue || 0);
         return { id: String(row.id), name: row.name || `Node ${row.id}`, value, previousValue, change: calculateChange(value, previousValue), timestamp: new Date(end * 1000).toISOString() };
       });
-      if (ranked.length) return ranked;
-      const fallback = await env.XBOARD_DB.prepare("SELECT name, COALESCE(u, 0) + COALESCE(d, 0) AS value FROM v2_server ORDER BY value DESC, id ASC LIMIT 10").all<{ name: string; value: number }>();
-      return (fallback.results || []).map(row => ({ name: row.name || "Node", value: Number(row.value || 0), previousValue: 0, change: 0, timestamp: new Date(end * 1000).toISOString() }));
+      return ranked;
     } catch {
       return [];
     }
@@ -1458,9 +1456,7 @@ async function trafficRank(env: Env, url: URL) {
       const value = Number(row.value || 0); const previousValue = Number(row.previousValue || 0);
       return { id: String(row.id), name: row.name || `User ${row.id}`, value, previousValue, change: calculateChange(value, previousValue), timestamp: new Date(end * 1000).toISOString() };
     });
-    if (ranked.length) return ranked;
-    const fallback = await env.XBOARD_DB.prepare("SELECT email AS name, COALESCE(u, 0) + COALESCE(d, 0) AS value FROM v2_user ORDER BY value DESC, id ASC LIMIT 10").all<{ name: string; value: number }>();
-    return (fallback.results || []).map(row => ({ name: row.name || "User", value: Number(row.value || 0), previousValue: 0, change: 0, timestamp: new Date(end * 1000).toISOString() }));
+    return ranked;
   } catch {
     return [];
   }
@@ -3603,7 +3599,22 @@ async function adminApi(request: Request, env: Env, path: string) {
     const statUrl = new URL(request.url);
     return ok(await cachedData(`order-stats:${statUrl.searchParams.toString()}`, 60, () => orderStats(env, statUrl), 300));
   }
-  if (path.includes("/stat/getTrafficRank")) return json({ timestamp: new Date().toISOString(), data: await trafficRank(env, new URL(request.url)) });
+  if (path.includes("/stat/getTrafficRank")) {
+    const rankUrl = new URL(request.url);
+    const type = rankUrl.searchParams.get("type");
+    if (!type) return fail("type 字段是必须的", 422, 422);
+    if (type !== "node" && type !== "user") return fail("type 字段必须是 node 或 user", 422, 422);
+    for (const key of ["start_time", "end_time"] as const) {
+      const raw = rankUrl.searchParams.get(key);
+      if (raw === null || raw === "") continue;
+      if (!/^\d+$/.test(raw)) return fail(`${key} 必须是整数`, 422, 422);
+      const value = Number(raw);
+      if (!Number.isSafeInteger(value) || value < 1_000_000_000 || value > 9_999_999_999) {
+        return fail(`${key} 必须在 1000000000 到 9999999999 之间`, 422, 422);
+      }
+    }
+    return json({ timestamp: new Date().toISOString(), data: await trafficRank(env, rankUrl) });
+  }
   if (request.method === "GET" && (route === "/stat/getServerLastRank" || route === "/stat/getServerYesterdayRank")) {
     const start = route.endsWith("YesterdayRank") ? dayStart() - 86400 : 0;
     const end = route.endsWith("YesterdayRank") ? dayStart() : dayStart() + 172800;

@@ -530,10 +530,22 @@ test("traffic rankings use one period aggregation and a short non-KV cache", () 
   const source = fs.readFileSync("src/index.ts", "utf8");
   const rank = source.slice(source.indexOf("async function trafficRank"), source.indexOf("async function planById"));
   assert.match(rank, /cachedData\(`traffic-rank:/);
+  assert.match(rank, /now\(\) - 7 \* 86400/);
   assert.match(rank, /WITH traffic AS/);
   assert.match(rank, /SUM\(CASE WHEN record_at >= \?/);
   assert.doesNotMatch(rank, /SELECT SUM\(previous\.u \+ previous\.d\)/);
+  assert.doesNotMatch(rank, /FROM v2_server ORDER BY value/);
+  assert.doesNotMatch(rank, /FROM v2_user ORDER BY value/);
   assert.doesNotMatch(rank, /XBOARD_KV/);
+});
+
+test("traffic ranking validation matches the upstream required type and timestamp bounds", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const route = source.slice(source.indexOf('if (path.includes("/stat/getTrafficRank"))'), source.indexOf('if (request.method === "GET" && (route === "/stat/getServerLastRank"'));
+  assert.match(route, /if \(!type\) return fail\("type 字段是必须的", 422, 422\)/);
+  assert.match(route, /type !== "node" && type !== "user"/);
+  assert.match(route, /\["start_time", "end_time"\]/);
+  assert.match(route, /value < 1_000_000_000 \|\| value > 9_999_999_999/);
 });
 
 test("storage optimization removes write-heavy unused traffic indexes", () => {
