@@ -9,6 +9,15 @@ test("xboard-jobs has an entrypoint", () => {
   assert.match(fs.readFileSync("src/index.ts", "utf8"), /export default/);
 });
 
+test("Jobs and first-time deployment enable the Worker Cache API runtime", () => {
+  const wrangler = fs.readFileSync("wrangler.toml", "utf8");
+  const bootstrap = fs.readFileSync("../../scripts/prepare-cloudflare-ci.mjs", "utf8");
+  assert.match(wrangler, /\[cache\]\s+enabled = true/);
+  assert.doesNotMatch(bootstrap, /worker === "xboard-edge" \|\| worker === "xboard-server"/);
+  assert.match(bootstrap, /for \(const worker of \["xboard-edge", "xboard-server", "xboard-jobs"\]\)/);
+  assert.match(bootstrap, /\[cache\\\]\\s\*\$\/m/);
+});
+
 test("mail rendering preserves unknown placeholders and honors defaults", () => {
   assert.equal(__test.render("Hello {{known}} {{missing}}", { known: "XBoard" }), "Hello XBoard {{missing}}");
   assert.equal(__test.render("{{missing|fallback}}", {}), "fallback");
