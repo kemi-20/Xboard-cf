@@ -398,6 +398,59 @@ test("test mail returns the upstream mail log contract when the provider rejects
   }
 });
 
+test("template test mail forwards the selected template, subject and variables", async () => {
+  const originalFetch = globalThis.fetch;
+  let providerPayload = null;
+  const settings = [
+    { name: "email_driver", value: "brevo" },
+    { name: "email_password", value: "test-key" },
+    { name: "email_from_address", value: "sender@example.com" },
+    { name: "email_username", value: "XBoard" }
+  ];
+  const db = {
+    withSession() { return this; },
+    prepare(sql) {
+      let values = [];
+      return {
+        bind(...input) { values = input; return this; },
+        async all() { return { results: sql.includes("FROM v2_settings") ? settings : [] }; },
+        async first() {
+          if (sql.includes("FROM v2_mail_templates")) return { subject: "{{name}} verification", content: "Code: {{code}}" };
+          return null;
+        },
+        async run() { return { success: true, meta: { changes: 1 }, values }; }
+      };
+    },
+    async batch(batch) { return Promise.all(batch.map(statement => statement.run())); }
+  };
+  globalThis.fetch = async (_input, init) => {
+    providerPayload = JSON.parse(String(init.body));
+    return new Response(JSON.stringify({ messageId: "ok" }), { status: 201 });
+  };
+  try {
+    const response = await jobsWorker.fetch(new Request("https://jobs.internal/internal/mail/test", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-xboard-internal-token": "internal-secret" },
+      body: JSON.stringify({
+        email: "admin@example.com",
+        template_name: "verify",
+        subject: "XBoard - 验证码测试",
+        vars: { name: "Power Chain", code: "123456" },
+        content_mode: "text"
+      })
+    }), { XBOARD_DB: db, INTERNAL_SYNC_TOKEN: "internal-secret" });
+    assert.equal(response.status, 200);
+    const payload = await response.json();
+    assert.equal(payload.data.subject, "XBoard - 验证码测试");
+    assert.equal(payload.data.template_name, "db:verify");
+    assert.equal(payload.data.error, null);
+    assert.equal(providerPayload.subject, "Power Chain verification");
+    assert.match(providerPayload.html, /Code: 123456/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("online cleanup failures are visible without writing a database job log", async () => {
   const originalWarn = console.warn;
   const warnings = [];

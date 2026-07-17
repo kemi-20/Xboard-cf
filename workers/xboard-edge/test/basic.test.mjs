@@ -1043,6 +1043,7 @@ test("audited admin and user mutations reject stale or partial operations", () =
 
 test("statistics and mail templates preserve the upstream contracts", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
+  const jobsClient = fs.readFileSync("src/internal/jobs-client.ts", "utf8");
   assert.match(source, /route\.endsWith\("YesterdayRank"\) \? dayStart\(\) - 86400 : 0/);
   assert.match(source, /server_name: row\.server_name, server_id: Number\(row\.server_id\), server_type: row\.server_type/);
   assert.doesNotMatch(source, /analyticsData|ANALYTICS_API_TOKEN|XBOARD_ANALYTICS/);
@@ -1053,6 +1054,19 @@ test("statistics and mail templates preserve the upstream contracts", () => {
   assert.match(source, /remindExpire:/);
   assert.match(source, /remindTraffic:/);
   assert.match(source, /missing = mailTemplateMeta\[name\]\.required_vars/);
+  assert.match(source, /const result = await sendTestMail\(env, email, \{ templateName: name, subject: subjects\[name\], vars, contentMode: "text" \}\)/);
+  assert.match(source, /return result\.error \? fail\(`发送失败: \$\{result\.error\}`/);
+  assert.match(jobsClient, /template_name: options\.templateName/);
+});
+
+test("system settings skip subscription template reads unless that section is requested", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const start = source.indexOf("async function adminConfig");
+  const end = source.indexOf("function parseJsonArray", start);
+  const adminConfig = source.slice(start, end);
+  assert.match(adminConfig, /const needsTemplates = !key \|\| key === "subscribe_template"/);
+  assert.match(adminConfig, /Promise\.all\(\[settings\(env\.XBOARD_DB, env\.XBOARD_KV\), subscribeTemplateMap\(env\)\]\)/);
+  assert.match(adminConfig, /: \[await settings\(env\.XBOARD_DB, env\.XBOARD_KV\), \{\} as Record<string, string>\]/);
 });
 
 test("RX compatibility fixes preserve upstream CRUD, plans, Telegram and filters", () => {

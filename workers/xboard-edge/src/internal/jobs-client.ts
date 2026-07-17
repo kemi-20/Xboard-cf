@@ -18,11 +18,24 @@ export type TestMailResult = {
   };
 };
 
-export async function sendTestMail(env: JobsClientEnv, email: string): Promise<TestMailResult> {
+export type TestMailOptions = {
+  templateName?: string;
+  subject?: string;
+  vars?: Record<string, unknown>;
+  contentMode?: "text" | "html";
+};
+
+export async function sendTestMail(env: JobsClientEnv, email: string, options: TestMailOptions = {}): Promise<TestMailResult> {
   const response = await env.XBOARD_JOBS.fetch("https://xboard-jobs.internal/internal/mail/test", {
     method: "POST",
     headers: { "content-type": "application/json", ...await internalAuthHeaders(env) },
-    body: JSON.stringify({ email })
+    body: JSON.stringify({
+      email,
+      ...(options.templateName ? { template_name: options.templateName } : {}),
+      ...(options.subject ? { subject: options.subject } : {}),
+      ...(options.vars ? { vars: options.vars } : {}),
+      ...(options.contentMode ? { content_mode: options.contentMode } : {})
+    })
   });
   const payload = await response.json().catch(() => ({})) as { data?: TestMailResult; message?: string };
   if (!response.ok || !payload.data) throw new Error(payload.message || `Test mail failed (${response.status})`);

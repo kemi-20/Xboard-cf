@@ -548,20 +548,31 @@ export default {
       }
       let email = "";
       try {
-        const input = await request.json() as { email?: unknown };
+        const input = await request.json() as {
+          email?: unknown;
+          template_name?: unknown;
+          subject?: unknown;
+          vars?: unknown;
+          content_mode?: unknown;
+        };
         email = String(input.email || "").trim();
         if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
           return new Response(JSON.stringify({ message: "Email format is incorrect" }), { status: 422, headers: { "content-type": "application/json" } });
         }
+        const templateName = String(input.template_name || "notify").trim() || "notify";
+        const subject = String(input.subject || "This is xboard test email");
+        const vars = input.vars && typeof input.vars === "object" && !Array.isArray(input.vars)
+          ? input.vars as Record<string, unknown>
+          : { name: await setting(env, "app_name") || "XBoard", content: "This is xboard test email", url: await setting(env, "app_url") || "" };
         const result = await mail(env, {
           event_id: `mail:test:${crypto.randomUUID()}`,
           type: "mail",
           payload: {
             to: email,
-            template_name: "notify",
-            subject: "This is xboard test email",
-            vars: { name: await setting(env, "app_name") || "XBoard", content: "This is xboard test email", url: await setting(env, "app_url") || "" },
-            content_mode: "text",
+            template_name: templateName,
+            subject,
+            vars,
+            content_mode: input.content_mode === "html" ? "html" : "text",
             capture_error: true
           }
         }, false);

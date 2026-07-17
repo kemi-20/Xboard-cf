@@ -549,8 +549,11 @@ function firstNonEmpty(...values: unknown[]) {
 }
 
 async function adminConfig(env: Env, request: Request) {
-  const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
-  const templates = await subscribeTemplateMap(env);
+  const key = new URL(request.url).searchParams.get("key");
+  const needsTemplates = !key || key === "subscribe_template";
+  const [all, templates] = needsTemplates
+    ? await Promise.all([settings(env.XBOARD_DB, env.XBOARD_KV), subscribeTemplateMap(env)])
+    : [await settings(env.XBOARD_DB, env.XBOARD_KV), {} as Record<string, string>];
   const config: Record<string, any> = {
     invite: {
       invite_force: !!pickSetting(all, "invite_force", 0),
@@ -664,7 +667,6 @@ async function adminConfig(env: Env, request: Request) {
       subscribe_template_surfboard: templates.surfboard || defaultSubscribeTemplates.surfboard
     }
   };
-  const key = new URL(request.url).searchParams.get("key");
   return key && config[key] ? { [key]: config[key] } : config;
 }
 
@@ -2905,10 +2907,30 @@ async function adminApi(request: Request, env: Env, path: string) {
     const name = canonicalMailTemplateName(String(input.name || ""));
     if (!mailTemplateMeta[name]) return fail("模板不存在", 404, 404);
     const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
+    const appName = String(pickSetting(all, "app_name", "XBoard"));
     const appUrl = String(pickSetting(all, "app_url", "https://example.com"));
-    const vars = { name: pickSetting(all, "app_name", "XBoard"), code: "123456", content: "This is xboard test email", link: `${appUrl.replace(/\/$/, "")}/login?token=test-token`, url: appUrl };
-    await queueTemplateMail(env, name, String(input.email || (admin as any).email), vars, `XBoard ${mailTemplateMeta[name].label}测试`);
-    return ok(true);
+    const email = String(input.email || (admin as any).email || "").trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return fail("Email format is incorrect", 422, 422);
+    const vars = {
+      name: appName,
+      code: "123456",
+      content: "这是一封测试通知邮件。",
+      link: `${appUrl.replace(/\/$/, "")}/login?token=test-token`,
+      url: appUrl
+    };
+    const subjects: Record<string, string> = {
+      verify: `${appName} - 验证码测试`,
+      notify: `${appName} - 通知测试`,
+      remindExpire: `${appName} - 到期提醒测试`,
+      remindTraffic: `${appName} - 流量提醒测试`,
+      mailLogin: `${appName} - 登录链接测试`
+    };
+    try {
+      const result = await sendTestMail(env, email, { templateName: name, subject: subjects[name], vars, contentMode: "text" });
+      return result.error ? fail(`发送失败: ${result.error}`, 500, 500) : ok(true);
+    } catch (error) {
+      return fail(`发送失败: ${String((error as Error)?.message || error)}`, 500, 500);
+    }
   }
   if (path.includes("/system/getSystemStatus")) {
     const lastRun = await optionalKvGet(env, "schedule:last_check_at");
