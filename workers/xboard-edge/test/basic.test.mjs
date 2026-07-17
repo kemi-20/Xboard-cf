@@ -1059,19 +1059,24 @@ test("statistics and mail templates preserve the upstream contracts", () => {
   assert.match(jobsClient, /template_name: options\.templateName/);
 });
 
-test("email settings cannot be autofilled and saved before their server values load", () => {
+test("system settings stay locked until their server values load", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
-  const guard = fs.readFileSync("public/assets/email-settings-guard.js", "utf8");
-  assert.match(source, /<script src="\/assets\/email-settings-guard\.js"><\/script>/);
-  assert.ok(source.indexOf("email-settings-guard.js") < source.indexOf("index-CF20260713.js"));
+  const guard = fs.readFileSync("public/assets/settings-load-guard.js", "utf8");
+  assert.match(source, /<script src="\/assets\/settings-load-guard\.js"><\/script>/);
+  assert.ok(source.indexOf("settings-load-guard.js") < source.indexOf("index-CF20260713.js"));
+  for (const key of ["site", "safe", "subscribe", "invite", "server", "email", "telegram", "app", "subscribe_template"]) {
+    assert.match(guard, new RegExp(`"${key}"`));
+  }
+  assert.match(guard, /readyKeys\.has\(key\)/);
+  assert.match(guard, /blockPrematureChange/);
+  assert.match(guard, /stopImmediatePropagation/);
+  assert.match(guard, /control\.readOnly = true/);
+  assert.match(guard, /配置加载完成后才可修改/);
   assert.match(guard, /email_username/);
   assert.match(guard, /email_password/);
   assert.match(guard, /email_from_address/);
-  assert.match(guard, /input\.readOnly = true/);
   assert.match(guard, /section-xboard-mail new-password/);
-  assert.match(guard, /xboardEmailGuard/);
-  assert.match(guard, /\/config\/fetch\?key=email/);
-  assert.match(guard, /settingsReady = true/);
+  assert.match(guard, /xboardRequiresUserUnlock/);
 });
 
 test("system settings skip subscription template reads unless that section is requested", () => {

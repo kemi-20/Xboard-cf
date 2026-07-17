@@ -3729,7 +3729,7 @@ async function adminUi(securePath: string) {
     <script src="/locales/en-US.js"></script>
     <script src="/locales/zh-CN.js"></script>
     <script src="/locales/ru-RU.js"></script>
-    <script src="/assets/email-settings-guard.js"></script>
+    <script src="/assets/settings-load-guard.js"></script>
     <script type="module" crossorigin src="/assets/index-CF20260713.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-DiYa-_z_.css">
     <link rel="stylesheet" href="/assets/mobile-node-dialog-fix.css">
