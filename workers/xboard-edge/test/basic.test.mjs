@@ -103,8 +103,10 @@ test("admin shell references the current bundle without caching", () => {
   assert.match(source, /subscribeTemplateLink\?\.closest\("li"\) \|\| subscribeTemplateLink/);
   assert.match(source, /sourceItem\.insertAdjacentElement\("afterend", item\)/);
   assert.match(source, /nav\?\.querySelector\("#xboard-migration-menu"\)/);
-  assert.doesNotMatch(source, /link\.innerHTML = '<div class="mr-2">/);
-  assert.match(source, /if \(link && link\.textContent !== label\.text\) link\.textContent = label\.text/);
+  assert.match(source, /link\.innerHTML = '<div class="mr-2">/);
+  assert.match(source, /if \(text && text\.textContent !== label\.text\) text\.textContent = label\.text/);
+  assert.match(source, /M20 17v6/);
+  assert.match(source, /M17 20l3 3l3 -3/);
   assert.match(source, /localStorage\.getItem\("i18nextLng"\)/);
   assert.match(source, /"en-US": \{ text: "Data Migration"/);
   assert.match(source, /"ru-RU": \{ text: "Миграция данных"/);
