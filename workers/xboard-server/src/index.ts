@@ -328,7 +328,7 @@ async function refreshOnlineUsers(env: Env, counts: Record<string, number>, time
       SET online_count = CASE WHEN COALESCE(online_count, 0) > ? THEN online_count ELSE ? END,
           last_online_at = ?
       WHERE id = ? AND (COALESCE(online_count, 0) < ? OR COALESCE(last_online_at, 0) < ?)`)
-      .bind(count, count, timestamp, Number(userId), count, timestamp - 480)
+      .bind(count, count, timestamp, Number(userId), count, timestamp - 240)
   );
   if (statements.length) await env.XBOARD_DB.batch(statements);
 }

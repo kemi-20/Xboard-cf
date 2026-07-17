@@ -342,6 +342,8 @@ test("HTTP reports retain per-user online connections and clear empty snapshots"
   assert.match(source, /runtime\.connections = onlineCounts/);
   assert.match(source, /await refreshOnlineUsers\(env, onlineCounts, reportedAt\)/);
   assert.match(source, /COALESCE\(last_online_at, 0\) < \?/);
+  assert.match(source, /\.bind\(count, count, timestamp, Number\(userId\), count, timestamp - 240\)/);
+  assert.doesNotMatch(source, /timestamp - 480/);
   assert.deepEqual(normalizeOnlineCounts({ "1": 2, "2": "3", "3": 0, bad: 4, "-1": 5 }), { "1": 2, "2": 3 });
 });
 
