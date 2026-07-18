@@ -47,6 +47,16 @@ import {
 } from "./admin/servers";
 import { handleUserTickets } from "./user/tickets";
 import { handleUserOrders } from "./user/orders";
+import { handleAdminCoupon, normalizeCouponPeriods, normalizeCouponResource } from "./admin/coupons";
+import {
+  adminMailTemplateGet,
+  adminMailTemplateList,
+  canonicalMailTemplateName,
+  legacyMailTemplateName,
+  mailTemplateMeta,
+  queueTemplateMail,
+  renderMailText
+} from "./admin/mail-templates";
 import { internalAuthHeaders, invalidateInternalTokenCache } from "./internal/auth";
 import { sendTestMail } from "./internal/jobs-client";
 import { invalidateServerSettings, nodeSyncIntent, notifyNodeSync } from "./internal/sync-client";
@@ -1535,75 +1545,6 @@ async function audit(env: Env, adminId: number, request: Request, path: string) 
   }
 }
 
-const mailTemplateMeta: Record<string, { label: string; required_vars: string[]; optional_vars: string[] }> = {
-  verify: { label: "邮箱验证码", required_vars: ["code"], optional_vars: ["name", "url"] },
-  mailLogin: { label: "邮件快捷登录", required_vars: ["link"], optional_vars: ["name", "url"] },
-  notify: { label: "站点通知", required_vars: ["content"], optional_vars: ["name", "url"] },
-  remindExpire: { label: "服务到期提醒", required_vars: [], optional_vars: ["name", "url"] },
-  remindTraffic: { label: "流量使用提醒", required_vars: [], optional_vars: ["name", "url"] }
-};
-
-const mailTemplateDefaults: Record<string, { subject: string; content: string }> = {
-  verify: { subject: "{{name}} - 邮箱验证码", content: "您的验证码是：{{code}}。返回 {{url}}" },
-  mailLogin: { subject: "登录到 {{name}}", content: "请使用以下链接登录：{{link}}\n\n{{url}}" },
-  notify: { subject: "{{name}} - 站点通知", content: "{{content}}\n\n{{url}}" },
-  remindExpire: { subject: "{{name}} - 服务即将到期", content: "您的服务即将到期，请及时续费。{{url}}" },
-  remindTraffic: { subject: "{{name}} - 流量使用提醒", content: "您的流量使用量已接近上限。{{url}}" }
-};
-
-function canonicalMailTemplateName(name: string) {
-  return name === "remind_expire" ? "remindExpire" : name === "remind_traffic" ? "remindTraffic" : name;
-}
-
-function legacyMailTemplateName(name: string) {
-  return name === "remindExpire" ? "remind_expire" : name === "remindTraffic" ? "remind_traffic" : name;
-}
-
-async function adminMailTemplateList(env: Env) {
-  const result = await env.XBOARD_DB.prepare("SELECT name, subject, updated_at FROM v2_mail_templates").all<Record<string, any>>();
-  const templates = new Map((result.results || []).map(row => [canonicalMailTemplateName(String(row.name)), row]));
-  return Object.entries(mailTemplateMeta).map(([name, meta]) => ({
-    name,
-    label: meta.label,
-    customized: templates.has(name),
-    subject: templates.get(name)?.subject || null,
-    updated_at: templates.get(name)?.updated_at || null
-  }));
-}
-
-async function adminMailTemplateGet(env: Env, name: string) {
-  name = canonicalMailTemplateName(name);
-  const meta = mailTemplateMeta[name];
-  if (!meta) return null;
-  const row = await env.XBOARD_DB.prepare("SELECT name, subject, content FROM v2_mail_templates WHERE name IN (?, ?) ORDER BY CASE WHEN name = ? THEN 0 ELSE 1 END LIMIT 1")
-    .bind(name, legacyMailTemplateName(name), name).first<Record<string, any>>();
-  return {
-    name,
-    label: meta.label,
-    required_vars: meta.required_vars,
-    optional_vars: meta.optional_vars,
-    customized: Boolean(row),
-    subject: row?.subject || mailTemplateDefaults[name].subject,
-    content: row?.content || mailTemplateDefaults[name].content
-  };
-}
-
-function renderMailText(source: string, vars: Record<string, unknown>) {
-  return source.replace(/\{\{\s*([^}]+?)\s*\}\}/g, (_match, key: string) => String(vars[key] ?? ""));
-}
-
-async function queueTemplateMail(env: Env, name: string, email: string, vars: Record<string, unknown>, subjectOverride?: string) {
-  const template = await adminMailTemplateGet(env, name);
-  if (!template) throw new Error("模板不存在");
-  const eventId = `mail:${crypto.randomUUID()}`;
-  await env.NOTIFICATION_EVENTS.send({
-    event_id: eventId,
-    type: "mail",
-    payload: { to: email, subject: subjectOverride || template.subject, template_name: canonicalMailTemplateName(name), vars, content_mode: "text" }
-  });
-  return eventId;
-}
-
 async function queueTelegram(env: Env, text: string, chatId?: string | number) {
   const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
   if (!Number(pickSetting(all, "telegram_bot_enable", 0)) || !String(pickSetting(all, "telegram_bot_token", ""))) return null;
@@ -2037,110 +1978,6 @@ async function adminTicket(request: Request, env: Env, route: string, adminId: n
   return null;
 }
 
-function couponValue(input: Record<string, any>, key: string) {
-  return ["limit_plan_ids", "limit_period"].includes(key) ? JSON.stringify(parseJsonArray(input[key])) : input[key];
-}
-
-function canonicalCouponPeriods(value: unknown) {
-  return parseJsonArray(value).map(item => {
-    const period = String(item || "");
-    return orderPeriods[period] || period;
-  });
-}
-
-function couponResource(row: Record<string, any>) {
-  const planIds = parseJsonArray(row.limit_plan_ids).map(String);
-  const periods = canonicalCouponPeriods(row.limit_period).map(legacyOrderPeriod);
-  return {
-    ...row,
-    limit_plan_ids: planIds.length ? planIds : null,
-    limit_period: periods.length ? periods : null
-  };
-}
-
-async function adminCoupon(request: Request, env: Env, route: string): Promise<Response | null> {
-  if (!route.startsWith("/coupon/")) return null;
-  const input = request.method === "POST" ? await body<Record<string, any>>(request.clone()) : {};
-  if (route === "/coupon/fetch") {
-    const url = new URL(request.url); const current = Math.max(1, Number(input.current || url.searchParams.get("current") || 1));
-    const pageSize = Math.min(100, Math.max(1, Number(input.pageSize || url.searchParams.get("pageSize") || 10)));
-    const couponFields = new Set(["id", "code", "name", "type", "value", "show", "limit_use", "limit_use_with_user", "started_at", "ended_at", "created_at", "updated_at"]);
-    const clauses: string[] = []; const binds: any[] = [];
-    for (const filter of parseJsonArray(input.filter)) {
-      const field = String(filter?.id || ""); const value = filter?.value;
-      if (!couponFields.has(field) || value === undefined || value === null || value === "") continue;
-      if (Array.isArray(value) && value.length) { clauses.push(`${field} IN (${value.map(() => "?").join(",")})`); binds.push(...value); }
-      else { clauses.push(`${field} LIKE ?`); binds.push(`%${String(value)}%`); }
-    }
-    const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
-    const sort = parseJsonArray(input.sort).map(item => ({ field: String(item?.id || ""), direction: item?.desc ? "DESC" : "ASC" })).filter(item => couponFields.has(item.field));
-    const order = [...sort.map(item => `${item.field} ${item.direction}`), "created_at DESC"].join(", ");
-    const [result, totalResult] = await env.XBOARD_DB.batch<Record<string, any>>([
-      env.XBOARD_DB.prepare(`SELECT * FROM v2_coupon${where} ORDER BY ${order} LIMIT ? OFFSET ?`).bind(...binds, pageSize, (current - 1) * pageSize),
-      env.XBOARD_DB.prepare(`SELECT COUNT(*) AS count FROM v2_coupon${where}`).bind(...binds)
-    ]);
-    const total = Number((totalResult.results?.[0] as any)?.count || 0);
-    return json(paginated((result.results || []).map(row => ({
-        ...row,
-        type: Math.trunc(Number.parseFloat(String(row.type ?? 0))),
-        value: Number(row.value ?? 0),
-        show: !!row.show,
-        limit_plan_ids: parseJsonArray(row.limit_plan_ids),
-        limit_period: canonicalCouponPeriods(row.limit_period)
-      })), total, current, pageSize));
-  }
-  const id = nullableNumber(input.id);
-  if (route === "/coupon/generate") {
-    const required = ["name", "type", "value", "started_at", "ended_at"];
-    if (required.some(key => input[key] === undefined || input[key] === "")) return fail("优惠券参数不完整", 422, 422);
-    const couponType = Math.trunc(Number.parseFloat(String(input.type ?? "")));
-    if (![1, 2].includes(couponType)) return fail("类型格式有误", 422, 422);
-    const existing = id ? await env.XBOARD_DB.prepare("SELECT id, code, show FROM v2_coupon WHERE id = ?").bind(id).first<Record<string, any>>() : null;
-    if (id && !existing) return fail("优惠券不存在", 500, 500);
-    const count = id ? 1 : Math.min(500, Math.max(1, Number(input.generate_count || 1))); const ts = now();
-    const generatedCoupons: Array<Record<string, any>> = [];
-    const statements = Array.from({ length: count }, (_, index) => {
-      const code = count === 1 && input.code ? String(input.code) : id ? String(existing?.code || "") : randomString(8);
-      const values = [code, String(input.name), couponType, Number(input.value), boolNumber(input.show, id ? Number(existing?.show || 0) : 0), nullableNumber(input.limit_use), nullableNumber(input.limit_use_with_user), couponValue(input, "limit_plan_ids"), couponValue(input, "limit_period"), Number(input.started_at), Number(input.ended_at), ts, ts];
-      generatedCoupons.push({ ...input, code, type: couponType, created_at: ts });
-      if (id && index === 0) return env.XBOARD_DB.prepare("UPDATE v2_coupon SET code=?, name=?, type=?, value=?, show=?, limit_use=?, limit_use_with_user=?, limit_plan_ids=?, limit_period=?, started_at=?, ended_at=?, updated_at=? WHERE id=?").bind(...values.slice(0, 11), ts, id);
-      return env.XBOARD_DB.prepare("INSERT INTO v2_coupon(code,name,type,value,show,limit_use,limit_use_with_user,limit_plan_ids,limit_period,started_at,ended_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(...values);
-    });
-    try { await env.XBOARD_DB.batch(statements); } catch { return fail("优惠券代码已存在或参数无效", 400, 400); }
-    if (!id && input.generate_count) {
-      const csvValue = (value: unknown) => `"${String(value ?? "").replaceAll('"', '""')}"`;
-      const lines = ["名称,类型,金额或比例,开始时间,结束时间,可用次数,可用于订阅,券码,生成时间"];
-      for (const coupon of generatedCoupons) {
-        lines.push([
-          coupon.name,
-          coupon.type === 1 ? "金额" : "比例",
-          coupon.type === 1 ? Number(coupon.value || 0) / 100 : Number(coupon.value || 0),
-          edgeShanghaiDateTime(coupon.started_at),
-          edgeShanghaiDateTime(coupon.ended_at),
-          coupon.limit_use ?? "不限制",
-          parseJsonArray(coupon.limit_plan_ids).join("/") || "不限制",
-          coupon.code,
-          edgeShanghaiDateTime(coupon.created_at)
-        ].map(csvValue).join(","));
-      }
-      return new Response(`${lines.join("\r\n")}\r\n`, {
-        headers: {
-          "content-type": "text/csv; charset=utf-8",
-          "content-disposition": `attachment; filename="coupons-${ts}.csv"`
-        }
-      });
-    }
-    return ok(true);
-  }
-  if (!id) return fail("优惠券ID不能为空", 422, 422);
-  const exists = await env.XBOARD_DB.prepare("SELECT id, show FROM v2_coupon WHERE id = ?").bind(id).first<Record<string, any>>();
-  if (!exists) return fail("优惠券不存在", 400, 400202);
-  if (route === "/coupon/drop") { await env.XBOARD_DB.prepare("DELETE FROM v2_coupon WHERE id = ?").bind(id).run(); return ok(true); }
-  if (route === "/coupon/show") { await env.XBOARD_DB.prepare("UPDATE v2_coupon SET show = ?, updated_at = ? WHERE id = ?").bind(Number(exists.show) ? 0 : 1, now(), id).run(); return ok(true); }
-  if (route === "/coupon/update") { await env.XBOARD_DB.prepare("UPDATE v2_coupon SET show = ?, updated_at = ? WHERE id = ?").bind(boolNumber(input.show, Number(exists.show)), now(), id).run(); return ok(true); }
-  return null;
-}
-
 async function themeApi(request: Request, env: Env, route: string): Promise<Response | null> {
   if (!route.startsWith("/theme/")) return null;
   const all = await settings(env.XBOARD_DB, env.XBOARD_KV); const input = request.method === "POST" ? await body<Record<string, any>>(request.clone()) : {};
@@ -2201,6 +2038,18 @@ function normalizeOrderPeriod(period: unknown) {
 function legacyOrderPeriod(period: unknown) {
   const value = String(period || "");
   return legacyOrderPeriods[value] || value;
+}
+
+function canonicalCouponPeriods(value: unknown) {
+  return normalizeCouponPeriods(value, { parseJsonArray, canonicalPeriod: period => orderPeriods[period] || period });
+}
+
+function couponResource(row: Record<string, any>) {
+  return normalizeCouponResource(row, {
+    parseJsonArray,
+    canonicalPeriod: period => orderPeriods[period] || period,
+    legacyPeriod: legacyOrderPeriod
+  });
 }
 
 async function orderRows(env: Env, input: Record<string, any>) {
@@ -2674,7 +2523,14 @@ async function adminApi(request: Request, env: Env, path: string) {
   if (giftCardResponse) return giftCardResponse;
   const ticketResponse = await adminTicket(request.clone(), env, route, Number((admin as any).id || 0));
   if (ticketResponse) return ticketResponse;
-  const couponResponse = await adminCoupon(request.clone(), env, route);
+  const couponResponse = await handleAdminCoupon(request.clone(), env, route, {
+    parseJsonArray,
+    paginated,
+    nullableNumber,
+    boolNumber,
+    canonicalPeriod: period => orderPeriods[period] || period,
+    formatDateTime: edgeShanghaiDateTime
+  });
   if (couponResponse) return couponResponse;
   const themeResponse = await themeApi(request.clone(), env, route);
   if (themeResponse) return themeResponse;

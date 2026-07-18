@@ -397,6 +397,35 @@ test("machine V2 authentication rejects node zero before node lookup", () => {
   assert.match(source, /validationFailure\("node_id", "The node id must be at least 1\."\)/);
 });
 
+test("node and machine polling reuse a short bounded authentication cache", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const cache = fs.readFileSync("src/auth-cache.ts", "utf8");
+  assert.match(cache, /AUTH_CACHE_TTL_MS = 20_000/);
+  assert.match(cache, /AUTH_CACHE_MAX_ENTRIES = 512/);
+  assert.match(cache, /const authLoads = new Map/);
+  assert.match(cache, /if \(value !== null\)/);
+  assert.match(source, /cachedAuthRow\(`node:/);
+  assert.match(source, /cachedAuthRow\(`machine:/);
+  assert.match(source, /cachedAuthRow\(`machine-node:/);
+  assert.match(source, /url\.pathname === "\/internal\/sync"[\s\S]{0,220}invalidateAuthCache\(\)/);
+  assert.match(source, /invalidateInternalTokenCache\(\);\s*invalidateAuthCache\(\)/);
+});
+
+test("authentication cache coalesces hits, skips misses and supports immediate invalidation", async () => {
+  const { cachedAuthRow, invalidateAuthCache } = await import(`../src/auth-cache.ts?test=${Date.now()}`);
+  let loads = 0;
+  const loader = async () => { loads += 1; return { id: 7 }; };
+  assert.deepEqual(await cachedAuthRow("node:7", loader), { id: 7 });
+  assert.deepEqual(await cachedAuthRow("node:7", loader), { id: 7 });
+  assert.equal(loads, 1);
+  invalidateAuthCache();
+  await cachedAuthRow("node:7", loader);
+  assert.equal(loads, 2);
+  await cachedAuthRow("missing", async () => { loads += 1; return null; });
+  await cachedAuthRow("missing", async () => { loads += 1; return null; });
+  assert.equal(loads, 4);
+});
+
 test("V2 handshake checks the websocket runtime and Tidalab forces its node type", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /async function websocketRuntimeAvailable/);

@@ -11,6 +11,8 @@ const edgeSource = () => [
   "src/admin/servers.ts",
   "src/admin/plans.ts",
   "src/admin/statistics.ts",
+  "src/admin/coupons.ts",
+  "src/admin/mail-templates.ts",
   "src/internal/auth.ts",
   "src/internal/jobs-client.ts",
   "src/internal/sync-client.ts",
@@ -365,6 +367,28 @@ test("Redis migration snapshots and writes each batch without per-key D1 queries
   assert.match(section, /XBOARD_DB\.batch\(missing\.map/);
   assert.match(section, /Promise\.all\(\[\.\.\.finalValues\]/);
   assert.doesNotMatch(section, /WHERE run_id = \? AND key_name = \?"/);
+});
+
+test("SQLite migration uses batch change metadata instead of recounting a table after every batch", () => {
+  const source = fs.readFileSync("src/migration.ts", "utf8");
+  const section = source.slice(source.indexOf("async function importBatch"), source.indexOf("class PhpValueParser"));
+  assert.match(section, /previous\.target_count === undefined/);
+  assert.match(section, /result\.meta as any\)\?\.changes/);
+  assert.match(section, /const after = baseline \+ inserted/);
+  assert.equal((section.match(/tableCount\(env\.XBOARD_DB, table\)/g) || []).length, 1);
+  assert.match(source, /async function saveMigrationProgress/);
+});
+
+test("large Edge route families live in dedicated coupon and mail-template modules", () => {
+  const index = fs.readFileSync("src/index.ts", "utf8");
+  const coupons = fs.readFileSync("src/admin/coupons.ts", "utf8");
+  const mail = fs.readFileSync("src/admin/mail-templates.ts", "utf8");
+  assert.match(index, /from "\.\/admin\/coupons"/);
+  assert.match(index, /from "\.\/admin\/mail-templates"/);
+  assert.match(coupons, /export async function handleAdminCoupon/);
+  assert.match(mail, /export async function queueTemplateMail/);
+  assert.doesNotMatch(index, /async function adminCoupon/);
+  assert.doesNotMatch(index, /const mailTemplateDefaults/);
 });
 
 test("unused Worker-local KV helpers stay deleted", () => {
@@ -1011,9 +1035,9 @@ test("Telegram webhook setup and join requests use the official Bot API", () => 
 });
 
 test("non-payment compatibility endpoints no longer return fake success", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   assert.match(source, /async function adminTicket/);
-  assert.match(source, /async function adminCoupon/);
+  assert.match(source, /async function handleAdminCoupon/);
   assert.match(source, /async function themeApi/);
   assert.match(source, /async function pluginApi/);
   assert.doesNotMatch(source, /compatible placeholder/);
@@ -1118,7 +1142,7 @@ test("audited admin and user mutations reject stale or partial operations", () =
 });
 
 test("statistics and mail templates preserve the upstream contracts", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   const jobsClient = fs.readFileSync("src/internal/jobs-client.ts", "utf8");
   assert.match(source, /route\.endsWith\("YesterdayRank"\) \? dayStart\(\) - 86400 : 0/);
   assert.match(source, /server_name: row\.server_name, server_id: Number\(row\.server_id\), server_type: row\.server_type/);
@@ -1136,7 +1160,7 @@ test("statistics and mail templates preserve the upstream contracts", () => {
 });
 
 test("read-only list metadata and migration validation stay batched", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   const orders = fs.readFileSync("src/user/orders.ts", "utf8");
   const migration = fs.readFileSync("src/migration.ts", "utf8");
   const subscriptionDb = fs.readFileSync("src/subscription/db.ts", "utf8");
@@ -1252,9 +1276,9 @@ test("admin ticket, coupon and audit handlers preserve upstream behavior", () =>
   assert.match(source, /parseJsonArray\(input\.reply_status\)/);
   assert.match(source, /const ticketFields:/);
   assert.match(source, /const couponFields = new Set/);
-  assert.match(source, /return json\(paginated\(\(result\.results \|\| \[\]\)\.map/);
+  assert.match(source, /return json\(deps\.paginated\(\(result\.results \|\| \[\]\)\.map/);
   assert.match(source, /function canonicalCouponPeriods/);
-  assert.match(source, /limit_period: canonicalCouponPeriods\(row\.limit_period\)/);
+  assert.match(source, /limit_period: normalizeCouponPeriods\(row\.limit_period, deps\)/);
   assert.match(source, /const limitedPeriods = (?:deps\.)?canonicalCouponPeriods\(coupon\.limit_period\)/);
   assert.equal((source.match(/const limitedPeriods = (?:deps\.)?canonicalCouponPeriods\(coupon\.limit_period\)/g) || []).length, 2);
   assert.match(source, /return ok\(couponResource\(coupon\)\)/);
@@ -1306,7 +1330,7 @@ test("admin online state merges StatusHub with recent authoritative D1 state", (
 });
 
 test("current audit findings preserve upstream admin, plan, reset and Telegram contracts", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   assert.match(source, /const auditRequest = request\.method === "POST" \? request\.clone\(\) : request/);
   assert.match(source, /await audit\(env,[\s\S]*auditRequest, path\)/);
   assert.match(source, /SELECT id, code, show FROM v2_coupon/);
@@ -1327,11 +1351,11 @@ test("current audit findings preserve upstream admin, plan, reset and Telegram c
 });
 
 test("Telegram ticket alerts and coupon CSV use the upstream Shanghai timezone", () => {
-  const source = fs.readFileSync("src/index.ts", "utf8");
+  const source = edgeSource();
   assert.match(source, /const expires = user\.expired_at \? edgeShanghaiDateTime\(user\.expired_at\) : "长期有效"/);
-  assert.match(source, /edgeShanghaiDateTime\(coupon\.started_at\)/);
-  assert.match(source, /edgeShanghaiDateTime\(coupon\.ended_at\)/);
-  assert.match(source, /edgeShanghaiDateTime\(coupon\.created_at\)/);
+  assert.match(source, /deps\.formatDateTime\(coupon\.started_at\)/);
+  assert.match(source, /deps\.formatDateTime\(coupon\.ended_at\)/);
+  assert.match(source, /deps\.formatDateTime\(coupon\.created_at\)/);
   assert.match(source, /new Date\(\(timestamp \+ APP_TIMEZONE_OFFSET\) \* 1000\)\.toISOString\(\)/);
   assert.doesNotMatch(source, /const expires = user\.expired_at \? new Date\(Number\(user\.expired_at\) \* 1000\)\.toISOString\(\)/);
 });

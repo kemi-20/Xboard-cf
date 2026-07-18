@@ -327,6 +327,11 @@ async function migrationRun(env: MigrationEnv, runId: string) {
   return env.XBOARD_DB.prepare("SELECT * FROM v2_migration_runs WHERE id = ?").bind(runId).first<Record<string, unknown>>();
 }
 
+async function saveMigrationProgress(env: MigrationEnv, runId: string, progress: Record<string, unknown>) {
+  await env.XBOARD_DB.prepare("UPDATE v2_migration_runs SET progress = ?, updated_at = ? WHERE id = ?")
+    .bind(JSON.stringify(progress), now(), runId).run();
+}
+
 async function markMigrationFailed(env: MigrationEnv, runId: string, message: string, details: Record<string, unknown> = {}) {
   const ts = now();
   const error = { message, ...details, failed_at: ts };
@@ -429,7 +434,7 @@ async function snapshotTable(request: Request, env: MigrationEnv) {
     const progress = safeJson(run.progress) as Record<string, any>;
     progress.snapshot = progress.snapshot || {};
     progress.snapshot[table] = { captured: Number(captured?.count || 0), expected: Number((safeJson(run.snapshot_counts) as Record<string, number>)[table] || 0) };
-    await env.XBOARD_DB.prepare("UPDATE v2_migration_runs SET progress = ?, updated_at = ? WHERE id = ?").bind(JSON.stringify(progress), now(), runId).run();
+    await saveMigrationProgress(env, runId, progress);
     return ok({
       table,
       rows: sourceRows.map(row => exportRow(table, row)).filter((row): row is MigrationRow => row !== null),
@@ -509,7 +514,11 @@ async function importBatch(request: Request, env: MigrationEnv) {
   if (!Number(run.snapshot_complete || 0) || !run.prepared_at) return fail("迁移前快照或目标数据库准备尚未完成", 409, 409);
 
   const preparedRows = await prepareRows(env.XBOARD_DB, table, sourceRows);
-  const before = await tableCount(env.XBOARD_DB, table);
+  const progress = safeJson(run.progress) as Record<string, any>;
+  const previous = progress[table] || { received: 0, inserted: 0, batches: 0 };
+  const baseline = previous.target_count === undefined
+    ? await tableCount(env.XBOARD_DB, table)
+    : Number(previous.target_count || 0);
   const statements = preparedRows.map(row => {
     const columns = Object.keys(row);
     if (!columns.length) throw new Error(`${table} 没有可导入字段`);
@@ -518,8 +527,12 @@ async function importBatch(request: Request, env: MigrationEnv) {
     const verb = run.mode === "overwrite" ? "INSERT" : "INSERT OR IGNORE";
     return env.XBOARD_DB.prepare(`${verb} INTO ${table} (${quoted}) VALUES (${placeholders})`).bind(...columns.map(column => row[column]));
   });
+  let inserted = 0;
   try {
-    if (statements.length) await env.XBOARD_DB.batch(statements);
+    if (statements.length) {
+      const results = await env.XBOARD_DB.batch(statements);
+      inserted = results.reduce((total, result) => total + Number((result.meta as any)?.changes || 0), 0);
+    }
   } catch (error) {
     const ids = sourceRows.map(row => row.id).filter(value => value !== undefined && value !== null);
     const details = {
@@ -533,18 +546,16 @@ async function importBatch(request: Request, env: MigrationEnv) {
     await markMigrationFailed(env, runId, `SQLite 批次写入失败：${table}`, details);
     return migrationError(`SQLite 批次写入失败：${table}（${details.error}）`, 500, details);
   }
-  const after = await tableCount(env.XBOARD_DB, table);
-  const progress = safeJson(run.progress) as Record<string, any>;
-  const previous = progress[table] || { received: 0, inserted: 0, batches: 0 };
+  const after = baseline + inserted;
   progress[table] = {
     received: Number(previous.received || 0) + sourceRows.length,
-    inserted: Number(previous.inserted || 0) + Math.max(0, after - before),
+    inserted: Number(previous.inserted || 0) + inserted,
     skipped: Number(previous.skipped || 0) + sourceRows.length - preparedRows.length,
     batches: Number(previous.batches || 0) + 1,
     target_count: after
   };
-  await env.XBOARD_DB.prepare("UPDATE v2_migration_runs SET progress = ?, updated_at = ? WHERE id = ?").bind(JSON.stringify(progress), now(), runId).run();
-  return ok({ table, received: sourceRows.length, inserted: Math.max(0, after - before), skipped: sourceRows.length - preparedRows.length, target_count: after, progress: progress[table] });
+  await saveMigrationProgress(env, runId, progress);
+  return ok({ table, received: sourceRows.length, inserted, skipped: sourceRows.length - preparedRows.length, target_count: after, progress: progress[table] });
 }
 
 class PhpValueParser {
@@ -654,7 +665,7 @@ async function importRedis(request: Request, env: MigrationEnv) {
     skipped: Number(progress.redis?.skipped || 0) + skipped,
     batches: Number(progress.redis?.batches || 0) + 1
   };
-  await env.XBOARD_DB.prepare("UPDATE v2_migration_runs SET progress = ?, updated_at = ? WHERE id = ?").bind(JSON.stringify(progress), now(), runId).run();
+  await saveMigrationProgress(env, runId, progress);
   return ok({ imported, skipped, progress: progress.redis });
 }
 

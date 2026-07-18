@@ -2,6 +2,7 @@ import type { D1Database, KVNamespace, Queue, DurableObjectState, ExecutionConte
 import { now } from "./compat.ts";
 import { invalidateSettingsCache, primaryDatabase, settings as loadSettings } from "./db.ts";
 import { cachedData } from "./cache.ts";
+import { cachedAuthRow, invalidateAuthCache } from "./auth-cache.ts";
 import { databaseInternalToken, invalidateInternalTokenCache } from "./internal-auth.ts";
 import {
   availableUser, billableTraffic, buildNodeConfig, isValidNodeType, normalizeNodeType,
@@ -113,21 +114,32 @@ async function getNode(env: Env, identifier: unknown, type?: string | null): Pro
   if (identifier === null || identifier === undefined || identifier === "") return null;
   const normalized = normalizeNodeType(type);
   const code = String(identifier);
-  const byCode = normalized
-    ? await env.XBOARD_DB.prepare("SELECT * FROM v2_server WHERE code = ? AND type = ? LIMIT 1").bind(code, normalized).first<Row>()
-    : await env.XBOARD_DB.prepare("SELECT * FROM v2_server WHERE code = ? LIMIT 1").bind(code).first<Row>();
-  if (byCode) return byCode;
-  const id = Number(identifier);
-  if (!Number.isInteger(id) || id <= 0) return null;
-  return normalized
-    ? await env.XBOARD_DB.prepare("SELECT * FROM v2_server WHERE id = ? AND type = ? LIMIT 1").bind(id, normalized).first<Row>()
-    : await env.XBOARD_DB.prepare("SELECT * FROM v2_server WHERE id = ? LIMIT 1").bind(id).first<Row>();
+  return cachedAuthRow(`node:${normalized || "*"}:${code}`, async () => {
+    const byCode = normalized
+      ? await env.XBOARD_DB.prepare("SELECT * FROM v2_server WHERE code = ? AND type = ? LIMIT 1").bind(code, normalized).first<Row>()
+      : await env.XBOARD_DB.prepare("SELECT * FROM v2_server WHERE code = ? LIMIT 1").bind(code).first<Row>();
+    if (byCode) return byCode;
+    const id = Number(identifier);
+    if (!Number.isInteger(id) || id <= 0) return null;
+    return normalized
+      ? await env.XBOARD_DB.prepare("SELECT * FROM v2_server WHERE id = ? AND type = ? LIMIT 1").bind(id, normalized).first<Row>()
+      : await env.XBOARD_DB.prepare("SELECT * FROM v2_server WHERE id = ? LIMIT 1").bind(id).first<Row>();
+  });
 }
 
 async function getMachine(env: Env, id: unknown, token: unknown): Promise<Row | null> {
   if (!Number.isInteger(Number(id)) || !token) return null;
-  const machine = await env.XBOARD_DB.prepare("SELECT * FROM v2_server_machine WHERE id = ?").bind(Number(id)).first<Row>();
+  const machineId = Number(id);
+  const machine = await cachedAuthRow(`machine:${machineId}`, () =>
+    env.XBOARD_DB.prepare("SELECT * FROM v2_server_machine WHERE id = ?").bind(machineId).first<Row>()
+  );
   return machine && equalText(String(machine.token || ""), String(token)) ? machine : null;
+}
+
+async function getMachineNode(env: Env, nodeId: number, machineId: number): Promise<Row | null> {
+  return cachedAuthRow(`machine-node:${machineId}:${nodeId}`, () =>
+    env.XBOARD_DB.prepare("SELECT * FROM v2_server WHERE id = ? AND machine_id = ? AND enabled = 1").bind(nodeId, machineId).first<Row>()
+  );
 }
 
 function equalText(actual: string, expected: string) {
@@ -162,7 +174,7 @@ async function authenticateV2(env: Env, input: Row, handshake = false): Promise<
     if (!Number(machine.is_active ?? 0)) return apiFailure("Machine is disabled", 403);
     let node: Row | undefined;
     if (Number(input.node_id) > 0) {
-      const found = await env.XBOARD_DB.prepare("SELECT * FROM v2_server WHERE id = ? AND machine_id = ? AND enabled = 1").bind(Number(input.node_id), Number(machine.id)).first<Row>();
+      const found = await getMachineNode(env, Number(input.node_id), Number(machine.id));
       if (!found) return apiFailure("Node not found on this machine");
       node = found;
     }
@@ -1175,6 +1187,7 @@ export default {
       if (!await internalRequestAuthorized(env, request)) return json({ message: "Unauthorized" }, 401);
       invalidateSettingsCache();
       invalidateInternalTokenCache();
+      invalidateAuthCache();
       return json({ data: true });
     }
     if (url.pathname.startsWith("/internal/status/")) {
@@ -1207,6 +1220,7 @@ export default {
     }
     if (url.pathname === "/internal/sync" && request.method === "POST") {
       if (!await internalRequestAuthorized(env, request)) return json({ message: "Unauthorized" }, 401);
+      invalidateAuthCache();
       const input = await readInput(request);
       if (input.scope === "user" && Number(input.user_id) > 0) {
         const sent = await syncUserChange(env, Number(input.user_id), Number(input.old_group_id || 0));
