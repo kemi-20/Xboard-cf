@@ -130,8 +130,16 @@ export async function orderStats(env: StatisticsEnv, url: URL) {
   const result = await env.XBOARD_DB.prepare(`SELECT record_at,paid_total,paid_count,commission_total,commission_count FROM v2_stat WHERE ${clauses.join(" AND ")} ORDER BY record_at DESC`)
     .bind(...bindings).all<Record<string, any>>();
   const rows = result.results || [];
-  const dailyStats = rows.map(row => {
+  let totalPaidAmount = 0;
+  let totalPaidCount = 0;
+  let totalCommissionAmount = 0;
+  let totalCommissionCount = 0;
+  const list = rows.map(row => {
     const date = dateString(Number(row.record_at || 0));
+    totalPaidAmount += Number(row.paid_total || 0);
+    totalPaidCount += Number(row.paid_count || 0);
+    totalCommissionAmount += Number(row.commission_total || 0);
+    totalCommissionCount += Number(row.commission_count || 0);
     if (type && allowedTypes.has(type)) {
       return { date, value: Number(row[type] || 0), type: ORDER_STAT_LABELS[type] };
     }
@@ -148,29 +156,18 @@ export async function orderStats(env: StatisticsEnv, url: URL) {
       avg_order_amount: paidCount > 0 ? Math.round(paidTotal / paidCount * 100) / 100 : 0,
       avg_commission_amount: commissionCount > 0 ? Math.round(commissionTotal / commissionCount * 100) / 100 : 0
     };
-  });
-  const list = [...dailyStats].reverse();
-  let paidTotal = 0;
-  let paidCount = 0;
-  let commissionTotal = 0;
-  let commissionCount = 0;
-  for (const row of rows) {
-    paidTotal += Number(row.paid_total || 0);
-    paidCount += Number(row.paid_count || 0);
-    commissionTotal += Number(row.commission_total || 0);
-    commissionCount += Number(row.commission_count || 0);
-  }
+  }).reverse();
   return {
     summary: {
       start_date: start || (rows.length ? dateString(Number(rows.at(-1)?.record_at || 0)) : dateString(now())),
       end_date: end || (rows.length ? dateString(Number(rows[0]?.record_at || 0)) : dateString(now())),
-      paid_total: paidTotal,
-      paid_count: paidCount,
-      commission_total: commissionTotal,
-      commission_count: commissionCount,
-      avg_paid_amount: paidCount ? Math.round(paidTotal / paidCount * 100) / 100 : 0,
-      avg_commission_amount: commissionCount ? Math.round(commissionTotal / commissionCount * 100) / 100 : 0,
-      commission_rate: paidTotal ? Math.round(commissionTotal / paidTotal * 10000) / 100 : 0
+      paid_total: totalPaidAmount,
+      paid_count: totalPaidCount,
+      commission_total: totalCommissionAmount,
+      commission_count: totalCommissionCount,
+      avg_paid_amount: totalPaidCount ? Math.round(totalPaidAmount / totalPaidCount * 100) / 100 : 0,
+      avg_commission_amount: totalCommissionCount ? Math.round(totalCommissionAmount / totalCommissionCount * 100) / 100 : 0,
+      commission_rate: totalPaidAmount ? Math.round(totalCommissionAmount / totalPaidAmount * 10000) / 100 : 0
     },
     list
   };

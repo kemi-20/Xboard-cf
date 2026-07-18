@@ -18,11 +18,6 @@ export async function databaseInternalToken(env: InternalAuthEnv, forceRefresh =
   return token;
 }
 
-export async function internalToken(env: InternalAuthEnv, forceRefresh = false) {
-  const secret = String(env.INTERNAL_SYNC_TOKEN || "").trim();
-  return secret || databaseInternalToken(env, forceRefresh);
-}
-
 export function invalidateInternalTokenCache() {
   cachedToken = null;
 }

@@ -65,6 +65,9 @@ function leftRotate(value: number, amount: number) {
   return (value << amount) | (value >>> (32 - amount));
 }
 
+const COMPAT_MD5_SHIFTS = [7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22,5,9,14,20,5,9,14,20,5,9,14,20,4,11,16,23,4,11,16,23,4,11,16,23,4,11,16,23,6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21];
+const COMPAT_MD5_CONSTANTS = Array.from({ length: 64 }, (_, index) => Math.floor(Math.abs(Math.sin(index + 1)) * 0x100000000) >>> 0);
+
 export function md5(input: string) {
   const bytes = new TextEncoder().encode(input);
   const bitLength = bytes.length * 8;
@@ -76,8 +79,6 @@ export function md5(input: string) {
   view.setUint32(paddedLength - 8, bitLength >>> 0, true);
   view.setUint32(paddedLength - 4, Math.floor(bitLength / 0x100000000), true);
   let a0 = 0x67452301, b0 = 0xefcdab89, c0 = 0x98badcfe, d0 = 0x10325476;
-  const shifts = [7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22,5,9,14,20,5,9,14,20,5,9,14,20,4,11,16,23,4,11,16,23,4,11,16,23,4,11,16,23,6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21];
-  const constants = Array.from({ length: 64 }, (_, i) => Math.floor(Math.abs(Math.sin(i + 1)) * 0x100000000) >>> 0);
   for (let offset = 0; offset < data.length; offset += 64) {
     const words = Array.from({ length: 16 }, (_, i) => view.getUint32(offset + i * 4, true));
     let a = a0, b = b0, c = c0, d = d0;
@@ -90,7 +91,7 @@ export function md5(input: string) {
       const next = d;
       d = c;
       c = b;
-      b = (b + leftRotate((a + f + constants[i] + words[g]) >>> 0, shifts[i])) >>> 0;
+      b = (b + leftRotate((a + f + COMPAT_MD5_CONSTANTS[i] + words[g]) >>> 0, COMPAT_MD5_SHIFTS[i])) >>> 0;
       a = next;
     }
     a0 = (a0 + a) >>> 0;

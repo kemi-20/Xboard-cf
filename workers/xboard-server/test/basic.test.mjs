@@ -11,6 +11,20 @@ test("xboard-server has an entrypoint", () => {
   assert.match(fs.readFileSync("src/index.ts", "utf8"), /export default/);
 });
 
+test("server reuses expensive constants and keeps dead helpers removed", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const protocol = fs.readFileSync("src/protocol.ts", "utf8");
+  const compat = fs.readFileSync("src/compat.ts", "utf8");
+  const database = fs.readFileSync("src/db.ts", "utf8");
+  const internalAuth = fs.readFileSync("src/internal-auth.ts", "utf8");
+  assert.match(source, /const RATE_TIME_FORMATTER = new Intl\.DateTimeFormat/);
+  assert.match(source, /RATE_TIME_FORMATTER\.formatToParts/);
+  assert.match(protocol, /const PROTOCOL_MD5_CONSTANTS = Array\.from/);
+  assert.equal(compat.trim(), "export const now = () => Math.floor(Date.now() / 1000);");
+  assert.doesNotMatch(database, /export async function list/);
+  assert.doesNotMatch(internalAuth, /export async function internalToken/);
+});
+
 test("internal endpoints accept the D1 fallback during a partial Secret rollout", async () => {
   const db = {
     withSession() { return this; },

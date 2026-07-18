@@ -1466,9 +1466,9 @@ async function generateAdminUsers(request: Request, env: Env) {
     ));
     generated.push({
       email, password,
-      expired_at: expiredAt ? new Date((expiredAt + EDGE_SHANGHAI_OFFSET) * 1000).toISOString().replace("T", " ").slice(0, 19) : "长期有效",
+      expired_at: expiredAt ? new Date((expiredAt + APP_TIMEZONE_OFFSET) * 1000).toISOString().replace("T", " ").slice(0, 19) : "长期有效",
       uuid: userUuid,
-      created_at: new Date((ts + EDGE_SHANGHAI_OFFSET) * 1000).toISOString().replace("T", " ").slice(0, 19),
+      created_at: new Date((ts + APP_TIMEZONE_OFFSET) * 1000).toISOString().replace("T", " ").slice(0, 19),
       subscribe_url: await subscribeUrl(request, env, userToken)
     });
   }
@@ -1526,8 +1526,10 @@ async function audit(env: Env, adminId: number, request: Request, path: string) 
     const sensitive = /(^|_)(password|token|secret|key|api_key)$/i;
     const requestData = Object.fromEntries(Object.entries(input).filter(([key]) => !sensitive.test(key)));
     const ts = now();
+    const requestUrl = new URL(request.url);
+    const serializedRequestData = JSON.stringify(requestData);
     await env.XBOARD_DB.prepare("INSERT INTO v2_admin_audit_log(admin_id, action, target, metadata, ip, method, uri, request_data, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .bind(adminId, action, path, JSON.stringify(requestData), requestIp(request), request.method, new URL(request.url).pathname + new URL(request.url).search, JSON.stringify(requestData), ts, ts).run();
+      .bind(adminId, action, path, serializedRequestData, requestIp(request), request.method, requestUrl.pathname + requestUrl.search, serializedRequestData, ts, ts).run();
   } catch {
     // Audit logging must never break admin operations.
   }
@@ -2279,18 +2281,16 @@ async function orderDetail(env: Env, id: number) {
   };
 }
 
-const EDGE_SHANGHAI_OFFSET = 8 * 3600;
-
 function edgeShanghaiDateTime(value: unknown) {
   const timestamp = Number(value || 0);
   if (!Number.isFinite(timestamp) || timestamp <= 0) return "";
-  return new Date((timestamp + EDGE_SHANGHAI_OFFSET) * 1000).toISOString().replace("T", " ").slice(0, 19);
+  return new Date((timestamp + APP_TIMEZONE_OFFSET) * 1000).toISOString().replace("T", " ").slice(0, 19);
 }
 
 function addOrderMonths(timestamp: number, months: number) {
-  const date = new Date((timestamp + EDGE_SHANGHAI_OFFSET) * 1000);
+  const date = new Date((timestamp + APP_TIMEZONE_OFFSET) * 1000);
   date.setUTCMonth(date.getUTCMonth() + months);
-  return Math.floor(date.getTime() / 1000) - EDGE_SHANGHAI_OFFSET;
+  return Math.floor(date.getTime() / 1000) - APP_TIMEZONE_OFFSET;
 }
 
 async function orderSurplus(env: Env, user: Record<string, any>, settingsValues: Record<string, any>) {
@@ -2323,11 +2323,11 @@ async function orderSurplus(env: Env, user: Record<string, any>, settingsValues:
 }
 
 function edgeShanghaiParts(ts: number) {
-  const date = new Date((ts + EDGE_SHANGHAI_OFFSET) * 1000);
+  const date = new Date((ts + APP_TIMEZONE_OFFSET) * 1000);
   return { year: date.getUTCFullYear(), month: date.getUTCMonth(), day: date.getUTCDate(), hour: date.getUTCHours(), minute: date.getUTCMinutes(), second: date.getUTCSeconds() };
 }
 function edgeShanghaiTimestamp(year: number, month: number, day: number, hour = 0, minute = 0, second = 0) {
-  return Math.floor(Date.UTC(year, month, day, hour, minute, second) / 1000) - EDGE_SHANGHAI_OFFSET;
+  return Math.floor(Date.UTC(year, month, day, hour, minute, second) / 1000) - APP_TIMEZONE_OFFSET;
 }
 function edgeDaysInMonth(year: number, month: number) { return new Date(Date.UTC(year, month + 1, 0)).getUTCDate(); }
 function edgeNextResetAt(expiredAt: number | null, method: number, from: number) {

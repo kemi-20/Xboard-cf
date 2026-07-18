@@ -51,6 +51,9 @@ function leftRotate(value: number, amount: number) {
   return (value << amount) | (value >>> (32 - amount));
 }
 
+const SUBSCRIPTION_MD5_SHIFTS = [7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22,5,9,14,20,5,9,14,20,5,9,14,20,5,9,14,20,4,11,16,23,4,11,16,23,4,11,16,23,6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21];
+const SUBSCRIPTION_MD5_CONSTANTS = Array.from({ length: 64 }, (_, index) => Math.floor(Math.abs(Math.sin(index + 1)) * 0x100000000) >>> 0);
+
 function md5(input: string) {
   const bytes = new TextEncoder().encode(input);
   const bitLength = bytes.length * 8;
@@ -62,8 +65,6 @@ function md5(input: string) {
   view.setUint32(paddedLength - 8, bitLength >>> 0, true);
   view.setUint32(paddedLength - 4, Math.floor(bitLength / 0x100000000), true);
   let a0 = 0x67452301, b0 = 0xefcdab89, c0 = 0x98badcfe, d0 = 0x10325476;
-  const shifts = [7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22,5,9,14,20,5,9,14,20,5,9,14,20,5,9,14,20,4,11,16,23,4,11,16,23,4,11,16,23,6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21];
-  const constants = Array.from({ length: 64 }, (_, index) => Math.floor(Math.abs(Math.sin(index + 1)) * 0x100000000) >>> 0);
   for (let offset = 0; offset < data.length; offset += 64) {
     const words = Array.from({ length: 16 }, (_, index) => view.getUint32(offset + index * 4, true));
     let a = a0, b = b0, c = c0, d = d0;
@@ -76,7 +77,7 @@ function md5(input: string) {
       const previousD = d;
       d = c;
       c = b;
-      b = (b + leftRotate((a + f + constants[index] + words[wordIndex]) >>> 0, shifts[index])) >>> 0;
+      b = (b + leftRotate((a + f + SUBSCRIPTION_MD5_CONSTANTS[index] + words[wordIndex]) >>> 0, SUBSCRIPTION_MD5_SHIFTS[index])) >>> 0;
       a = previousD;
     }
     a0 = (a0 + a) >>> 0;

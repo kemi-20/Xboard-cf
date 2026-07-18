@@ -19,6 +19,9 @@ export interface Env {
 
 type AuthContext = { input: Row; node?: Row; machine?: Row };
 const ONLINE_RETENTION_SECONDS = 900;
+const RATE_TIME_FORMATTER = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", hourCycle: "h23"
+});
 
 function json(data: unknown, status = 200, headers: HeadersInit = {}) {
   return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json; charset=utf-8", ...headers } });
@@ -239,9 +242,7 @@ function currentRate(node: Row) {
   const parsedFallback = Number(node.rate);
   const fallback = Number.isFinite(parsedFallback) ? parsedFallback : 0;
   if (!Number(node.rate_time_enable)) return fallback;
-  const parts = new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", hourCycle: "h23"
-  }).formatToParts(new Date());
+  const parts = RATE_TIME_FORMATTER.formatToParts(new Date());
   const hour = parts.find(part => part.type === "hour")?.value || "00";
   const minute = parts.find(part => part.type === "minute")?.value || "00";
   const time = `${hour}:${minute}`;

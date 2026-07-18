@@ -128,6 +128,7 @@ export async function liveDeviceSnapshot(env: StatusEnv, loadAuthHeaders: AuthHe
   if (liveDeviceSnapshotCache && liveDeviceSnapshotCache.expiresAt > Date.now()) return liveDeviceSnapshotCache.value;
   const value: Record<string, string[]> = {};
   let available = false;
+  const runtimePromise = statusSnapshot(env, loadAuthHeaders);
   try {
     const response = await statusHubRequest(env, loadAuthHeaders, "devices/list", {
       method: "POST",
@@ -147,7 +148,7 @@ export async function liveDeviceSnapshot(env: StatusEnv, loadAuthHeaders: AuthHe
     // A node connection snapshot below may still provide current device counts.
   }
 
-  const runtime = await statusSnapshot(env, loadAuthHeaders);
+  const runtime = await runtimePromise;
   const cutoff = now() - 900;
   const connectionCounts: Record<string, number> = {};
   for (const node of Object.values(runtime.nodes || {})) {

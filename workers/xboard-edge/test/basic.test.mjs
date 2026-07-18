@@ -81,7 +81,7 @@ test("orders accept canonical periods and expose configured reset and surplus de
   assert.match(source, /renew_order_event_id/);
   assert.match(source, /change_order_event_id/);
   assert.match(source, /surplus_orders: surplusResult\.results \|\| \[\]/);
-  assert.match(source, /new Date\(\(timestamp \+ EDGE_SHANGHAI_OFFSET\) \* 1000\)/);
+  assert.match(source, /new Date\(\(timestamp \+ APP_TIMEZONE_OFFSET\) \* 1000\)/);
 });
 
 test("machine form validates while typing", () => {
@@ -329,6 +329,26 @@ test("independent paginated and order reads share D1 batches", () => {
   assert.match(orderFetch, /XBOARD_DB\.batch<Record<string, any>>\(\[/);
   assert.match(orderPaid, /XBOARD_DB\.batch<Record<string, any>>\(\[/);
   assert.equal((giftCards.match(/db\.batch<AnyRow>\(\[/g) || []).length >= 5, true);
+});
+
+test("verified local optimizations preserve migration, status and audit behavior", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const migration = fs.readFileSync("src/migration.ts", "utf8");
+  const statistics = fs.readFileSync("src/admin/statistics.ts", "utf8");
+  const statusClient = fs.readFileSync("src/internal/status-client.ts", "utf8");
+  const compat = fs.readFileSync("src/compat.ts", "utf8");
+  const subscription = fs.readFileSync("src/subscription/index.ts", "utf8");
+  assert.match(migration, /const tableColumnsCache = new Map/);
+  assert.match(migration, /tableColumnsCache\.get\(table\)/);
+  assert.match(migration, /tableColumnsCache\.set\(table, columns\)/);
+  assert.match(statusClient, /const runtimePromise = statusSnapshot\(env, loadAuthHeaders\)/);
+  assert.match(statusClient, /const runtime = await runtimePromise/);
+  assert.match(statistics, /const list = rows\.map[\s\S]*?\}\)\.reverse\(\)/);
+  assert.doesNotMatch(statistics, /for \(const row of rows\)/);
+  assert.match(source, /const serializedRequestData = JSON\.stringify\(requestData\)/);
+  assert.doesNotMatch(source, /EDGE_SHANGHAI_OFFSET/);
+  assert.match(compat, /const COMPAT_MD5_CONSTANTS = Array\.from/);
+  assert.match(subscription, /const SUBSCRIPTION_MD5_CONSTANTS = Array\.from/);
 });
 
 test("Edge keeps its audited 64-step MD5 compatibility implementation", () => {
@@ -1312,6 +1332,6 @@ test("Telegram ticket alerts and coupon CSV use the upstream Shanghai timezone",
   assert.match(source, /edgeShanghaiDateTime\(coupon\.started_at\)/);
   assert.match(source, /edgeShanghaiDateTime\(coupon\.ended_at\)/);
   assert.match(source, /edgeShanghaiDateTime\(coupon\.created_at\)/);
-  assert.match(source, /new Date\(\(timestamp \+ EDGE_SHANGHAI_OFFSET\) \* 1000\)\.toISOString\(\)/);
+  assert.match(source, /new Date\(\(timestamp \+ APP_TIMEZONE_OFFSET\) \* 1000\)\.toISOString\(\)/);
   assert.doesNotMatch(source, /const expires = user\.expired_at \? new Date\(Number\(user\.expired_at\) \* 1000\)\.toISOString\(\)/);
 });

@@ -117,14 +117,21 @@ async function ensureMigrationSchema(env: MigrationEnv) {
   await env.XBOARD_DB.prepare("CREATE INDEX IF NOT EXISTS idx_migration_snapshot_run_table ON v2_migration_snapshot_rows(run_id, table_name, row_index)").run();
 }
 
+type MigrationColumn = { name: string; type: string; notnull: number; defaultValue: unknown };
+const tableColumnsCache = new Map<string, MigrationColumn[]>();
+
 async function tableColumns(db: D1Database, table: string) {
+  const cached = tableColumnsCache.get(table);
+  if (cached) return cached;
   const result = await db.prepare(`PRAGMA table_info(${table})`).all<Record<string, unknown>>();
-  return (result.results || []).map(column => ({
+  const columns = (result.results || []).map(column => ({
     name: String(column.name),
     type: String(column.type || "").toUpperCase(),
     notnull: Number(column.notnull || 0),
     defaultValue: column.dflt_value
   }));
+  tableColumnsCache.set(table, columns);
+  return columns;
 }
 
 function migrationError(message: string, status: number, details: Record<string, unknown> = {}) {
