@@ -86,11 +86,13 @@ export async function adminServerRows<E extends ServerEnv>(env: E, deps: ServerD
   ]);
   const { servers, machines, groups: groupRows, intervals } = base;
   const groupMap = new Map(groupRows.map(group => [Number(group.id), group]));
+  const machineById = new Map(machines.map(machine => [Number(machine.id), machine]));
+  const serverById = new Map(servers.map(server => [Number(server.id), server]));
   const out = [];
   for (const server of servers) {
     const stateId = Number(server.parent_id || server.id);
     const ownId = Number(server.id);
-    const machine = Number(server.machine_id) > 0 ? machines.find(item => Number(item.id) === Number(server.machine_id)) : null;
+    const machine = Number(server.machine_id) > 0 ? machineById.get(Number(server.machine_id)) || null : null;
     const nodeState = live.nodes[String(stateId)] || (stateId !== ownId ? live.nodes[String(ownId)] : null) || {};
     const machineState = machine ? live.machines[String(machine.id)] || {} : {};
     const reportedAt = Number(machineState.last_seen_at || 0);
@@ -127,7 +129,7 @@ export async function adminServerRows<E extends ServerEnv>(env: E, deps: ServerD
       custom_routes: deps.parseJsonArray(server.custom_routes),
       cert_config: deps.isNilLike(server.cert_config) ? null : deps.parseJsonObject(server.cert_config),
       groups,
-      parent: server.parent_id ? servers.find(item => Number(item.id) === Number(server.parent_id)) || null : null,
+      parent: server.parent_id ? serverById.get(Number(server.parent_id)) || null : null,
       machine: machine ? { ...machine, token: undefined, load_status: loadStatus } : null,
       last_check_at: lastCheckAt,
       last_push_at: lastPushAt,

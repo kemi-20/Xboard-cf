@@ -10,6 +10,10 @@ type Client = "plain" | "shadowrocket" | "shadowsocks" | "clash" | "clashmeta" |
 type Config = Record<string, any>;
 
 const validServerTypes = new Set(["shadowsocks", "vmess", "vless", "trojan", "hysteria", "tuic", "anytls", "socks", "http", "mieru", "naive"]);
+const CLASH_CIPHERS = new Set(["aes-128-gcm", "aes-192-gcm", "aes-256-gcm", "chacha20-ietf-poly1305"]);
+const SURGE_CIPHERS = new Set(["aes-128-gcm", "aes-192-gcm", "aes-256-gcm", "chacha20-ietf-poly1305", "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm"]);
+const SURFBOARD_CIPHERS = new Set(["aes-128-gcm", "aes-192-gcm", "aes-256-gcm", "chacha20-ietf-poly1305", "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305"]);
+const SINGBOX_VLESS_NETWORKS = new Set(["tcp", "ws", "grpc", "http", "quic", "httpupgrade"]);
 const allowedProtocols: Record<Client, Set<string>> = {
   plain: new Set(["vmess", "vless", "shadowsocks", "trojan", "hysteria", "anytls", "socks", "tuic", "http"]),
   clash: new Set(["shadowsocks", "vmess", "trojan", "socks", "http"]),
@@ -1022,7 +1026,7 @@ function subscribeInfo(config: Config, user: any) {
 }
 
 function shanghaiDate(timestamp: number, withTime = false) {
-  const value = new Date((timestamp + 8 * 3600) * 1000).toISOString();
+  const value = new Date((timestamp + SHANGHAI_OFFSET) * 1000).toISOString();
   return withTime ? value.replace("T", " ").slice(0, 19) : value.slice(0, 10);
 }
 
@@ -1052,23 +1056,19 @@ function output(client: Client, config: Config, templateMap: Config, user: any, 
   servers = servers.filter(server => allowedProtocols[client].has(server.type));
   servers = filterByClientCompatibility(client, request, servers);
   if (client === "clash") {
-    const clashCiphers = new Set(["aes-128-gcm", "aes-192-gcm", "aes-256-gcm", "chacha20-ietf-poly1305"]);
-    servers = servers.filter(server => server.type !== "shadowsocks" || clashCiphers.has(String(server.protocol_settings?.cipher || "")))
+    servers = servers.filter(server => server.type !== "shadowsocks" || CLASH_CIPHERS.has(String(server.protocol_settings?.cipher || "")))
       .filter(server => !["vmess", "trojan"].includes(server.type) || ["tcp", "ws", "grpc"].includes(String(server.protocol_settings?.network || "tcp")));
   }
   if (client === "clashmeta") servers = servers.filter(server => server.type !== "vmess" || ["tcp", "ws", "grpc", "http", "h2", "httpupgrade"].includes(String(server.protocol_settings?.network || "tcp")))
     .filter(server => server.type !== "trojan" || ["tcp", "ws", "grpc", "httpupgrade"].includes(String(server.protocol_settings?.network || "tcp")));
   if (client === "surge") {
-    const surgeCiphers = new Set(["aes-128-gcm", "aes-192-gcm", "aes-256-gcm", "chacha20-ietf-poly1305", "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm"]);
-    servers = servers.filter(server => server.type !== "shadowsocks" || surgeCiphers.has(String(server.protocol_settings?.cipher || "")));
+    servers = servers.filter(server => server.type !== "shadowsocks" || SURGE_CIPHERS.has(String(server.protocol_settings?.cipher || "")));
   }
   if (client === "surfboard") {
-    const surfboardCiphers = new Set(["aes-128-gcm", "aes-192-gcm", "aes-256-gcm", "chacha20-ietf-poly1305", "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305"]);
-    servers = servers.filter(server => server.type !== "shadowsocks" || surfboardCiphers.has(String(server.protocol_settings?.cipher || "")));
+    servers = servers.filter(server => server.type !== "shadowsocks" || SURFBOARD_CIPHERS.has(String(server.protocol_settings?.cipher || "")));
   }
   if (client === "singbox") {
-    const vlessNetworks = new Set(["tcp", "ws", "grpc", "http", "quic", "httpupgrade"]);
-    servers = servers.filter(server => server.type !== "vless" || vlessNetworks.has(String(server.protocol_settings?.network || "tcp")));
+    servers = servers.filter(server => server.type !== "vless" || SINGBOX_VLESS_NETWORKS.has(String(server.protocol_settings?.network || "tcp")));
   }
   if (["clash", "clashmeta", "stash"].includes(client)) return yamlProfile(client, String(templateMap[client] || templateMap.clash || ""), config, user, servers, request);
   if (client === "singbox") return singboxProfile(String(templateMap.singbox || ""), user, servers, request.headers.get("user-agent") || "");

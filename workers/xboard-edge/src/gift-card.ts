@@ -265,13 +265,15 @@ async function adminTemplates(request: Request, db: D1Database) {
   if (input.type !== undefined && input.type !== "") { where.push("t.type = ?"); values.push(Number(input.type)); }
   if (input.status !== undefined && input.status !== "") { where.push("t.status = ?"); values.push(Number(input.status)); }
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
-  const result = await db.prepare(`SELECT t.*,
-    (SELECT COUNT(*) FROM v2_gift_card_code c WHERE c.template_id = t.id) AS codes_count,
-    (SELECT COUNT(*) FROM v2_gift_card_usage u WHERE u.template_id = t.id) AS used_count
-    FROM v2_gift_card_template t ${clause} ORDER BY t.sort ASC, t.created_at DESC LIMIT ? OFFSET ?`)
-    .bind(...values, perPage, offset).all<AnyRow>();
-  const total = await db.prepare(`SELECT COUNT(*) AS c FROM v2_gift_card_template t ${clause}`).bind(...values).first<{ c: number }>();
-  return json({ data: (result.results || []).map(templateRow), total: Number(total?.c || 0), current_page: page, per_page: perPage });
+  const [result, total] = await db.batch<AnyRow>([
+    db.prepare(`SELECT t.*,
+      (SELECT COUNT(*) FROM v2_gift_card_code c WHERE c.template_id = t.id) AS codes_count,
+      (SELECT COUNT(*) FROM v2_gift_card_usage u WHERE u.template_id = t.id) AS used_count
+      FROM v2_gift_card_template t ${clause} ORDER BY t.sort ASC, t.created_at DESC LIMIT ? OFFSET ?`)
+      .bind(...values, perPage, offset),
+    db.prepare(`SELECT COUNT(*) AS c FROM v2_gift_card_template t ${clause}`).bind(...values)
+  ]);
+  return json({ data: (result.results || []).map(templateRow), total: Number(total.results?.[0]?.c || 0), current_page: page, per_page: perPage });
 }
 
 async function createTemplate(request: Request, db: D1Database, adminId: number) {
@@ -408,11 +410,13 @@ async function adminCodes(request: Request, db: D1Database) {
     if (input[key] !== undefined && input[key] !== "") { where.push(`c.${key} = ?`); values.push(input[key]); }
   }
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
-  const result = await db.prepare(`SELECT c.*, t.name AS template_name, u.email AS user_email FROM v2_gift_card_code c
-    LEFT JOIN v2_gift_card_template t ON t.id = c.template_id LEFT JOIN v2_user u ON u.id = c.user_id
-    ${clause} ORDER BY c.created_at DESC LIMIT ? OFFSET ?`).bind(...values, perPage, offset).all<AnyRow>();
-  const total = await db.prepare(`SELECT COUNT(*) AS c FROM v2_gift_card_code c ${clause}`).bind(...values).first<{ c: number }>();
-  return json({ data: (result.results || []).map(row => ({ ...row, status: Number(row.status), status_name: STATUS_NAMES[Number(row.status)] || "未知状态", user_email: maskedEmail(row.user_email), actual_rewards: parseJson(row.actual_rewards, null), metadata: parseJson(row.metadata, null) })), total: Number(total?.c || 0), current_page: page, per_page: perPage });
+  const [result, total] = await db.batch<AnyRow>([
+    db.prepare(`SELECT c.*, t.name AS template_name, u.email AS user_email FROM v2_gift_card_code c
+      LEFT JOIN v2_gift_card_template t ON t.id = c.template_id LEFT JOIN v2_user u ON u.id = c.user_id
+      ${clause} ORDER BY c.created_at DESC LIMIT ? OFFSET ?`).bind(...values, perPage, offset),
+    db.prepare(`SELECT COUNT(*) AS c FROM v2_gift_card_code c ${clause}`).bind(...values)
+  ]);
+  return json({ data: (result.results || []).map(row => ({ ...row, status: Number(row.status), status_name: STATUS_NAMES[Number(row.status)] || "未知状态", user_email: maskedEmail(row.user_email), actual_rewards: parseJson(row.actual_rewards, null), metadata: parseJson(row.metadata, null) })), total: Number(total.results?.[0]?.c || 0), current_page: page, per_page: perPage });
 }
 
 async function toggleCode(request: Request, db: D1Database) {
@@ -439,29 +443,32 @@ async function adminUsages(request: Request, db: D1Database) {
   const values: unknown[] = [];
   for (const key of ["template_id", "user_id"]) if (input[key] !== undefined && input[key] !== "") { where.push(`g.${key} = ?`); values.push(input[key]); }
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
-  const result = await db.prepare(`SELECT g.*, c.code, t.name AS template_name, u.email AS user_email, i.email AS invite_user_email
-    FROM v2_gift_card_usage g LEFT JOIN v2_gift_card_code c ON c.id = g.code_id
-    LEFT JOIN v2_gift_card_template t ON t.id = g.template_id LEFT JOIN v2_user u ON u.id = g.user_id
-    LEFT JOIN v2_user i ON i.id = g.invite_user_id ${clause} ORDER BY g.created_at DESC LIMIT ? OFFSET ?`)
-    .bind(...values, perPage, offset).all<AnyRow>();
-  const total = await db.prepare(`SELECT COUNT(*) AS c FROM v2_gift_card_usage g ${clause}`).bind(...values).first<{ c: number }>();
-  return json({ data: (result.results || []).map(row => ({ ...row, invite_user_email: maskedEmail(row.invite_user_email), rewards_given: parseJson(row.rewards_given, {}), invite_rewards: parseJson(row.invite_rewards, null) })), total: Number(total?.c || 0), current_page: page, per_page: perPage });
+  const [result, total] = await db.batch<AnyRow>([
+    db.prepare(`SELECT g.*, c.code, t.name AS template_name, u.email AS user_email, i.email AS invite_user_email
+      FROM v2_gift_card_usage g LEFT JOIN v2_gift_card_code c ON c.id = g.code_id
+      LEFT JOIN v2_gift_card_template t ON t.id = g.template_id LEFT JOIN v2_user u ON u.id = g.user_id
+      LEFT JOIN v2_user i ON i.id = g.invite_user_id ${clause} ORDER BY g.created_at DESC LIMIT ? OFFSET ?`)
+      .bind(...values, perPage, offset),
+    db.prepare(`SELECT COUNT(*) AS c FROM v2_gift_card_usage g ${clause}`).bind(...values)
+  ]);
+  return json({ data: (result.results || []).map(row => ({ ...row, invite_user_email: maskedEmail(row.invite_user_email), rewards_given: parseJson(row.rewards_given, {}), invite_rewards: parseJson(row.invite_rewards, null) })), total: Number(total.results?.[0]?.c || 0), current_page: page, per_page: perPage });
 }
 
 async function statistics(request: Request, db: D1Database) {
   const input = await requestInput(request);
   const end = String(input.end_date || new Date().toISOString().slice(0, 10));
   const start = String(input.start_date || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
-  const counts = await db.prepare(`SELECT
-    (SELECT COUNT(*) FROM v2_gift_card_template) AS templates_count,
-    (SELECT COUNT(*) FROM v2_gift_card_template WHERE status = 1) AS active_templates_count,
-    (SELECT COUNT(*) FROM v2_gift_card_code) AS codes_count,
-    (SELECT COUNT(*) FROM v2_gift_card_code WHERE status = 1) AS used_codes_count,
-    (SELECT COUNT(*) FROM v2_gift_card_usage) AS usages_count`).first<AnyRow>();
-  const daily = await db.prepare("SELECT date(created_at, 'unixepoch') AS date, COUNT(*) AS count FROM v2_gift_card_usage WHERE date(created_at, 'unixepoch') BETWEEN ? AND ? GROUP BY date ORDER BY date")
-    .bind(start, end).all();
-  const types = await db.prepare("SELECT t.name AS template_name, t.type, COUNT(*) AS count FROM v2_gift_card_usage u JOIN v2_gift_card_template t ON t.id = u.template_id GROUP BY u.template_id").all<AnyRow>();
-  return ok({ total_stats: counts || {}, daily_usages: daily.results || [], type_stats: (types.results || []).map(row => ({ template_name: row.template_name, type_name: TYPE_NAMES[Number(row.type)] || "未知类型", count: Number(row.count || 0) })) });
+  const [counts, daily, types] = await db.batch<AnyRow>([
+    db.prepare(`SELECT
+      (SELECT COUNT(*) FROM v2_gift_card_template) AS templates_count,
+      (SELECT COUNT(*) FROM v2_gift_card_template WHERE status = 1) AS active_templates_count,
+      (SELECT COUNT(*) FROM v2_gift_card_code) AS codes_count,
+      (SELECT COUNT(*) FROM v2_gift_card_code WHERE status = 1) AS used_codes_count,
+      (SELECT COUNT(*) FROM v2_gift_card_usage) AS usages_count`),
+    db.prepare("SELECT date(created_at, 'unixepoch') AS date, COUNT(*) AS count FROM v2_gift_card_usage WHERE date(created_at, 'unixepoch') BETWEEN ? AND ? GROUP BY date ORDER BY date").bind(start, end),
+    db.prepare("SELECT t.name AS template_name, t.type, COUNT(*) AS count FROM v2_gift_card_usage u JOIN v2_gift_card_template t ON t.id = u.template_id GROUP BY u.template_id")
+  ]);
+  return ok({ total_stats: counts.results?.[0] || {}, daily_usages: daily.results || [], type_stats: (types.results || []).map(row => ({ template_name: row.template_name, type_name: TYPE_NAMES[Number(row.type)] || "未知类型", count: Number(row.count || 0) })) });
 }
 
 async function updateCode(request: Request, db: D1Database) {
@@ -552,12 +559,14 @@ export async function handleUserGiftCard(request: Request, db: D1Database, route
   if (route === "/gift-card/history" && request.method === "GET") {
     const input = await requestInput(request);
     const { page, perPage, offset } = pageInput(input, 15, 100);
-    const result = await db.prepare(`SELECT g.*, c.code, t.name AS template_name, t.type AS template_type
-      FROM v2_gift_card_usage g LEFT JOIN v2_gift_card_code c ON c.id = g.code_id
-      LEFT JOIN v2_gift_card_template t ON t.id = g.template_id WHERE g.user_id = ? ORDER BY g.created_at DESC LIMIT ? OFFSET ?`)
-      .bind(user.id, perPage, offset).all<AnyRow>();
-    const total = await db.prepare("SELECT COUNT(*) AS c FROM v2_gift_card_usage WHERE user_id = ?").bind(user.id).first<{ c: number }>();
-    const count = Number(total?.c || 0);
+    const [result, total] = await db.batch<AnyRow>([
+      db.prepare(`SELECT g.*, c.code, t.name AS template_name, t.type AS template_type
+        FROM v2_gift_card_usage g LEFT JOIN v2_gift_card_code c ON c.id = g.code_id
+        LEFT JOIN v2_gift_card_template t ON t.id = g.template_id WHERE g.user_id = ? ORDER BY g.created_at DESC LIMIT ? OFFSET ?`)
+        .bind(user.id, perPage, offset),
+      db.prepare("SELECT COUNT(*) AS c FROM v2_gift_card_usage WHERE user_id = ?").bind(user.id)
+    ]);
+    const count = Number(total.results?.[0]?.c || 0);
     return json({ data: (result.results || []).map(row => ({ id: row.id, code: row.code ? `${String(row.code).slice(0, 8)}****` : "", template_name: row.template_name || "", template_type: row.template_type || "", template_type_name: TYPE_NAMES[Number(row.template_type)] || "", rewards_given: parseJson(row.rewards_given, {}), invite_rewards: parseJson(row.invite_rewards, null), multiplier_applied: Number(row.multiplier_applied || 1), created_at: row.created_at })), pagination: { current_page: page, last_page: Math.max(1, Math.ceil(count / perPage)), per_page: perPage, total: count } });
   }
   if (route === "/gift-card/detail" && request.method === "GET") {

@@ -292,8 +292,12 @@ function addOrderMonths(timestamp: number, months: number) {
 }
 
 async function openProcessingOrder(env: CronEnv, order: Record<string, any>, ts: number) {
-  const plan = await env.XBOARD_DB.prepare("SELECT * FROM v2_plan WHERE id = ?").bind(order.plan_id).first<Record<string, any>>();
-  const user = await env.XBOARD_DB.prepare("SELECT * FROM v2_user WHERE id = ?").bind(order.user_id).first<Record<string, any>>();
+  const [planResult, userResult] = await env.XBOARD_DB.batch<Record<string, any>>([
+    env.XBOARD_DB.prepare("SELECT * FROM v2_plan WHERE id = ?").bind(order.plan_id),
+    env.XBOARD_DB.prepare("SELECT * FROM v2_user WHERE id = ?").bind(order.user_id)
+  ]);
+  const plan = planResult.results?.[0] || null;
+  const user = userResult.results?.[0] || null;
   if (!plan || !user) throw new Error(`Order ${order.trade_no} references a missing user or plan`);
 
   const period = String(order.period || "");

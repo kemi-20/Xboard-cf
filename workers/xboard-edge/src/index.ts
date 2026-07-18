@@ -113,6 +113,8 @@ async function ensureStorageOptimization(env: Env) {
 }
 
 function leftRotate(value: number, amount: number) { return (value << amount) | (value >>> (32 - amount)); }
+const MD5_SHIFTS = [7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22,5,9,14,20,5,9,14,20,5,9,14,20,5,9,14,20,4,11,16,23,4,11,16,23,4,11,16,23,4,11,16,23,6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21];
+const MD5_CONSTANTS = Array.from({ length: 64 }, (_, index) => Math.floor(Math.abs(Math.sin(index + 1)) * 0x100000000) >>> 0);
 function md5(input: string) {
   const bytes = new TextEncoder().encode(input);
   const bitLength = bytes.length * 8;
@@ -120,8 +122,6 @@ function md5(input: string) {
   const data = new Uint8Array(paddedLength); data.set(bytes); data[bytes.length] = 0x80;
   const view = new DataView(data.buffer); view.setUint32(paddedLength - 8, bitLength >>> 0, true); view.setUint32(paddedLength - 4, Math.floor(bitLength / 0x100000000), true);
   let a0 = 0x67452301, b0 = 0xefcdab89, c0 = 0x98badcfe, d0 = 0x10325476;
-  const shifts = [7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22,5,9,14,20,5,9,14,20,5,9,14,20,5,9,14,20,4,11,16,23,4,11,16,23,4,11,16,23,4,11,16,23,6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21];
-  const constants = Array.from({ length: 64 }, (_, i) => Math.floor(Math.abs(Math.sin(i + 1)) * 0x100000000) >>> 0);
   for (let offset = 0; offset < data.length; offset += 64) {
     const words = Array.from({ length: 16 }, (_, i) => view.getUint32(offset + i * 4, true));
     let a = a0, b = b0, c = c0, d = d0;
@@ -129,7 +129,7 @@ function md5(input: string) {
       let f: number, g: number;
       if (i < 16) { f = (b & c) | (~b & d); g = i; } else if (i < 32) { f = (d & b) | (~d & c); g = (5 * i + 1) % 16; }
       else if (i < 48) { f = b ^ c ^ d; g = (3 * i + 5) % 16; } else { f = c ^ (b | ~d); g = (7 * i) % 16; }
-      const next = d; d = c; c = b; b = (b + leftRotate((a + f + constants[i] + words[g]) >>> 0, shifts[i])) >>> 0; a = next;
+      const next = d; d = c; c = b; b = (b + leftRotate((a + f + MD5_CONSTANTS[i] + words[g]) >>> 0, MD5_SHIFTS[i])) >>> 0; a = next;
     }
     a0 = (a0 + a) >>> 0; b0 = (b0 + b) >>> 0; c0 = (c0 + c) >>> 0; d0 = (d0 + d) >>> 0;
   }
@@ -2242,16 +2242,18 @@ async function orderRows(env: Env, input: Record<string, any>) {
   const sort = sorts.find(item => allowed[String(item?.id || "")]);
   const orderBy = sort ? `${allowed[String(sort.id)]} ${sort.desc ? "DESC" : "ASC"}` : "o.created_at DESC";
   const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
-  const result = await env.XBOARD_DB.prepare(`SELECT o.*, p.name AS plan_name FROM v2_order o LEFT JOIN v2_plan p ON p.id = o.plan_id LEFT JOIN v2_user u ON u.id = o.user_id${where} ORDER BY ${orderBy} LIMIT ? OFFSET ?`)
-    .bind(...binds, pageSize, (page - 1) * pageSize).all<Record<string, any>>();
-  const total = await env.XBOARD_DB.prepare(`SELECT COUNT(*) AS count FROM v2_order o LEFT JOIN v2_user u ON u.id = o.user_id${where}`).bind(...binds).first<{ count: number }>();
+  const [result, total] = await env.XBOARD_DB.batch<Record<string, any>>([
+    env.XBOARD_DB.prepare(`SELECT o.*, p.name AS plan_name FROM v2_order o LEFT JOIN v2_plan p ON p.id = o.plan_id LEFT JOIN v2_user u ON u.id = o.user_id${where} ORDER BY ${orderBy} LIMIT ? OFFSET ?`)
+      .bind(...binds, pageSize, (page - 1) * pageSize),
+    env.XBOARD_DB.prepare(`SELECT COUNT(*) AS count FROM v2_order o LEFT JOIN v2_user u ON u.id = o.user_id${where}`).bind(...binds)
+  ]);
   const data = (result.results || []).map(row => ({
     ...row,
     status: Number(row.status), type: Number(row.type || 1), commission_status: Number(row.commission_status || 0),
     total_amount: Number(row.total_amount || 0), period: legacyOrderPeriod(row.period),
     plan: row.plan_id ? { id: Number(row.plan_id), name: row.plan_name || "" } : null
   }));
-  return paginated(data, Number(total?.count || 0), page, pageSize);
+  return paginated(data, Number(total.results?.[0]?.count || 0), page, pageSize);
 }
 
 async function orderDetail(env: Env, id: number) {
@@ -2414,8 +2416,12 @@ async function adminOrder(request: Request, env: Env, route: string): Promise<Re
     return await cancelOrder(env, order, now()) ? ok(true) : fail("只能对待支付的订单进行操作", 400, 400);
   }
   if (route === "/order/paid") {
-    const plan = await env.XBOARD_DB.prepare("SELECT * FROM v2_plan WHERE id=?").bind(order.plan_id).first<Record<string, any>>();
-    const user = await env.XBOARD_DB.prepare("SELECT * FROM v2_user WHERE id=?").bind(order.user_id).first<Record<string, any>>();
+    const [planResult, userResult] = await env.XBOARD_DB.batch<Record<string, any>>([
+      env.XBOARD_DB.prepare("SELECT * FROM v2_plan WHERE id=?").bind(order.plan_id),
+      env.XBOARD_DB.prepare("SELECT * FROM v2_user WHERE id=?").bind(order.user_id)
+    ]);
+    const plan = planResult.results?.[0] || null;
+    const user = userResult.results?.[0] || null;
     if (!plan || !user) return fail("订单关联的用户或订阅不存在", 400, 400202);
     const period = String(order.period || ""); const ts = now();
     const callbackNo = String(input.callback_no || "manual_operation");

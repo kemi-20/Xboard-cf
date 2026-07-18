@@ -319,6 +319,25 @@ test("high-traffic admin statistics use aggregate and batched D1 reads", () => {
   assert.doesNotMatch(statistics, /await deps\.firstNumber/);
 });
 
+test("independent paginated and order reads share D1 batches", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const database = fs.readFileSync("src/db.ts", "utf8");
+  const giftCards = fs.readFileSync("src/gift-card.ts", "utf8");
+  const orderFetch = source.slice(source.indexOf("async function orderRows"), source.indexOf("async function orderDetail"));
+  const orderPaid = source.slice(source.indexOf('route === "/order/paid"'), source.indexOf("async function sortAdminRows"));
+  assert.match(database.slice(database.indexOf("export async function list"), database.indexOf("export async function rows")), /db\.batch\(\[/);
+  assert.match(orderFetch, /XBOARD_DB\.batch<Record<string, any>>\(\[/);
+  assert.match(orderPaid, /XBOARD_DB\.batch<Record<string, any>>\(\[/);
+  assert.equal((giftCards.match(/db\.batch<AnyRow>\(\[/g) || []).length >= 5, true);
+});
+
+test("Edge keeps its audited 64-step MD5 compatibility implementation", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const shifts = source.match(/const MD5_SHIFTS = \[([^\]]+)\]/)?.[1].split(",") || [];
+  assert.equal(shifts.length, 64);
+  assert.match(source, /MD5_CONSTANTS\[i\].*MD5_SHIFTS\[i\]/);
+});
+
 test("Redis migration snapshots and writes each batch without per-key D1 queries", () => {
   const source = fs.readFileSync("src/migration.ts", "utf8");
   const section = source.slice(source.indexOf("async function importRedis"), source.indexOf("async function finishMigration"));
@@ -549,7 +568,10 @@ test("node list exposes upstream-compatible health and load fields", () => {
   assert.match(source, /available_status: availableStatus/);
   assert.match(source, /load_status: loadStatus/);
   assert.match(source, /online_conn: Number\(metrics\?\.active_connections \|\| 0\)/);
-  assert.match(source, /machines\.find\(item => Number\(item\.id\) === Number\(server\.machine_id\)\)/);
+  assert.match(source, /const machineById = new Map\(machines\.map\(machine => \[Number\(machine\.id\), machine\]\)\)/);
+  assert.match(source, /const serverById = new Map\(servers\.map\(server => \[Number\(server\.id\), server\]\)\)/);
+  assert.match(source, /machineById\.get\(Number\(server\.machine_id\)\)/);
+  assert.match(source, /serverById\.get\(Number\(server\.parent_id\)\)/);
   assert.match(source, /machineState\.connected === false && disconnectedAt >= reportedAt/);
   assert.match(source, /machineOnline \? machineSeenAt : 0/);
   assert.match(source, /const rawLoadStatus = nodeState\.load_status \|\| machineState\.load_status \|\| null/);

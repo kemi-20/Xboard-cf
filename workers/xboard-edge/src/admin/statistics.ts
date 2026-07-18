@@ -2,6 +2,13 @@ import { cachedData } from "../cache";
 import { now, ONLINE_RETENTION_SECONDS } from "../compat";
 import type { D1Database } from "../types";
 
+const ORDER_STAT_LABELS: Record<string, string> = {
+  paid_total: "收款金额",
+  paid_count: "收款笔数",
+  commission_total: "佣金金额",
+  commission_count: "佣金笔数"
+};
+
 type StatisticsEnv = { XBOARD_DB: D1Database };
 
 export type StatisticsDeps<E extends StatisticsEnv> = {
@@ -126,8 +133,7 @@ export async function orderStats(env: StatisticsEnv, url: URL) {
   const dailyStats = rows.map(row => {
     const date = dateString(Number(row.record_at || 0));
     if (type && allowedTypes.has(type)) {
-      const labels: Record<string, string> = { paid_total: "收款金额", paid_count: "收款笔数", commission_total: "佣金金额", commission_count: "佣金笔数" };
-      return { date, value: Number(row[type] || 0), type: labels[type] };
+      return { date, value: Number(row[type] || 0), type: ORDER_STAT_LABELS[type] };
     }
     const paidTotal = Number(row.paid_total || 0);
     const paidCount = Number(row.paid_count || 0);
@@ -144,16 +150,16 @@ export async function orderStats(env: StatisticsEnv, url: URL) {
     };
   });
   const list = [...dailyStats].reverse();
-  const fullRows = rows.map(row => ({
-    paid_total: Number(row.paid_total || 0),
-    paid_count: Number(row.paid_count || 0),
-    commission_total: Number(row.commission_total || 0),
-    commission_count: Number(row.commission_count || 0)
-  }));
-  const paidTotal = fullRows.reduce((sum, item) => sum + item.paid_total, 0);
-  const paidCount = fullRows.reduce((sum, item) => sum + item.paid_count, 0);
-  const commissionTotal = fullRows.reduce((sum, item) => sum + item.commission_total, 0);
-  const commissionCount = fullRows.reduce((sum, item) => sum + item.commission_count, 0);
+  let paidTotal = 0;
+  let paidCount = 0;
+  let commissionTotal = 0;
+  let commissionCount = 0;
+  for (const row of rows) {
+    paidTotal += Number(row.paid_total || 0);
+    paidCount += Number(row.paid_count || 0);
+    commissionTotal += Number(row.commission_total || 0);
+    commissionCount += Number(row.commission_count || 0);
+  }
   return {
     summary: {
       start_date: start || (rows.length ? dateString(Number(rows.at(-1)?.record_at || 0)) : dateString(now())),

@@ -34,9 +34,11 @@ export function parseSettingValue(value: unknown) {
 export async function list(db: D1Database, table: string, page = 1, pageSize = 20) {
   const safe = table.replace(/[^a-zA-Z0-9_]/g, "");
   const offset = Math.max(0, page - 1) * pageSize;
-  const rows = await db.prepare(`SELECT * FROM ${safe} ORDER BY id DESC LIMIT ? OFFSET ?`).bind(pageSize, offset).all();
-  const total = await db.prepare(`SELECT COUNT(*) AS c FROM ${safe}`).first<{ c: number }>();
-  return { data: rows.results || [], total: total?.c || 0, current_page: page, per_page: pageSize };
+  const [rows, total] = await db.batch([
+    db.prepare(`SELECT * FROM ${safe} ORDER BY id DESC LIMIT ? OFFSET ?`).bind(pageSize, offset),
+    db.prepare(`SELECT COUNT(*) AS c FROM ${safe}`)
+  ]);
+  return { data: rows.results || [], total: Number((total.results?.[0] as { c?: number } | undefined)?.c || 0), current_page: page, per_page: pageSize };
 }
 export async function rows(db: D1Database, table: string, limit = 500) {
   const safe = table.replace(/[^a-zA-Z0-9_]/g, "");
