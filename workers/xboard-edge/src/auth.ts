@@ -1,6 +1,6 @@
-import type { D1Database, KVNamespace } from "./types";
+import type { D1Database, KVNamespace } from "./types.ts";
 import bcrypt from "bcryptjs";
-import { getBearer, md5, token, now, sha256Hex } from "./compat";
+import { getBearer, md5, token, now, sha256Hex } from "./compat.ts";
 
 function equalText(actual: string, expected: string) {
   const a = new TextEncoder().encode(actual);

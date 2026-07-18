@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import { __test } from "../src/subscription/index.ts";
 
 test("xboard-edge contains the subscription handler", () => {
@@ -171,8 +172,12 @@ test("subscription preparation follows upstream expiry, group, dynamic-port and 
   const selected = __test.randomizedPort("2000-1000");
   assert.ok(selected.port >= 1000 && selected.port <= 2000);
   assert.equal(selected.ports, "2000-1000");
-  const password = __test.serverPassword({ type: "shadowsocks", created_at: 1700000000, protocol_settings: { cipher: "2022-blake3-aes-128-gcm" } }, { uuid: "00000000-0000-4000-8000-000000000000" }, new Map());
-  assert.match(password, /^[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+$/);
+  const uuid = "00000000-0000-4000-8000-000000000000";
+  const password = __test.serverPassword({ type: "shadowsocks", created_at: 1700000000, protocol_settings: { cipher: "2022-blake3-aes-128-gcm" } }, { uuid }, new Map());
+  const standardDigest = createHash("md5").update("1700000000").digest("hex");
+  const expected = `${Buffer.from(standardDigest.slice(0, 16)).toString("base64")}:${Buffer.from(uuid.slice(0, 16)).toString("base64")}`;
+  assert.equal(__test.md5("1700000000"), standardDigest);
+  assert.equal(password, expected);
 });
 
 test("QuantumultX and Loon use their official line formats", () => {

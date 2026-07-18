@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 
 const edgeSource = () => [
   "src/index.ts",
@@ -358,6 +359,18 @@ test("Edge keeps its audited 64-step MD5 compatibility implementation", () => {
   const shifts = source.match(/const MD5_SHIFTS = \[([^\]]+)\]/)?.[1].split(",") || [];
   assert.equal(shifts.length, 64);
   assert.match(source, /MD5_CONSTANTS\[i\].*MD5_SHIFTS\[i\]/);
+});
+
+test("legacy MD5 password verification matches the standard digest", async () => {
+  const { md5 } = await import(`../src/compat.ts?md5=${Date.now()}`);
+  const { verifyPassword } = await import(`../src/auth.ts?md5=${Date.now()}`);
+  for (const value of ["", "test", "XBoard-密码-123"]) {
+    assert.equal(md5(value), createHash("md5").update(value).digest("hex"));
+  }
+  const password = "legacy-password";
+  const salt = "legacy-salt";
+  assert.equal(await verifyPassword(password, createHash("md5").update(password).digest("hex"), "md5"), true);
+  assert.equal(await verifyPassword(password, createHash("md5").update(password + salt).digest("hex"), "md5salt", salt), true);
 });
 
 test("Redis migration snapshots and writes each batch without per-key D1 queries", () => {

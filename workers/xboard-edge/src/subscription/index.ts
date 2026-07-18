@@ -51,7 +51,7 @@ function leftRotate(value: number, amount: number) {
   return (value << amount) | (value >>> (32 - amount));
 }
 
-const SUBSCRIPTION_MD5_SHIFTS = [7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22,5,9,14,20,5,9,14,20,5,9,14,20,5,9,14,20,4,11,16,23,4,11,16,23,4,11,16,23,6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21];
+const SUBSCRIPTION_MD5_SHIFTS = [7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22,5,9,14,20,5,9,14,20,5,9,14,20,5,9,14,20,4,11,16,23,4,11,16,23,4,11,16,23,4,11,16,23,6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21];
 const SUBSCRIPTION_MD5_CONSTANTS = Array.from({ length: 64 }, (_, index) => Math.floor(Math.abs(Math.sin(index + 1)) * 0x100000000) >>> 0);
 
 function md5(input: string) {
@@ -1177,7 +1177,7 @@ async function optionalKvVersion(kv: KVNamespace, key: string) {
   catch { return "0"; }
 }
 
-export const __test = { clientOf, clientDetails, versionAtLeast, filterByClientCompatibility, regexValue, protocolPrefix, traffic, nextResetAt, decorateServers, general, generalUri, yamlProfile, clashProxy, singboxOutbound, singboxProfile, singboxCoreVersion, adaptSingboxConfig, shadowsocksProfile, textTemplateProfile, proxyLine, shadowrocketLine, quantumultXLine, loonLine, serverPassword, randomizedPort, replaceByPattern, subscriptionUrl, output, responseHeaders, matchesConfiguredSubscribePath, optionalKvVersion };
+export const __test = { clientOf, clientDetails, versionAtLeast, filterByClientCompatibility, regexValue, protocolPrefix, traffic, nextResetAt, decorateServers, general, generalUri, yamlProfile, clashProxy, singboxOutbound, singboxProfile, singboxCoreVersion, adaptSingboxConfig, shadowsocksProfile, textTemplateProfile, proxyLine, shadowrocketLine, quantumultXLine, loonLine, md5, serverPassword, randomizedPort, replaceByPattern, subscriptionUrl, output, responseHeaders, matchesConfiguredSubscribePath, optionalKvVersion };
 
 export async function handleSubscriptionRequest(request: Request, env: Env): Promise<Response> {
     env = { ...env, XBOARD_DB: replicaDatabase(env.SUBSCRIPTION_DB || env.XBOARD_DB) };
