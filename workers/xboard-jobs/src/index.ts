@@ -49,9 +49,6 @@ async function ensureTrafficDedupSchema(env: Env) {
         record_at INTEGER NOT NULL,
         created_at INTEGER NOT NULL
       ) WITHOUT ROWID`).run();
-      try {
-        await env.XBOARD_DB.prepare("DELETE FROM v2_settings WHERE name LIKE 'analytics_%'").run();
-      } catch { /* Fresh schema initialization may still be creating v2_settings. */ }
     })().then(() => {
       trafficDedupSchemaReady = true;
     }).finally(() => {
@@ -59,6 +56,11 @@ async function ensureTrafficDedupSchema(env: Env) {
     });
   }
   await trafficDedupSchemaPromise;
+}
+
+function isMissingTrafficSchema(error: unknown) {
+  const message = String((error as Error)?.message || error).toLowerCase();
+  return message.includes("no such table: v2_traffic_dedup") || message.includes("no such table: v2_traffic_stats_outbox");
 }
 
 async function stableBatchId(eventIds: string[]) {
@@ -89,8 +91,16 @@ async function dispatchOutbox(env: Env, row: Record<string, any>) {
 }
 
 async function replayOutbox(env: Env, limit = 100) {
-  await ensureTrafficDedupSchema(env);
-  const rows = await env.XBOARD_DB.prepare("SELECT * FROM v2_traffic_stats_outbox ORDER BY created_at ASC LIMIT ?").bind(Math.min(500, Math.max(1, limit))).all<Record<string, any>>();
+  const loadRows = () => env.XBOARD_DB.prepare("SELECT * FROM v2_traffic_stats_outbox ORDER BY created_at ASC LIMIT ?")
+    .bind(Math.min(500, Math.max(1, limit))).all<Record<string, any>>();
+  let rows;
+  try {
+    rows = await loadRows();
+  } catch (error) {
+    if (!isMissingTrafficSchema(error)) throw error;
+    await ensureTrafficDedupSchema(env);
+    rows = await loadRows();
+  }
   let delivered = 0;
   for (const row of rows.results || []) {
     await dispatchOutbox(env, row);
@@ -249,10 +259,17 @@ async function runOnce(env: Env, eventId: string, type: string, payload: unknown
 async function trafficCandidates(env: Env, events: any[]) {
   const unique = [...new Map(events.filter(event => event?.event_id).map(event => [String(event.event_id), event])).values()];
   if (!unique.length) return { candidates: [] as any[], staleEventIds: [] as string[] };
-  await ensureTrafficDedupSchema(env);
   const ids = unique.map(event => String(event.event_id));
-  const completed = await env.XBOARD_DB.prepare(`SELECT event_id FROM v2_traffic_dedup WHERE event_id IN (${ids.map(() => "?").join(",")})`)
+  const loadCompleted = () => env.XBOARD_DB.prepare(`SELECT event_id FROM v2_traffic_dedup WHERE event_id IN (${ids.map(() => "?").join(",")})`)
     .bind(...ids).all<{ event_id: string }>();
+  let completed;
+  try {
+    completed = await loadCompleted();
+  } catch (error) {
+    if (!isMissingTrafficSchema(error)) throw error;
+    await ensureTrafficDedupSchema(env);
+    completed = await loadCompleted();
+  }
   const completedIds = new Set((completed.results || []).map(row => String(row.event_id)));
   const legacyIds = ids.filter(id => !completedIds.has(id));
   const existing = legacyIds.length
@@ -360,7 +377,7 @@ function trafficEventGroups(events: any[], maxRows = 250, maxEvents = 25) {
   return groups;
 }
 
-async function trafficBatch(env: Env, events: any[]) {
+async function trafficBatch(env: Env, events: any[], schemaRetry = false) {
   if (!events.length) return;
   const { candidates, staleEventIds } = await trafficCandidates(env, events);
   if (!candidates.length) return;
@@ -390,7 +407,13 @@ async function trafficBatch(env: Env, events: any[]) {
   statements.push(env.XBOARD_DB.prepare(`INSERT INTO v2_traffic_stats_outbox(batch_id, event_ids, user_aggregates, server_aggregates, transfer_used, record_at, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(batch_id) DO NOTHING`)
     .bind(batchId, JSON.stringify(candidates.map(event => String(event.event_id)).sort()), JSON.stringify(userAggregates), JSON.stringify(serverAggregates), aggregate.transferUsed, recordAt, ts));
-  await env.XBOARD_DB.batch(statements);
+  try {
+    await env.XBOARD_DB.batch(statements);
+  } catch (error) {
+    if (schemaRetry || !isMissingTrafficSchema(error)) throw error;
+    await ensureTrafficDedupSchema(env);
+    return trafficBatch(env, events, true);
+  }
   try {
     await dispatchOutbox(env, { batch_id: batchId, user_aggregates: userAggregates, server_aggregates: serverAggregates, transfer_used: aggregate.transferUsed, record_at: recordAt, created_at: ts });
   } catch (error) {

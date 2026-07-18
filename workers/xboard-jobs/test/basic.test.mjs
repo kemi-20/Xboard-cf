@@ -131,6 +131,11 @@ test("traffic events use event-level idempotency and conditional exceeded checks
   assert.match(source, /INSERT INTO v2_traffic_dedup\(event_id, created_at\) VALUES \(\?, \?\)/);
   assert.doesNotMatch(source, /INSERT OR IGNORE INTO v2_traffic_dedup/);
   assert.match(source, /CREATE TABLE IF NOT EXISTS v2_traffic_dedup/);
+  assert.match(source, /isMissingTrafficSchema\(error\)/);
+  assert.match(source, /return trafficBatch\(env, events, true\)/);
+  assert.doesNotMatch(source, /DELETE FROM v2_settings WHERE name LIKE 'analytics_%'/);
+  assert.doesNotMatch(source, /async function replayOutbox[\s\S]*?await ensureTrafficDedupSchema\(env\);[\s\S]*?const loadRows/);
+  assert.doesNotMatch(source, /async function trafficCandidates[\s\S]*?await ensureTrafficDedupSchema\(env\);[\s\S]*?const ids/);
   assert.match(source, /WITHOUT ROWID/);
   assert.doesNotMatch(source, /VALUES \(\?, 'traffic', 'done', '', NULL, \?, \?\)/);
   assert.match(source, /INSERT INTO v2_traffic_pending_check/);
