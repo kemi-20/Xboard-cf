@@ -1256,6 +1256,9 @@ test("admin online state merges StatusHub with recent authoritative D1 state", (
   assert.match(source, /const persistedCount = Number\(row\.last_online_at \|\| 0\) >= observedAt - ONLINE_RETENTION_SECONDS/);
   assert.match(source, /online_count: Math\.max\(liveCount, persistedCount\)/);
   assert.match(source, /last_online_at: liveCount > 0 \? observedAt : row\.last_online_at/);
+  const adminBundle = fs.readFileSync("public/assets/index-CF20260713.js", "utf8");
+  assert.match(adminBundle, /r=e\.last_online_at\|\|e\.t\|\|0,s=\(e\.online_count\|\|0\)>0/);
+  assert.doesNotMatch(adminBundle, /r=e\.t\|\|0,s=Date\.now\(\)\/1e3-r<120/);
   assert.match(source, /onlineUsers: Math\.max\(Number\(users\.online_users/);
   assert.match(source, /online_devices: Math\.max\(Number\(users\.online_devices/);
 });
