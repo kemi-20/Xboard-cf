@@ -5,6 +5,6 @@ export function redactAuditValue(value: unknown): unknown {
   if (!value || typeof value !== "object") return value;
   return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, nested]) => [
     key,
-    SENSITIVE_KEY.test(key) ? "[REDACTED]" : redactAuditValue(nested)
+    key.toLowerCase() === "key" || SENSITIVE_KEY.test(key) ? "[REDACTED]" : redactAuditValue(nested)
   ]));
 }

@@ -819,6 +819,7 @@ async function finishMigration(request: Request, env: MigrationEnv) {
   const progress = safeJson(run.progress) as Record<string, any>;
   const counts: Record<string, number> = {};
   const warnings: string[] = [];
+  const sourceMismatches: string[] = [];
   const supportedPayments = [...supportedPaymentMethods];
   await env.XBOARD_DB.prepare(`UPDATE v2_payment SET enable=0,updated_at=? WHERE payment IS NULL OR payment NOT IN (${supportedPayments.map(() => "?").join(",")})`)
     .bind(now(), ...supportedPayments).run();
@@ -827,6 +828,21 @@ async function finishMigration(request: Request, env: MigrationEnv) {
   for (const row of unsupportedPayments.results || []) {
     if (!supportedPaymentMethods.has(String(row.payment))) warnings.push(`v2_payment: 未支持的渠道 ${row.payment} 已保留配置并停用`);
   }
+  const missingPaymentUuids = await env.XBOARD_DB.prepare("SELECT COUNT(*) AS count FROM v2_payment WHERE uuid IS NULL OR TRIM(uuid)=''")
+    .first<{ count: number }>();
+  if (Number(missingPaymentUuids?.count || 0) > 0) {
+    await env.XBOARD_DB.prepare("UPDATE v2_payment SET enable=0,updated_at=? WHERE uuid IS NULL OR TRIM(uuid)=''")
+      .bind(now()).run();
+    warnings.push(`v2_payment: ${Number(missingPaymentUuids?.count || 0)} 个渠道缺少回调 UUID，配置已保留并停用`);
+  }
+  const duplicatePaymentCallbacks = await env.XBOARD_DB.prepare(`SELECT payment,uuid,COUNT(*) AS count
+    FROM v2_payment WHERE payment IS NOT NULL AND uuid IS NOT NULL AND uuid<>''
+    GROUP BY payment,uuid HAVING COUNT(*)>1`).all<{ payment: string; uuid: string; count: number }>();
+  for (const row of duplicatePaymentCallbacks.results || []) {
+    await env.XBOARD_DB.prepare("UPDATE v2_payment SET enable=0,updated_at=? WHERE payment=? AND uuid=?")
+      .bind(now(), row.payment, row.uuid).run();
+    warnings.push(`v2_payment: 渠道 ${row.payment} 存在重复回调 UUID，相关配置已保留并停用`);
+  }
   const targetMismatches: Array<{ table: string; expected: number; actual: number }> = [];
   if (run.source_type !== "redis") {
     const countedTables = MIGRATION_TABLES.filter(table => run.mode === "overwrite" || sourceCounts[table] !== undefined);
@@ -834,7 +850,7 @@ async function finishMigration(request: Request, env: MigrationEnv) {
     for (const table of MIGRATION_TABLES) {
       if (sourceCounts[table] !== undefined) {
         const received = Number(progress[table]?.received || 0);
-        if (received !== Number(sourceCounts[table])) warnings.push(`${table}: 源库 ${sourceCounts[table]} 行，实际接收 ${received} 行`);
+        if (received !== Number(sourceCounts[table])) sourceMismatches.push(`${table}: 源库 ${sourceCounts[table]} 行，实际接收 ${received} 行`);
       }
       if (run.mode === "overwrite") {
         const expected = Number(progress[table]?.inserted || 0);
@@ -842,8 +858,8 @@ async function finishMigration(request: Request, env: MigrationEnv) {
       }
     }
   }
-  if (warnings.length || targetMismatches.length) {
-    const details = { phase: "finish_validation", source_mismatches: warnings, target_mismatches: targetMismatches };
+  if (sourceMismatches.length || targetMismatches.length) {
+    const details = { phase: "finish_validation", source_mismatches: sourceMismatches, target_mismatches: targetMismatches };
     await markMigrationFailed(env, runId, "迁移数据接收数量校验失败", details);
     return migrationError("完整迁入校验失败，目标库可能仍含旧数据或缺少新数据，任务已中断，可一键还原", 409, details);
   }

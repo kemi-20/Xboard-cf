@@ -34,8 +34,19 @@ function field(label: string, description: string, options: Partial<PaymentFormF
 }
 
 function cents(value: unknown) {
-  const amount = Number.parseFloat(String(value ?? ""));
-  return Number.isFinite(amount) ? Math.round(amount * 100) : undefined;
+  const match = String(value ?? "").trim().match(/^(\d+)(?:\.(\d+))?$/);
+  if (!match) return undefined;
+  const fraction = match[2] || "";
+  if (fraction.slice(2).replace(/0/g, "")) return undefined;
+  const amount = BigInt(match[1]) * 100n + BigInt((fraction + "00").slice(0, 2));
+  return amount <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(amount) : undefined;
+}
+
+function integerAmount(value: unknown) {
+  const raw = String(value ?? "").trim();
+  if (!/^\d+$/.test(raw)) return undefined;
+  const amount = Number(raw);
+  return Number.isSafeInteger(amount) ? amount : undefined;
 }
 
 function decimal(amount: number) {
@@ -69,13 +80,31 @@ function safeJson(raw: string) {
   try { return JSON.parse(raw) as Record<string, any>; } catch { throw new PaymentError("支付服务返回了无效数据", 502); }
 }
 
+export function isPrivateNetworkHost(value: string) {
+  const host = value.trim().toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  if (host === "localhost" || host.endsWith(".localhost")) return true;
+  if (host.includes(":")) {
+    return host === "::" || host === "::1" || host.startsWith("::ffff:")
+      || /^f[cd][0-9a-f]{2}:/.test(host) || /^fe[89ab][0-9a-f]:/.test(host);
+  }
+  if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) return false;
+  const octets = host.split(".").map(Number);
+  if (octets.some(value => value > 255)) return true;
+  const [first, second] = octets;
+  return first === 0 || first === 10 || first === 127
+    || (first === 100 && second >= 64 && second <= 127)
+    || (first === 169 && second === 254)
+    || (first === 172 && second >= 16 && second <= 31)
+    || (first === 192 && second === 168)
+    || (first === 198 && (second === 18 || second === 19))
+    || first >= 224;
+}
+
 function validGatewayUrl(value: string) {
   let url: URL;
   try { url = new URL(value); } catch { throw new PaymentError("支付网关地址无效", 422); }
   if (url.protocol !== "https:" || url.username || url.password) throw new PaymentError("支付网关必须使用 HTTPS", 422);
-  const host = url.hostname.toLowerCase();
-  if (host === "localhost" || host === "::1" || host.endsWith(".localhost") || /^127\./.test(host) || /^10\./.test(host)
-    || /^192\.168\./.test(host) || /^169\.254\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host)) {
+  if (isPrivateNetworkHost(url.hostname)) {
     throw new PaymentError("支付网关不能指向本地或私有地址", 422);
   }
   return url;
@@ -274,6 +303,7 @@ const btcpay: PaymentProvider = {
     if (!constantTimeEqual(request.headers.get("btcpay-sig") || "", expected)) throw new PaymentError("BTCPay 回调签名无效", 400);
     const event = safeJson(raw);
     if (String(event.type || "") !== "InvoiceSettled") return { state: "ignored", responseText: "OK" };
+    if (String(event.storeId || "") !== text(config, "btcpay_storeId")) throw new PaymentError("BTCPay Store ID 不匹配", 400);
     const invoiceId = String(event.invoiceId || "");
     if (!invoiceId) throw new PaymentError("BTCPay Invoice ID 缺失", 400);
     const url = joinUrl(text(config, "btcpay_url"), `api/v1/stores/${encodeURIComponent(text(config, "btcpay_storeId"))}/invoices/${encodeURIComponent(invoiceId)}`);
@@ -577,7 +607,7 @@ const epay: PaymentProvider = {
     if (!constantTimeEqual(String(params.sign || "").toLowerCase(), expected)) throw new PaymentError("易支付回调签名无效", 400);
     if (String(params.pid || "") !== text(config, "pid")) throw new PaymentError("易支付商户 ID 不匹配", 400);
     if (String(params.trade_status || "") !== "TRADE_SUCCESS") return { state: "ignored", responseText: "success" };
-    if (text(config, "type") && params.type && String(params.type) !== text(config, "type")) throw new PaymentError("易支付类型不匹配", 400);
+    if (text(config, "type") && String(params.type || "") !== text(config, "type")) throw new PaymentError("易支付类型不匹配", 400);
     return {
       state: "paid",
       tradeNo: String(params.out_trade_no || ""),
@@ -632,17 +662,18 @@ const mgate: PaymentProvider = {
     const sorted = Object.fromEntries(Object.entries(params).filter(([key]) => key !== "sign").sort(([a], [b]) => a.localeCompare(b)));
     const expected = md5(`${toSearchParams(sorted).toString()}${text(config, "mgate_app_secret")}`);
     if (!constantTimeEqual(String(params.sign || "").toLowerCase(), expected)) throw new PaymentError("MGate 回调签名无效", 400);
-    if (params.app_id && String(params.app_id) !== text(config, "mgate_app_id")) throw new PaymentError("MGate App ID 不匹配", 400);
-    if (params.status && !["paid", "success", "TRADE_SUCCESS", "2"].includes(String(params.status))) {
+    if (String(params.app_id || "") !== text(config, "mgate_app_id")) throw new PaymentError("MGate App ID 不匹配", 400);
+    if (!["paid", "success", "TRADE_SUCCESS", "2"].includes(String(params.status || ""))) {
       return { state: "ignored", responseText: "success" };
     }
+    if (!String(params.source_currency || "").trim()) throw new PaymentError("MGate 回调缺少货币", 400);
     return {
       state: "paid",
       tradeNo: String(params.out_trade_no || ""),
       callbackNo: String(params.trade_no || ""),
       providerReference: String(params.trade_no || ""),
-      amount: params.total_amount === undefined ? undefined : Math.trunc(Number(params.total_amount)),
-      currency: String(params.source_currency || text(config, "mgate_source_currency") || "CNY").toUpperCase(),
+      amount: integerAmount(params.total_amount),
+      currency: String(params.source_currency).toUpperCase(),
       responseText: "success"
     };
   }
@@ -710,7 +741,8 @@ const stripe: PaymentProvider = {
     if (!/^sk_(test|live)_/.test(text(config, "stripe_secret_key"))) throw new PaymentError("Stripe Secret Key 格式无效", 422);
     if (!/^whsec_/.test(text(config, "stripe_webhook_secret"))) throw new PaymentError("Stripe Webhook Secret 格式无效", 422);
     const descriptor = text(config, "stripe_statement_descriptor");
-    if (descriptor && (descriptor.length < 5 || descriptor.length > 22 || /[<>'"*]/.test(descriptor))) {
+    if (descriptor && (descriptor.length < 5 || descriptor.length > 22
+      || !/[A-Za-z]/.test(descriptor) || !/^[\x20-\x7e]+$/.test(descriptor) || /[<>'"*\\]/.test(descriptor))) {
       throw new PaymentError("Stripe 账单描述格式无效", 422);
     }
   },

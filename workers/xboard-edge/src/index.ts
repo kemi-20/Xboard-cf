@@ -851,11 +851,19 @@ async function handleTelegramMessage(request: Request, env: Env, botToken: strin
 async function guestApi(request: Request, env: Env, path: string) {
   const paymentMatch = path.match(/^\/api\/v1\/guest\/payment\/notify\/([^/]+)\/([^/]+)$/);
   if (paymentMatch && (request.method === "POST" || request.method === "GET")) {
+    let paymentMethod: string;
+    let paymentUuid: string;
+    try {
+      paymentMethod = decodeURIComponent(paymentMatch[1]);
+      paymentUuid = decodeURIComponent(paymentMatch[2]);
+    } catch {
+      return new Response("invalid payment callback path", { status: 400 });
+    }
     return handlePaymentCallback(
       request,
       env,
-      decodeURIComponent(paymentMatch[1]),
-      decodeURIComponent(paymentMatch[2]),
+      paymentMethod,
+      paymentUuid,
       (order, callbackNo) => completeOrder(env, order, callbackNo)
     );
   }
@@ -2242,6 +2250,8 @@ async function cancelOrder(env: Env, order: Record<string, any>, ts: number) {
   const refund = Math.max(0, Number(order.balance_amount || 0));
   const statements = [];
   if (refund) statements.push(env.XBOARD_DB.prepare("UPDATE v2_user SET balance = COALESCE(balance, 0) + COALESCE((SELECT balance_amount FROM v2_order WHERE id = ? AND status = 0), 0), updated_at = ? WHERE id = ?").bind(order.id, ts, order.user_id));
+  statements.push(env.XBOARD_DB.prepare(`UPDATE v2_payment_transactions SET status='canceled',updated_at=?
+    WHERE order_id=? AND status NOT IN ('paid','paid_unapplied','canceled','superseded')`).bind(ts, order.id));
   statements.push(env.XBOARD_DB.prepare("UPDATE v2_order SET status = 2, updated_at = ? WHERE id = ? AND status = 0").bind(ts, order.id));
   const results = await env.XBOARD_DB.batch(statements);
   return Number((results.at(-1)?.meta as any)?.changes || 0) === 1;
@@ -2301,9 +2311,10 @@ async function adminOrder(request: Request, env: Env, route: string): Promise<Re
   }
   if (route === "/order/paid") {
     const callbackNo = String(input.callback_no || "manual_operation");
-    return await completeOrder(env, order, callbackNo)
-      ? ok(true)
-      : fail("订单开通失败，请稍后重试", 500, 500);
+    if (!await completeOrder(env, order, callbackNo)) return fail("订单开通失败，请稍后重试", 500, 500);
+    await env.XBOARD_DB.prepare(`UPDATE v2_payment_transactions SET status='superseded',updated_at=?
+      WHERE order_id=? AND status NOT IN ('paid','paid_unapplied','canceled','superseded')`).bind(now(), order.id).run();
+    return ok(true);
   }
   return null;
 }

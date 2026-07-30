@@ -265,9 +265,9 @@ Stripe
 
 `Coinbase` 用于兼容旧 Coinbase Commerce Charge 配置，`CoinbaseBusiness` 使用当前 Checkout API，并可在同一配置项中明确选择生产或沙盒环境。Stripe 使用托管式 Checkout Sessions，固定 `mode=payment`，不收集或保存卡号；套餐有效期仍由 XBoard 订单系统管理。Creem 的固定 Product 定价模型与 XBoard 动态实付金额、优惠券和余额抵扣不匹配，因此没有加入。
 
-所有回调都必须通过签名、订单号、渠道 UUID、支付会话、金额、币种和成功状态校验。合法回调还会向 Provider 二次查询最终状态（适用的渠道），随后通过同一个 D1 原子结算服务开通套餐。重复、并发或重放回调不会重复开通；D1 批次失败也不会留下 `status=1` 的半完成订单。内部 `v2_payment_transactions` 只保存必要的幂等元数据，不保存完整 webhook 正文。
+所有回调都必须通过签名、订单号、唯一渠道 UUID、支付会话、金额、币种和成功状态校验。合法回调还会向 Provider 二次查询最终状态（适用的渠道），随后通过同一个 D1 原子结算服务开通套餐。重复、并发或重放回调不会重复开通；迁移数据中若缺少渠道 UUID 或出现重复 UUID，相关渠道会保留但停用，回调也会拒绝猜测其中任意一个。D1 批次失败不会留下 `status=1` 的半完成订单。内部 `v2_payment_transactions` 只保存必要的幂等元数据，不保存完整 webhook 正文。
 
-支付配置保存在 `v2_payment.config`，管理员读取配置和 SQLite 完整导出均会包含私钥、API Key 与 Webhook Secret。管理员审计日志会递归脱敏这些字段，但导出的数据库不会脱敏，必须作为敏感凭据安全保管。自定义网关和通知域名只接受 HTTPS；Provider 请求有超时、响应大小和返回结构限制。
+支付配置保存在 `v2_payment.config`，管理员读取配置和 SQLite 完整导出均会包含私钥、API Key 与 Webhook Secret。管理员审计日志会递归脱敏这些字段，但导出的数据库不会脱敏，必须作为敏感凭据安全保管。渠道一旦被订单或支付事务引用，其 Provider、密钥与 Webhook 配置将被冻结；需要轮换凭据时应停用旧渠道并新建渠道，使已创建支付会话的旧回调仍可安全验签。自定义网关和通知域名只接受公开 HTTPS 地址；Provider 请求有超时、响应大小和返回结构限制。
 
 Stripe 应在 Dashboard 为当前支付渠道的通知 URL 创建 webhook endpoint，并订阅：
 
