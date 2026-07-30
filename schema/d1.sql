@@ -438,6 +438,29 @@ CREATE TABLE IF NOT EXISTS v2_order (
   updated_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS v2_payment (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, payment TEXT, config TEXT, enable INTEGER DEFAULT 0, uuid TEXT, icon TEXT, handling_fee_fixed INTEGER, handling_fee_percent REAL, notify_domain TEXT, sort INTEGER DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS v2_payment_transactions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id INTEGER NOT NULL,
+  trade_no TEXT NOT NULL,
+  payment_id INTEGER NOT NULL,
+  provider TEXT NOT NULL,
+  provider_reference TEXT,
+  expected_amount INTEGER NOT NULL,
+  currency TEXT NOT NULL,
+  checkout_url TEXT,
+  idempotency_key TEXT NOT NULL,
+  event_id TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  expires_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(order_id, payment_id),
+  UNIQUE(provider, provider_reference),
+  UNIQUE(provider, event_id),
+  UNIQUE(idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS idx_payment_transactions_trade ON v2_payment_transactions(trade_no, payment_id);
+CREATE INDEX IF NOT EXISTS idx_payment_transactions_status ON v2_payment_transactions(status, updated_at);
 CREATE TABLE IF NOT EXISTS v2_coupon (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   code TEXT NOT NULL UNIQUE,

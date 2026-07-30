@@ -57,9 +57,12 @@ import {
   queueTemplateMail,
   renderMailText
 } from "./admin/mail-templates";
+import { redactAuditValue } from "./audit";
 import { internalAuthHeaders, invalidateInternalTokenCache } from "./internal/auth";
 import { sendTestMail } from "./internal/jobs-client";
 import { invalidateServerSettings, nodeSyncIntent, notifyNodeSync } from "./internal/sync-client";
+import { handleAdminPayment, handlePaymentCallback } from "./payment/index.ts";
+import { settleOrder as settlePaymentOrder } from "./payment/settlement.ts";
 
 export interface Env {
   XBOARD_DB: D1Database;
@@ -244,12 +247,12 @@ FINAL,Proxy
 
 async function ensureBootstrap(env: Env) {
   await ensureStorageOptimization(env);
-  const marker = await optionalKvGet(env, "bootstrap:edge:v20");
+  const marker = await optionalKvGet(env, "bootstrap:edge:v21");
   if (marker) return;
   try {
     const persisted = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = 'system_bootstrap_edge_version'").first<{ value: string }>();
-    if (persisted?.value === "v20") {
-      await optionalKvPut(env, "bootstrap:edge:v20", String(now()));
+    if (persisted?.value === "v21") {
+      await optionalKvPut(env, "bootstrap:edge:v21", String(now()));
       return;
     }
   } catch {
@@ -382,6 +385,15 @@ async function ensureBootstrap(env: Env) {
     "ALTER TABLE v2_payment ADD COLUMN handling_fee_percent REAL",
     "ALTER TABLE v2_payment ADD COLUMN notify_domain TEXT",
     "ALTER TABLE v2_payment ADD COLUMN sort INTEGER DEFAULT 0",
+    `CREATE TABLE IF NOT EXISTS v2_payment_transactions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, order_id INTEGER NOT NULL, trade_no TEXT NOT NULL,
+      payment_id INTEGER NOT NULL, provider TEXT NOT NULL, provider_reference TEXT,
+      expected_amount INTEGER NOT NULL, currency TEXT NOT NULL, checkout_url TEXT,
+      idempotency_key TEXT NOT NULL, event_id TEXT, status TEXT NOT NULL DEFAULT 'pending',
+      expires_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+      UNIQUE(order_id, payment_id), UNIQUE(provider, provider_reference),
+      UNIQUE(provider, event_id), UNIQUE(idempotency_key)
+    )`,
     "ALTER TABLE v2_commission_log ADD COLUMN invite_user_id INTEGER",
     "ALTER TABLE v2_commission_log ADD COLUMN trade_no TEXT",
     "ALTER TABLE v2_commission_log ADD COLUMN order_amount INTEGER",
@@ -446,6 +458,8 @@ async function ensureBootstrap(env: Env) {
     "CREATE INDEX IF NOT EXISTS idx_v2_admin_audit_log_action ON v2_admin_audit_log(action)",
     "CREATE INDEX IF NOT EXISTS idx_v2_server_sort ON v2_server(sort)",
     "CREATE INDEX IF NOT EXISTS idx_v2_stat_user_record_user ON v2_stat_user(record_at, user_id)"
+    , "CREATE INDEX IF NOT EXISTS idx_payment_transactions_trade ON v2_payment_transactions(trade_no, payment_id)"
+    , "CREATE INDEX IF NOT EXISTS idx_payment_transactions_status ON v2_payment_transactions(status, updated_at)"
   ]) await runSqlIgnore(env, sql);
   await runSqlIgnore(env, "UPDATE v2_gift_card_code SET status = 3 WHERE status = 'disabled'");
   for (const sql of [
@@ -527,9 +541,9 @@ async function ensureBootstrap(env: Env) {
     }
     await runSqlIgnore(env, "UPDATE v2_user SET transfer_enable = transfer_enable * 1073741824, updated_at = ? WHERE plan_id IS NOT NULL AND transfer_enable > 0 AND EXISTS (SELECT 1 FROM v2_plan WHERE v2_plan.id = v2_user.plan_id AND v2_plan.transfer_enable = v2_user.transfer_enable)", [ts]);
   }
-  await runSqlIgnore(env, "INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES ('system_bootstrap_edge_version', 'v20', ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at", [ts, ts]);
+  await runSqlIgnore(env, "INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES ('system_bootstrap_edge_version', 'v21', ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at", [ts, ts]);
   invalidateSettingsCache();
-  await optionalKvPut(env, "bootstrap:edge:v20", String(ts));
+  await optionalKvPut(env, "bootstrap:edge:v21", String(ts));
   await ensureStorageOptimization(env);
 }
 
@@ -835,6 +849,16 @@ async function handleTelegramMessage(request: Request, env: Env, botToken: strin
 }
 
 async function guestApi(request: Request, env: Env, path: string) {
+  const paymentMatch = path.match(/^\/api\/v1\/guest\/payment\/notify\/([^/]+)\/([^/]+)$/);
+  if (paymentMatch && (request.method === "POST" || request.method === "GET")) {
+    return handlePaymentCallback(
+      request,
+      env,
+      decodeURIComponent(paymentMatch[1]),
+      decodeURIComponent(paymentMatch[2]),
+      (order, callbackNo) => completeOrder(env, order, callbackNo)
+    );
+  }
   if (request.method === "POST" && path === "/api/v1/guest/telegram/webhook") {
     const all = await settings(env.XBOARD_DB, env.XBOARD_KV); const botToken = String(pickSetting(all, "telegram_bot_token", ""));
     if (new URL(request.url).searchParams.get("access_token") !== md5(botToken)) return fail("access_token is error", 401, 401);
@@ -1533,8 +1557,7 @@ async function audit(env: Env, adminId: number, request: Request, path: string) 
     const operation = segments.pop() || "request";
     const action = `${segments.join("_")}.${operation}`;
     const input = await body<Record<string, any>>(request.clone());
-    const sensitive = /(^|_)(password|token|secret|key|api_key)$/i;
-    const requestData = Object.fromEntries(Object.entries(input).filter(([key]) => !sensitive.test(key)));
+    const requestData = redactAuditValue(input);
     const ts = now();
     const requestUrl = new URL(request.url);
     const serializedRequestData = JSON.stringify(requestData);
@@ -2224,6 +2247,16 @@ async function cancelOrder(env: Env, order: Record<string, any>, ts: number) {
   return Number((results.at(-1)?.meta as any)?.changes || 0) === 1;
 }
 
+async function completeOrder(env: Env, order: Record<string, any>, callbackNo: string) {
+  return settlePaymentOrder(env, order, callbackNo, {
+    parseJsonArray,
+    pickSetting,
+    addOrderMonths,
+    nextResetAt: edgeNextResetAt,
+    bump
+  });
+}
+
 async function adminOrder(request: Request, env: Env, route: string): Promise<Response | null> {
   if (!route.startsWith("/order/")) return null;
   const input = request.method === "POST" ? await body<Record<string, any>>(request.clone()) : {} as Record<string, any>;
@@ -2260,64 +2293,17 @@ async function adminOrder(request: Request, env: Env, route: string): Promise<Re
     await env.XBOARD_DB.prepare("UPDATE v2_order SET commission_status=?,updated_at=? WHERE trade_no=?").bind(Number(input.commission_status || 0), now(), tradeNo).run();
     return ok(true);
   }
-  if (Number(order.status) !== 0) return fail("只能对待支付的订单进行操作", 400, 400);
+  if (Number(order.status) !== 0 && !(route === "/order/paid" && Number(order.status) === 1)) {
+    return fail("只能对待支付的订单进行操作", 400, 400);
+  }
   if (route === "/order/cancel") {
     return await cancelOrder(env, order, now()) ? ok(true) : fail("只能对待支付的订单进行操作", 400, 400);
   }
   if (route === "/order/paid") {
-    const [planResult, userResult] = await env.XBOARD_DB.batch<Record<string, any>>([
-      env.XBOARD_DB.prepare("SELECT * FROM v2_plan WHERE id=?").bind(order.plan_id),
-      env.XBOARD_DB.prepare("SELECT * FROM v2_user WHERE id=?").bind(order.user_id)
-    ]);
-    const plan = planResult.results?.[0] || null;
-    const user = userResult.results?.[0] || null;
-    if (!plan || !user) return fail("订单关联的用户或订阅不存在", 400, 400202);
-    const period = String(order.period || ""); const ts = now();
     const callbackNo = String(input.callback_no || "manual_operation");
-    const claimed = await env.XBOARD_DB.prepare("UPDATE v2_order SET status=1,paid_at=?,callback_no=?,updated_at=? WHERE id=? AND status=0 RETURNING id")
-      .bind(ts, callbackNo, ts, order.id).first<{ id: number }>();
-    if (!claimed) return fail("只能对待支付的订单进行操作", 400, 400);
-    const statements: D1PreparedStatement[] = [];
-    const orderGuard = "EXISTS (SELECT 1 FROM v2_order WHERE id = ? AND status = 1)";
-    const surplusOrderIds = parseJsonArray(order.surplus_order_ids).map(Number).filter(Boolean);
-    if (surplusOrderIds.length) {
-      statements.push(env.XBOARD_DB.prepare(`UPDATE v2_order SET status=4,updated_at=? WHERE id IN (${surplusOrderIds.map(() => "?").join(",")}) AND ${orderGuard}`)
-        .bind(ts, ...surplusOrderIds, order.id));
-    }
-    const allSettings = await settings(env.XBOARD_DB, env.XBOARD_KV);
-    const eventSetting = Number(order.type) === 1 ? "new_order_event_id" : Number(order.type) === 2 ? "renew_order_event_id" : Number(order.type) === 3 ? "change_order_event_id" : "";
-    const orderEventId = eventSetting ? Number(pickSetting(allSettings, eventSetting, 0)) : 0;
-    let resetTraffic = orderEventId === 1;
-    let expiredAt: number | null = user.expired_at == null ? null : Number(user.expired_at);
-    if (period === "reset_traffic") {
-      resetTraffic = true;
-    } else {
-      const months: Record<string, number> = { monthly: 1, quarterly: 3, half_yearly: 6, yearly: 12, two_yearly: 24, three_yearly: 36 };
-      const expiryBase = Number(order.type) === 3 ? ts : Math.max(ts, Number(user.expired_at || 0));
-      expiredAt = period === "onetime" ? null : addOrderMonths(expiryBase, months[period] || 0);
-      if (period !== "onetime" && !months[period]) return fail("无效的套餐周期", 400, 400);
-      resetTraffic = resetTraffic || period === "onetime" || user.expired_at == null || Number(order.type) === 1;
-    }
-    const method = plan.reset_traffic_method === null || plan.reset_traffic_method === undefined ? Number(pickSetting(allSettings, "reset_traffic_method", 0)) : Number(plan.reset_traffic_method);
-    const nextReset = resetTraffic ? edgeNextResetAt(expiredAt, method, ts) : user.next_reset_at ?? null;
-    if (period === "reset_traffic") {
-      statements.push(env.XBOARD_DB.prepare(`UPDATE v2_user SET u=0,d=0,balance=COALESCE(balance,0)+?,last_reset_at=?,next_reset_at=?,reset_count=COALESCE(reset_count,0)+1,updated_at=? WHERE id=? AND ${orderGuard}`)
-        .bind(Number(order.surplus_credit || 0), ts, nextReset, ts, user.id, order.id));
-    } else {
-      statements.push(env.XBOARD_DB.prepare(`UPDATE v2_user SET plan_id=?,group_id=?,transfer_enable=?,speed_limit=?,device_limit=?,expired_at=?,u=?,d=?,balance=COALESCE(balance,0)+?,last_reset_at=?,next_reset_at=?,reset_count=COALESCE(reset_count,0)+?,updated_at=? WHERE id=? AND ${orderGuard}`)
-        .bind(plan.id, plan.group_id, Number(plan.transfer_enable || 0) * 1073741824, plan.speed_limit ?? null, plan.device_limit ?? null, expiredAt, resetTraffic ? 0 : Number(user.u || 0), resetTraffic ? 0 : Number(user.d || 0), Number(order.surplus_credit || 0), resetTraffic ? ts : user.last_reset_at ?? null, nextReset, resetTraffic ? 1 : 0, ts, user.id, order.id));
-    }
-    if (resetTraffic) {
-      const resetTypes: Record<number, string> = { 0: "first_day_month", 1: "monthly", 3: "first_day_year", 4: "yearly" };
-      statements.push(env.XBOARD_DB.prepare(`INSERT INTO v2_traffic_reset_logs(user_id,reset_type,old_u,old_d,old_upload,old_download,old_total,new_upload,new_download,new_total,trigger_source,metadata,reset_time,created_at)
-        SELECT ?,?,?,?,?,?,?,0,0,0,'order',?,?,? WHERE ${orderGuard}`)
-        .bind(user.id, resetTypes[method] || "manual", Number(user.u || 0), Number(user.d || 0), Number(user.u || 0), Number(user.d || 0), Number(user.u || 0) + Number(user.d || 0), JSON.stringify({ order_id: order.id, trade_no: tradeNo, event_id: orderEventId || null }), ts, ts, order.id));
-    }
-    statements.push(env.XBOARD_DB.prepare("UPDATE v2_order SET status=3,updated_at=? WHERE id=? AND status=1").bind(ts, order.id));
-    const results = await env.XBOARD_DB.batch(statements);
-    if (Number((results.at(-1)?.meta as any)?.changes || 0) !== 1) return fail("订单开通失败，请稍后重试", 500, 500);
-    await bump(env.XBOARD_KV, `user_version:${order.user_id}`);
-    return ok(true);
+    return await completeOrder(env, order, callbackNo)
+      ? ok(true)
+      : fail("订单开通失败，请稍后重试", 500, 500);
   }
   return null;
 }
@@ -2536,6 +2522,8 @@ async function adminApi(request: Request, env: Env, path: string) {
   if (themeResponse) return themeResponse;
   const pluginResponse = await pluginApi(request.clone(), env, route);
   if (pluginResponse) return pluginResponse;
+  const paymentResponse = await handleAdminPayment(request.clone(), env, route);
+  if (paymentResponse) return paymentResponse;
   const orderResponse = await adminOrder(request.clone(), env, route);
   if (orderResponse) return orderResponse;
   const coreResourceResponse = await adminCoreResource(request.clone(), env, route);
@@ -2771,9 +2759,6 @@ async function adminApi(request: Request, env: Env, path: string) {
     const result = await env.XBOARD_DB.prepare("SELECT * FROM v2_stat WHERE record_at >= ? AND record_at < ? ORDER BY record_at ASC LIMIT 1000").bind(start, end).all<Record<string, any>>();
     return ok((result.results || []).map(row => ({ ...row, ...(type === "paid_total" ? { paid_total: Number(row.paid_total || 0) / 100 } : {}), ...(type === "commission_total" ? { commission_total: Number(row.commission_total || 0) / 100 } : {}) })));
   }
-  if (path.includes("/payment/getPaymentMethods")) return ok([]);
-  if (path.includes("/payment/getPaymentForm")) return ok({ enabled: false, message: "Payment features are disabled in this build." });
-  if (path.match(/\/payment\/(save|drop|show|sort)/)) return ok(true);
   if (request.method === "GET" && route === "/mail/template/list") return ok(await adminMailTemplateList(env));
   if (request.method === "GET" && route === "/mail/template/get") {
     const template = await adminMailTemplateGet(env, new URL(request.url).searchParams.get("name") || "");
@@ -3512,7 +3497,7 @@ async function userApi(request: Request, env: Env, path: string) {
     couponResource,
     orderSurplus,
     orderCommission,
-    adminOrder
+    settleOrder: completeOrder
   });
   if (orderResponse) return orderResponse;
   if (path.includes("/plan/fetch")) {
@@ -3653,10 +3638,8 @@ async function adminUi(securePath: string) {
     <script defer src="/assets/mobile-node-dialog-fix.js"></script>
     <style>
       aside nav li:has(> a[href$="#/config/plugin"]),
-      aside nav li:has(> a[href$="#/config/payment"]),
       aside nav li:has(> a[href$="#/config/theme"]),
       aside nav a[href$="#/config/plugin"],
-      aside nav a[href$="#/config/payment"],
       aside nav a[href$="#/config/theme"] { display: none !important; }
     </style>
   </head>
@@ -3682,11 +3665,11 @@ async function adminUi(securePath: string) {
           const nav = document.querySelector("aside nav");
           nav?.querySelector("#xboard-migration-menu")?.closest("li")?.remove();
           nav?.querySelector("#xboard-migration-menu")?.remove();
-          // Reserved for future native plugin, payment, and theme implementations. Keep routes and code, hide only their menus.
+          // Arbitrary PHP plugins and themes are not executable in Workers; native payment providers remain available.
           nav?.querySelectorAll('a[href]').forEach(menu => {
             const target = new URL(menu.href, location.href);
             const route = target.hash.replace(/^#/, "") || target.pathname;
-            if (route === "/config/plugin" || route === "/config/payment" || route === "/config/theme") {
+            if (route === "/config/plugin" || route === "/config/theme") {
               const item = menu.closest("li") || menu;
               item.dataset.xboardReservedMenu = "true";
               item.style.display = "none";

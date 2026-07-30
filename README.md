@@ -45,7 +45,7 @@ https://你的域名/admin
 
 后台路径可在“系统管理 -> 系统配置 -> 安全设置”中修改。修改后应使用新的安全路径访问后台；菜单中的“数据迁移”和全局搜索结果会自动使用当前路径。
 
-主题配置、插件管理和支付配置当前不兼容 Cloudflare-native 运行时，因此菜单及全局搜索结果均隐藏。对应前端路由、数据库表和兼容代码仍保留，方便未来升级。
+主题配置和任意 PHP 插件管理不兼容 Cloudflare-native 运行时，因此对应菜单及全局搜索结果仍隐藏。支付配置已使用固定的原生 Provider Registry 恢复，后台“支付配置”菜单可直接管理 AlipayF2F、BTCPay、Coinbase Commerce、Coinbase Business、CoinPayments、EPay、MGate 和 Stripe。
 
 ### 默认超级管理员
 
@@ -105,7 +105,7 @@ flowchart TB
   end
 
   subgraph Entry["主入口与静态资源"]
-    Edge["xboard-edge<br/>后台 WebUI + 后台 API + 用户 API<br/>订阅生成 / 认证 / 设置 / 迁移 / 节点协议代理"]
+    Edge["xboard-edge<br/>后台 WebUI + 后台 API + 用户 API<br/>订阅生成 / 认证 / 支付 / 设置 / 迁移 / 节点协议代理"]
     Assets["Cloudflare Static Assets<br/>官方后台构建产物 / 语言包 / 图片"]
   end
 
@@ -154,6 +154,7 @@ flowchart TB
     CacheAPI["Cloudflare Cache API<br/>统计 / 配置 / 内容 / 订阅<br/>StatusHub 读取结果"]
     KV["KV: xboard-kv<br/>Session / 验证码 / 限流<br/>版本号 / 设置快照"]
     D1["D1: xboard-db<br/>用户 / 套餐 / 节点 / 订单 / 余额<br/>设置 / 最终流量 / 统计 / 审计"]
+    PaymentTx["v2_payment_transactions<br/>Provider 会话 / 事件幂等<br/>不保存完整 webhook"]
     Pending["v2_traffic_pending_check<br/>仅保存真正需要复查的用户"]
     Outbox["v2_traffic_stats_outbox<br/>每个聚合批次最多一行<br/>成功投递 DO 后删除"]
   end
@@ -168,6 +169,8 @@ flowchart TB
   CacheAPI -. "状态缓存未命中" .-> StatusHub
   KV -. "缓存未命中或不可用" .-> D1
   Edge <-->|"正式业务读写"| D1
+  Edge -->|"原子订单结算"| PaymentTx
+  PaymentTx --> D1
   Server <-->|"配置读取 / 流量事件来源"| D1
   Jobs -->|"权威累计 / 幂等 / Outbox"| D1
   Jobs <-->|"周期业务检查与清理"| D1
@@ -182,11 +185,13 @@ flowchart TB
   subgraph External["外部 HTTPS 服务"]
     MailProvider["Maileroo / Brevo API"]
     TelegramAPI["Telegram Bot API"]
+    PaymentProviders["支付 Provider<br/>Alipay / BTCPay / Coinbase<br/>CoinPayments / EPay / MGate / Stripe"]
   end
 
   Jobs -->|"发送邮件"| MailProvider
   Jobs -->|"发送异步通知"| TelegramAPI
   Edge -->|"Webhook 设置 / Bot 操作"| TelegramAPI
+  Edge <-->|"托管结账 / 签名回调 / 状态复核"| PaymentProviders
 
   subgraph Delivery["首次部署与后续自动部署"]
     GitHub["GitHub 仓库<br/>master"]
@@ -242,6 +247,36 @@ npx wrangler secret put BREVO_API_KEY
 ```
 
 Maileroo 免费层通常为每月 3,000 封，Brevo 免费层通常为每天 300 封，实际额度以服务商最新政策为准。邮件 Queue 使用稳定事件 ID 做幂等处理。
+
+## 支付
+
+后台“系统管理 -> 支付配置”提供八个固定的 Cloudflare-native Provider：
+
+```text
+AlipayF2F
+BTCPay
+Coinbase
+CoinbaseBusiness
+CoinPayments
+EPay
+MGate
+Stripe
+```
+
+`Coinbase` 用于兼容旧 Coinbase Commerce Charge 配置，`CoinbaseBusiness` 使用当前 Checkout API，并可在同一配置项中明确选择生产或沙盒环境。Stripe 使用托管式 Checkout Sessions，固定 `mode=payment`，不收集或保存卡号；套餐有效期仍由 XBoard 订单系统管理。Creem 的固定 Product 定价模型与 XBoard 动态实付金额、优惠券和余额抵扣不匹配，因此没有加入。
+
+所有回调都必须通过签名、订单号、渠道 UUID、支付会话、金额、币种和成功状态校验。合法回调还会向 Provider 二次查询最终状态（适用的渠道），随后通过同一个 D1 原子结算服务开通套餐。重复、并发或重放回调不会重复开通；D1 批次失败也不会留下 `status=1` 的半完成订单。内部 `v2_payment_transactions` 只保存必要的幂等元数据，不保存完整 webhook 正文。
+
+支付配置保存在 `v2_payment.config`，管理员读取配置和 SQLite 完整导出均会包含私钥、API Key 与 Webhook Secret。管理员审计日志会递归脱敏这些字段，但导出的数据库不会脱敏，必须作为敏感凭据安全保管。自定义网关和通知域名只接受 HTTPS；Provider 请求有超时、响应大小和返回结构限制。
+
+Stripe 应在 Dashboard 为当前支付渠道的通知 URL 创建 webhook endpoint，并订阅：
+
+```text
+checkout.session.completed
+checkout.session.async_payment_succeeded
+```
+
+Coinbase Business 的生产与沙盒 checkout 使用不同 API 路径；沙盒 webhook subscription 还需要 Coinbase 要求的 `sandbox: true` 标签。其他渠道直接把后台显示的 `notify_url` 配置到对应商户后台。退款仍由支付服务商后台处理，本项目不自动修改已开通套餐。
 
 为降低 Cloudflare 免费额度下的 D1/KV 读写压力，新部署默认将节点配置拉取与流量推送间隔设为 300 秒。该值是 Cloudflare 版本有意采用的资源优化默认值，可在后台系统设置中调整；其他新装默认值（例如 1 小时试用时长）继续对齐原版。
 
@@ -324,11 +359,11 @@ framework/schedule 锁
 邮箱验证码、密码错误次数和注册限流计数
 ```
 
-第 2 步“数据预检”会明确列出无法自动切换的外部服务配置。原版 SMTP/邮件驱动设置、任何邮件服务商凭据、所有插件、插件配置和支付渠道都不会导入或导出；迁移完成后必须在新后台选择 Maileroo 或 Brevo，并手动填写 API Key、发件人邮箱和发件人名称。Telegram 机器人由 Worker 内置实现，不依赖原版插件。所有旧主题和主题配置也会忽略，迁移后固定使用内置 `Xboard` 默认主题。邮件模板、订单等可审计业务历史仍会保留，但真实支付能力不会因此启用。
+第 2 步“数据预检”会明确列出无法自动切换的外部服务配置。原版 SMTP/邮件驱动设置、任何邮件服务商凭据、所有插件和插件配置不会导入或导出；迁移完成后必须在新后台选择 Maileroo 或 Brevo，并手动填写 API Key、发件人邮箱和发件人名称。Telegram 机器人由 Worker 内置实现，不依赖原版插件。所有旧主题和主题配置也会忽略，迁移后固定使用内置 `Xboard` 默认主题。`v2_payment` 会完整迁移，六个上游 Provider 标识保持不变，Stripe 使用固定标识 `Stripe`，Coinbase Business 使用 `CoinbaseBusiness`；未知第三方 Provider 会保留配置但强制停用。
 
 默认“完整迁入”是真正的全量替换：完成迁移前备份后，先删除 D1 中现有的用户、登录凭据、套餐、权限组、节点、机器、设置、订单、统计、礼品卡及其他业务记录并重置自增序列，再严格按照原版主键导入所选 SQLite 数据。源库不存在或被明确排除的业务数据不会从旧 D1 保留，默认 `admin@admin.com` 也只会在源库本身包含该用户时存在；旧运行日志、待检查任务和旧负载历史会在成功切换时删除，新的机器负载由节点重新上报并在 `StatusHub` 保留最近 24 小时。迁移控制记录和回滚快照在流程结束前会保留，用于中断恢复和审计。“合并”只补充 D1 不存在的数据，主键冲突时保留当前记录，因此结果不保证与源库完全相同。迁移过程中即使原版设置覆盖了后台路径和访问令牌，迁移任务也会使用一次性迁移凭据继续执行；任务完成后该凭据立即失效。
 
-点击开始迁移后，浏览器默认会先把当前 D1 数据导出为原版兼容的 `xboard-pre-migration-*.db`，下载完成并校验快照行数后才会清理或写入目标数据。迁移源区域提供“跳过完整迁移前备份”选项；启用后仍会强制备份 `v2_user` 和 `personal_access_tokens`，并优先迁移这两张表，但其他业务表不会建立回滚快照，失败时不能一键完整还原。预检仍会显示 `v2_log` 和 `v2_server_machine_load_history` 的源库行数并标记 `(skip)`，但它们不计入迁移进度，也不参与备份、导入或导出；迁移完成后旧运行状态会被清空，节点后续上报会在 `StatusHub` 中重建实时状态和最近 24 小时的五分钟负载采样。迁移页面还提供“导出当前数据”按钮，可随时生成标准 SQLite3 `xboard-export-*.db`；导出的邮件凭据为空，插件、插件配置和支付配置不导出。
+点击开始迁移后，浏览器默认会先把当前 D1 数据导出为原版兼容的 `xboard-pre-migration-*.db`，下载完成并校验快照行数后才会清理或写入目标数据。迁移源区域提供“跳过完整迁移前备份”选项；启用后仍会强制备份 `v2_user` 和 `personal_access_tokens`，并优先迁移这两张表，但其他业务表不会建立回滚快照，失败时不能一键完整还原。预检仍会显示 `v2_log` 和 `v2_server_machine_load_history` 的源库行数并标记 `(skip)`，但它们不计入迁移进度，也不参与备份、导入或导出；迁移完成后旧运行状态会被清空，节点后续上报会在 `StatusHub` 中重建实时状态和最近 24 小时的五分钟负载采样。迁移页面还提供“导出当前数据”按钮，可随时生成标准 SQLite3 `xboard-export-*.db`。支付配置会原样导出，可能包含私钥、API Key 和 Webhook Secret，导出文件必须按敏感凭据保管；内部 `v2_payment_transactions` 不导出，并在完整切换或回滚时清空。
 
 任一批次失败时迁移会立即中止，进度和详细错误以红色显示。只要迁移前快照已经完成，页面会显示“一键还原”，用于清理本次失败写入并恢复迁移前的 D1 数据和本次修改过的 KV 键。
 
@@ -386,9 +421,9 @@ Cloudflare 内部可以使用 D1、KV、Queues 和 Durable Objects 替代 Larave
 
 - 在线支付和支付回调
 - 需要真实出金的佣金提现
-- 依赖外部支付插件的订单流程
+- 任意第三方 PHP 支付插件（固定原生 Provider 除外）
 
-Cloudflare Workers 无法在运行时解压并执行 Laravel Blade 主题或任意 PHP 插件。主题配置、插件管理和支付配置目前在菜单和全局搜索中隐藏，相关路由、表结构和兼容代码仍保留，便于未来升级为 Cloudflare-native 实现；上传 PHP/Blade ZIP 包不会被执行。Telegram 机器人是内置功能，不需要安装插件。
+Cloudflare Workers 无法在运行时解压并执行 Laravel Blade 主题或任意 PHP 插件。主题配置和插件管理目前在菜单与全局搜索中隐藏；上传 PHP/Blade ZIP 包不会被执行。支付不执行 PHP 插件，而是由 Edge 内置的固定 Provider Registry 提供；Telegram 机器人同样是内置功能，不需要安装插件。
 
 支付相关表和兼容接口仍然保留，用于避免后台页面崩溃。
 

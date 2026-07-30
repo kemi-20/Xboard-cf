@@ -1,5 +1,6 @@
 import { body, fail, json, now, ok, token } from "../compat";
 import { settings } from "../db";
+import { checkoutPayment, enabledPaymentMethods, paymentForOrder } from "../payment/index.ts";
 import type { D1Database, KVNamespace } from "../types";
 
 type OrderEnv = { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace };
@@ -18,7 +19,7 @@ export type OrderDeps<E extends OrderEnv> = {
   couponResource: (row: Record<string, any>) => Record<string, any>;
   orderSurplus: (env: E, user: Record<string, any>, settingsValues: Record<string, any>) => Promise<{ amount: number; orderIds: number[] }>;
   orderCommission: (env: E, user: Record<string, any>, totalAmount: number) => Promise<{ inviteUserId: number | null; commissionBalance: number }>;
-  adminOrder: (request: Request, env: E, route: string) => Promise<Response | null>;
+  settleOrder: (env: E, order: Record<string, any>, callbackNo: string) => Promise<boolean>;
 };
 
 export async function handleUserOrders<E extends OrderEnv>(
@@ -32,9 +33,21 @@ export async function handleUserOrders<E extends OrderEnv>(
     const url = new URL(request.url); const input = request.method === "POST" ? await body<Record<string, any>>(request.clone()) : {};
     url.searchParams.forEach((value, key) => { input[key] = value; });
     const userId = Number((user as any).id);
-    const orderResource = (row: Record<string, any>, plans?: Map<number, Record<string, any>>) => {
+    const orderResource = (
+      row: Record<string, any>,
+      plans?: Map<number, Record<string, any>>,
+      payments?: Map<number, Record<string, any>>
+    ) => {
       const plan = row.plan_id ? plans?.get(Number(row.plan_id)) || null : null;
-      return { ...row, status: Number(row.status), total_amount: Number(row.total_amount || 0), period: deps.legacyOrderPeriod(row.period), plan: plan ? { ...plan, prices: deps.parseJsonObject(plan.prices), tags: deps.parseJsonArray(plan.tags) } : null, payment: null };
+      const payment = row.payment_id ? payments?.get(Number(row.payment_id)) || null : null;
+      return {
+        ...row,
+        status: Number(row.status),
+        total_amount: Number(row.total_amount || 0),
+        period: deps.legacyOrderPeriod(row.period),
+        plan: plan ? { ...plan, prices: deps.parseJsonObject(plan.prices), tags: deps.parseJsonArray(plan.tags) } : null,
+        payment
+      };
     };
     if (request.method === "GET" && route === "/order/fetch") {
       const status = input.status === undefined ? null : deps.nullableNumber(input.status);
@@ -44,17 +57,31 @@ export async function handleUserOrders<E extends OrderEnv>(
         : await env.XBOARD_DB.prepare("SELECT * FROM v2_order WHERE user_id = ? AND status = ? ORDER BY created_at DESC").bind(userId, status).all<Record<string, any>>();
       const rows = result.results || [];
       const planIds = [...new Set(rows.map(row => Number(row.plan_id || 0)).filter(Boolean))];
-      const planResult = planIds.length
-        ? await env.XBOARD_DB.prepare(`SELECT * FROM v2_plan WHERE id IN (${planIds.map(() => "?").join(",")})`).bind(...planIds).all<Record<string, any>>()
-        : { results: [] as Record<string, any>[] };
+      const paymentIds = [...new Set(rows.map(row => Number(row.payment_id || 0)).filter(Boolean))];
+      const [planResult, paymentResult] = await Promise.all([
+        planIds.length
+          ? env.XBOARD_DB.prepare(`SELECT * FROM v2_plan WHERE id IN (${planIds.map(() => "?").join(",")})`).bind(...planIds).all<Record<string, any>>()
+          : Promise.resolve({ success: true, results: [] as Record<string, any>[] }),
+        paymentIds.length
+          ? env.XBOARD_DB.prepare(`SELECT id,name,payment,icon FROM v2_payment WHERE id IN (${paymentIds.map(() => "?").join(",")})`).bind(...paymentIds).all<Record<string, any>>()
+          : Promise.resolve({ success: true, results: [] as Record<string, any>[] })
+      ]);
       const plans = new Map((planResult.results || []).map(plan => [Number(plan.id), plan]));
-      return ok(rows.map(row => orderResource(row, plans)));
+      const payments = new Map((paymentResult.results || []).map(payment => [Number(payment.id), payment]));
+      return ok(rows.map(row => orderResource(row, plans, payments)));
     }
     if (request.method === "GET" && route === "/order/detail") {
       const order = await env.XBOARD_DB.prepare("SELECT * FROM v2_order WHERE user_id = ? AND trade_no = ?").bind(userId, String(input.trade_no || "")).first<Record<string, any>>();
       if (!order) return fail("订单不存在或已支付", 400, 400);
-      const plan = order.plan_id ? await env.XBOARD_DB.prepare("SELECT * FROM v2_plan WHERE id = ?").bind(order.plan_id).first<Record<string, any>>() : null;
-      const value = orderResource(order, new Map(plan ? [[Number(plan.id), plan]] : []));
+      const [plan, payment] = await Promise.all([
+        order.plan_id ? env.XBOARD_DB.prepare("SELECT * FROM v2_plan WHERE id = ?").bind(order.plan_id).first<Record<string, any>>() : Promise.resolve(null),
+        paymentForOrder(env, order.payment_id)
+      ]);
+      const value = orderResource(
+        order,
+        new Map(plan ? [[Number(plan.id), plan]] : []),
+        new Map(payment ? [[Number(payment.id), payment]] : [])
+      );
       if (!value.plan) return fail("订阅计划不存在", 400, 400);
       const surplusOrderIds = deps.parseJsonArray(order.surplus_order_ids).map(Number).filter(Boolean);
       const surplusResult = surplusOrderIds.length
@@ -66,7 +93,7 @@ export async function handleUserOrders<E extends OrderEnv>(
       const order = await env.XBOARD_DB.prepare("SELECT status FROM v2_order WHERE user_id = ? AND trade_no = ?").bind(userId, String(input.trade_no || "")).first<{ status: number }>();
       return order ? ok(Number(order.status)) : fail("订单不存在", 400, 400);
     }
-    if (request.method === "GET" && route === "/order/getPaymentMethod") return ok([]);
+    if (request.method === "GET" && route === "/order/getPaymentMethod") return ok(await enabledPaymentMethods(env));
     if (request.method === "POST" && route === "/order/cancel") {
       const tradeNo = String(input.trade_no || "");
       if (!tradeNo) return fail("参数无效", 422, 422);
@@ -168,11 +195,7 @@ export async function handleUserOrders<E extends OrderEnv>(
     if (request.method === "POST" && route === "/order/checkout") {
       const order = await env.XBOARD_DB.prepare("SELECT * FROM v2_order WHERE user_id = ? AND trade_no = ? AND status = 0").bind(userId, String(input.trade_no || "")).first<Record<string, any>>();
       if (!order) return fail("订单不存在或已支付", 400, 400);
-      if (Number(order.total_amount || 0) > 0) return fail("真实支付功能暂未启用", 400, 400);
-      const paidRequest = new Request(request.url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ trade_no: order.trade_no, callback_no: order.trade_no }) });
-      const paid = await deps.adminOrder(paidRequest, env, "/order/paid");
-      if (!paid?.ok) return paid || fail("支付失败", 400, 400);
-      return json({ type: -1, data: true });
+      return checkoutPayment(request, env, order, user, input.method, (paidOrder, callbackNo) => deps.settleOrder(env, paidOrder, callbackNo));
     }
   }
   return null;

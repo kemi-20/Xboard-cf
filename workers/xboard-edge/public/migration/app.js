@@ -277,7 +277,7 @@ async function inspect() {
     const modeSummary = $("#mode").value === "overwrite"
       ? '<div class="warning"><strong>完整迁入：目标旧数据将被删除</strong>完成备份后会先清空当前 D1 业务数据和自增序列，再导入源库；源库没有的业务表会保持为空，不会保留 admin@admin.com 或其他旧记录。</div>'
       : '<div class="warning"><strong>合并迁入：目标旧数据会保留</strong>主键冲突时保留当前 D1 记录，迁移结果可能与源库不同。</div>';
-    $("#preflight-content").innerHTML = `${sourceSummary}${modeSummary}<div class="warning"><strong>以下内容不会迁移</strong>原版 SMTP/邮件驱动设置和任何邮件服务商凭据不会导入，所有插件、插件配置、支付渠道和服务器机器负载历史不会导入，所有旧主题配置也会忽略。Telegram 机器人由 Cloudflare 版本内置实现，不依赖原版插件。迁移完成后仅启用默认 Xboard 主题，请在新后台选择 Maileroo 或 Brevo，并手动配置 API Key、发件人邮箱和发件人名称。</div><p class="muted">邮件模板、订单等可审计业务历史会保留；队列任务、Horizon 监控、调度锁、旧会话、验证码和限流计数不会导入。标记为 (skip) 的数据表仅显示源库行数，不计入迁移进度，也不会备份、导入或导出；服务器负载历史会由节点重新上报生成。</p>${renderCounts(displayedCounts, state.skippedCounts)}`;
+    $("#preflight-content").innerHTML = `${sourceSummary}${modeSummary}<div class="warning"><strong>以下内容不会迁移</strong>原版 SMTP/邮件驱动设置和任何邮件服务商凭据不会导入，所有插件、插件配置、内部支付事务和服务器机器负载历史不会导入，所有旧主题配置也会忽略。Telegram 机器人由 Cloudflare 版本内置实现，不依赖原版插件。迁移完成后仅启用默认 Xboard 主题，请在新后台选择 Maileroo 或 Brevo，并手动配置 API Key、发件人邮箱和发件人名称。</div><div class="warning"><strong>支付渠道包含敏感凭据</strong>支付渠道配置会原样迁移，私钥、API Key 与 Webhook Secret 不会脱敏；未受支持的第三方渠道会保留配置但强制停用。请只使用可信备份并安全保管导出文件。</div><p class="muted">邮件模板、订单等可审计业务历史会保留；队列任务、Horizon 监控、调度锁、旧会话、验证码和限流计数不会导入。标记为 (skip) 的数据表仅显示源库行数，不计入迁移进度，也不会备份、导入或导出；服务器负载历史会由节点重新上报生成。</p>${renderCounts(displayedCounts, state.skippedCounts)}`;
     $("#preflight").hidden = false;
     $("#file-status").textContent = redisFile ? `${sqliteFile.name} + ${redisFile.name}` : `${sqliteFile.name}（未选择 Redis）`;
     setStep(2);

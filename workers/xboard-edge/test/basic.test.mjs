@@ -14,12 +14,16 @@ const edgeSource = () => [
   "src/admin/statistics.ts",
   "src/admin/coupons.ts",
   "src/admin/mail-templates.ts",
+  "src/audit.ts",
   "src/internal/auth.ts",
   "src/internal/jobs-client.ts",
   "src/internal/sync-client.ts",
   "src/internal/status-client.ts",
   "src/user/orders.ts",
   "src/user/tickets.ts",
+  "src/payment/index.ts",
+  "src/payment/providers.ts",
+  "src/payment/settlement.ts",
   "src/ech.ts",
   "src/node-protocol.ts"
 ].map(file => fs.readFileSync(file, "utf8")).join("\n");
@@ -327,10 +331,10 @@ test("independent paginated and order reads share D1 batches", () => {
   const database = fs.readFileSync("src/db.ts", "utf8");
   const giftCards = fs.readFileSync("src/gift-card.ts", "utf8");
   const orderFetch = source.slice(source.indexOf("async function orderRows"), source.indexOf("async function orderDetail"));
-  const orderPaid = source.slice(source.indexOf('route === "/order/paid"'), source.indexOf("async function sortAdminRows"));
+  const settlement = fs.readFileSync("src/payment/settlement.ts", "utf8");
   assert.match(database.slice(database.indexOf("export async function list"), database.indexOf("export async function rows")), /db\.batch\(\[/);
   assert.match(orderFetch, /XBOARD_DB\.batch<Record<string, any>>\(\[/);
-  assert.match(orderPaid, /XBOARD_DB\.batch<Record<string, any>>\(\[/);
+  assert.match(settlement, /XBOARD_DB\.batch<Record<string, any>>\(\[/);
   assert.equal((giftCards.match(/db\.batch<AnyRow>\(\[/g) || []).length >= 5, true);
 });
 
@@ -658,7 +662,7 @@ test("login sessions fall back to D1 when KV writes fail", () => {
 test("bootstrap remains available when the KV daily write limit is exhausted", () => {
   const source = edgeSource();
   assert.match(source, /system_bootstrap_edge_version/);
-  assert.match(source, /await optionalKvPut\(env, "bootstrap:edge:v20"/);
+  assert.match(source, /await optionalKvPut\(env, "bootstrap:edge:v21"/);
   assert.doesNotMatch(source, /await env\.XBOARD_KV\.put\("bootstrap:edge:v12"/);
 });
 
@@ -783,7 +787,7 @@ test("complete migration deletes old business data before strict replacement", (
   const source = fs.readFileSync("src/migration.ts", "utf8");
   const page = fs.readFileSync("public/migration/panel.html", "utf8");
   const app = fs.readFileSync("public/migration/app.js", "utf8");
-  assert.match(source, /COMPLETE_RESET_TABLES = \["v2_log", "v2_server_machine_load_history", "v2_job_logs", "v2_traffic_pending_check", "v2_traffic_dedup", "v2_traffic_stats_outbox"\]/);
+  assert.match(source, /COMPLETE_RESET_TABLES = \["v2_log", "v2_server_machine_load_history", "v2_job_logs", "v2_traffic_pending_check", "v2_traffic_dedup", "v2_traffic_stats_outbox", "v2_payment_transactions"\]/);
   assert.match(source, /DELETE FROM sqlite_sequence WHERE name IN/);
   assert.match(source, /COMPLETE_RESET_TABLES\.map\(\(\) => "\?"\)/);
   assert.match(source, /rollback_progress = \?[\s\S]*DELETE FROM sqlite_sequence WHERE name IN/);
@@ -818,7 +822,8 @@ test("migration UI parses SQLite and Redis backups locally", () => {
   assert.match(app, /parsed\?\.value\?\.auth_data/);
   assert.match(app, /api\/v2\/admin\/migration/);
   assert.match(app, /选择 Maileroo 或 Brevo，并手动配置 API Key/);
-  assert.match(app, /所有插件、插件配置、支付渠道和服务器机器负载历史不会导入/);
+  assert.match(app, /插件、插件配置、内部支付事务和服务器机器负载历史不会导入/);
+  assert.match(app, /支付渠道配置会原样迁移/);
   assert.match(page, /id="skip-backup"/);
   assert.match(app, /skip_backup: state\.skipBackup/);
   assert.match(app, /强制账号备份已下载/);
@@ -830,8 +835,12 @@ test("migration UI parses SQLite and Redis backups locally", () => {
 
 test("migration excludes service credentials that cannot move to Cloudflare", () => {
   const source = fs.readFileSync("src/migration.ts", "utf8");
+  const migrationTables = source.slice(source.indexOf("const MIGRATION_TABLES"), source.indexOf("const CRITICAL_BACKUP_TABLES"));
   assert.match(source, /NON_MIGRATABLE_SERVICE_TABLES/);
-  assert.match(source, /"v2_payment"/);
+  assert.match(migrationTables, /"v2_payment"/);
+  assert.doesNotMatch(migrationTables, /"v2_payment_transactions"/);
+  assert.match(source, /PAYMENT_TRANSACTION_TABLE = "v2_payment_transactions"/);
+  assert.match(source, /支付渠道配置已原样迁移，其中可能包含私钥、API Key 与 Webhook Secret/);
   assert.match(source, /"v2_plugins"/);
   assert.match(source, /NON_MIGRATABLE_MAIL_SETTINGS/);
   assert.match(source, /"email_password"/);
@@ -844,18 +853,18 @@ test("migration excludes service credentials that cannot move to Cloudflare", ()
   assert.match(source, /SKIPPED_SOURCE_TABLES = \["v2_log", "v2_server_machine_load_history"\]/);
   assert.match(source, /skipped_tables: SKIPPED_SOURCE_TABLES/);
   assert.match(source, /DELETE FROM v2_server_machine_load_history/);
-  const migrationTables = source.slice(source.indexOf("const MIGRATION_TABLES"), source.indexOf("const CRITICAL_BACKUP_TABLES"));
   assert.doesNotMatch(migrationTables, /v2_server_machine_load_history/);
   assert.match(source, /skipped_service_config/);
 });
 
-test("unsupported plugin, payment, and theme menus stay reserved but hidden", () => {
+test("unsupported plugin and theme menus stay hidden while native payment stays visible", () => {
   const source = edgeSource();
-  assert.match(source, /Reserved for future native plugin, payment, and theme implementations/);
+  assert.match(source, /native payment providers remain available/);
   assert.match(source, /target\.hash\.replace\(\/\^#\//);
   assert.match(source, /route === "\/config\/plugin"/);
-  assert.match(source, /route === "\/config\/payment"/);
   assert.match(source, /route === "\/config\/theme"/);
+  assert.doesNotMatch(source, /route === "\/config\/payment"\s*\|\|/);
+  assert.doesNotMatch(source, /a\[href\$="#\/config\/payment"\]/);
   assert.match(source, /a\[href\$="#\/config\/theme"\]/);
   assert.match(source, /display: none !important/);
   assert.match(source, /menu\.closest\("li"\) \|\| menu/);
@@ -1149,7 +1158,8 @@ test("audited admin and user mutations reject stale or partial operations", () =
   assert.match(source, /status NOT IN \(0,2\)/);
   assert.doesNotMatch(source, /coupon_id = .*status IN \(1,3\)/);
   assert.match(source, /return await deps\.cancelOrder\(env, order, now\(\)\) \? ok\(true\) : fail\("取消失败"/);
-  assert.match(source, /callback_no: order\.trade_no/);
+  assert.match(source, /const callbackNo = String\(input\.callback_no \|\| "manual_operation"\)/);
+  assert.match(source, /UPDATE v2_order SET status=3,paid_at=\?,callback_no=\?,updated_at=\?/);
   assert.match(source, /\[0, 1, 2\]\.includes\(Number\(input\.level\)\)/);
   assert.match(source, /String\(input\.password\)\.length < 8/);
 });
@@ -1299,7 +1309,8 @@ test("admin ticket, coupon and audit handlers preserve upstream behavior", () =>
   assert.match(source, /if \(!name\) return fail\("组名不能为空"/);
   assert.match(source, /INSERT INTO v2_admin_audit_log\(admin_id, action, target, metadata, ip, method, uri, request_data/);
   assert.match(source, /replaceAll\("-", "_"\)/);
-  assert.match(source, /const sensitive = \/\(\^\|_\)\(password\|token\|secret\|key\|api_key\)\$\/i/);
+  assert.match(source, /function redactAuditValue/);
+  assert.match(source, /SENSITIVE_KEY\.test\(key\) \? "\[REDACTED\]"/);
   assert.match(source, /const userMap = new Map\(userEntries\)/);
 });
 

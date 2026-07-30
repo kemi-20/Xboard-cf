@@ -2,6 +2,7 @@ import type { D1Database, Fetcher, KVNamespace } from "./types";
 import { invalidateSettingsCache } from "./db";
 import { body, fail, json, now, ok, randomString, sha256Hex } from "./compat";
 import { internalAuthHeaders, invalidateInternalTokenCache } from "./internal/auth";
+import { paymentMethodNames } from "./payment/providers.ts";
 
 interface MigrationEnv {
   XBOARD_DB: D1Database;
@@ -30,9 +31,11 @@ const SKIPPED_SOURCE_TABLES = ["v2_log", "v2_server_machine_load_history"] as co
 
 const tableSet = new Set<string>(MIGRATION_TABLES);
 const DELETE_TABLES = [...MIGRATION_TABLES].reverse();
-const COMPLETE_RESET_TABLES = ["v2_log", "v2_server_machine_load_history", "v2_job_logs", "v2_traffic_pending_check", "v2_traffic_dedup", "v2_traffic_stats_outbox"] as const;
+const COMPLETE_RESET_TABLES = ["v2_log", "v2_server_machine_load_history", "v2_job_logs", "v2_traffic_pending_check", "v2_traffic_dedup", "v2_traffic_stats_outbox", "v2_payment_transactions"] as const;
+const PAYMENT_TRANSACTION_TABLE = "v2_payment_transactions";
 
-const NON_MIGRATABLE_SERVICE_TABLES = new Set(["v2_payment", "v2_plugins"]);
+const NON_MIGRATABLE_SERVICE_TABLES = new Set(["v2_plugins"]);
+const supportedPaymentMethods = new Set(paymentMethodNames);
 const NON_MIGRATABLE_MAIL_SETTINGS = new Set([
   "email_driver", "email_host", "email_port", "email_username", "email_password",
   "email_encryption", "email_from_address", "email_from_name", "mail_driver",
@@ -48,7 +51,8 @@ function isThemeSetting(name: unknown) {
 
 function isNonMigratableSetting(name: unknown) {
   const key = String(name || "").trim().toLowerCase();
-  return key === "internal_sync_token" || NON_MIGRATABLE_MAIL_SETTINGS.has(key) || key.startsWith("smtp_") || key.startsWith("payment_") || key.startsWith("pay_")
+  return key === "internal_sync_token" || NON_MIGRATABLE_MAIL_SETTINGS.has(key) || key.startsWith("smtp_")
+    || ((key.startsWith("payment_") || key.startsWith("pay_")) && key !== "payment_enabled")
     || key.startsWith("plugin") || isThemeSetting(key);
 }
 
@@ -154,7 +158,7 @@ function exportRow(table: string, source: MigrationRow): MigrationRow | null {
       row.value = "Xboard";
     }
     if (NON_MIGRATABLE_MAIL_SETTINGS.has(name) || name.startsWith("smtp_")) row.value = "";
-    if (name.startsWith("payment_") || name.startsWith("pay_") || name.startsWith("plugin")) return null;
+    if (((name.startsWith("payment_") || name.startsWith("pay_")) && name !== "payment_enabled") || name.startsWith("plugin")) return null;
   }
   if (table === "v2_stat") {
     if (row.transfer_used_total === undefined) row.transfer_used_total = row.transfer_used ?? "0";
@@ -285,6 +289,7 @@ function normalizedSourceRow(table: string, source: MigrationRow): MigrationRow 
     if (row.transfer_enable == null) row.transfer_enable = 0;
     if (row.sort == null) row.sort = 0;
   }
+  if (table === "v2_payment" && !supportedPaymentMethods.has(String(row.payment || ""))) row.enable = 0;
   if (table === "v2_server" && row.sort == null) row.sort = 0;
   return row;
 }
@@ -398,7 +403,8 @@ async function exportManifest(env: MigrationEnv) {
     template: "/migration/xboard-template.db",
     tables: MIGRATION_TABLES,
     counts: await allTableCounts(env.XBOARD_DB),
-    excluded: ["邮件服务商与 API 凭据会导出为空值", "所有插件、插件配置与支付渠道不会导出", "服务器机器负载历史不会导出", "主题固定为 Xboard 默认主题"]
+    excluded: ["邮件服务商与 API 凭据会导出为空值", "所有插件及插件配置不会导出", "内部支付事务不会导出", "服务器机器负载历史不会导出", "主题固定为 Xboard 默认主题"],
+    warnings: ["支付渠道配置会原样导出，可能包含私钥、API Key 与 Webhook Secret；请将导出文件视为敏感凭据并妥善保管"]
   });
 }
 
@@ -698,7 +704,9 @@ async function startRollback(request: Request, env: MigrationEnv) {
       .bind(JSON.stringify({ phase: "clearing", tables: {} }), now(), runId).run();
     await env.XBOARD_DB.batch([
       ...DELETE_TABLES.map(table => env.XBOARD_DB.prepare(`DELETE FROM ${table}`)),
-      env.XBOARD_DB.prepare(`DELETE FROM sqlite_sequence WHERE name IN (${MIGRATION_TABLES.map(() => "?").join(",")})`).bind(...MIGRATION_TABLES)
+      env.XBOARD_DB.prepare(`DELETE FROM ${PAYMENT_TRANSACTION_TABLE}`),
+      env.XBOARD_DB.prepare(`DELETE FROM sqlite_sequence WHERE name IN (${[...MIGRATION_TABLES, PAYMENT_TRANSACTION_TABLE].map(() => "?").join(",")})`)
+        .bind(...MIGRATION_TABLES, PAYMENT_TRANSACTION_TABLE)
     ]);
     const progress = { phase: "restoring", tables: {} };
     await env.XBOARD_DB.prepare("UPDATE v2_migration_runs SET rollback_progress = ?, updated_at = ? WHERE id = ?")
@@ -811,6 +819,14 @@ async function finishMigration(request: Request, env: MigrationEnv) {
   const progress = safeJson(run.progress) as Record<string, any>;
   const counts: Record<string, number> = {};
   const warnings: string[] = [];
+  const supportedPayments = [...supportedPaymentMethods];
+  await env.XBOARD_DB.prepare(`UPDATE v2_payment SET enable=0,updated_at=? WHERE payment IS NULL OR payment NOT IN (${supportedPayments.map(() => "?").join(",")})`)
+    .bind(now(), ...supportedPayments).run();
+  const unsupportedPayments = await env.XBOARD_DB.prepare("SELECT DISTINCT payment FROM v2_payment WHERE payment IS NULL OR payment NOT IN (" + supportedPayments.map(() => "?").join(",") + ")")
+    .bind(...supportedPayments).all<{ payment: string }>();
+  for (const row of unsupportedPayments.results || []) {
+    if (!supportedPaymentMethods.has(String(row.payment))) warnings.push(`v2_payment: 未支持的渠道 ${row.payment} 已保留配置并停用`);
+  }
   const targetMismatches: Array<{ table: string; expected: number; actual: number }> = [];
   if (run.source_type !== "redis") {
     const countedTables = MIGRATION_TABLES.filter(table => run.mode === "overwrite" || sourceCounts[table] !== undefined);
@@ -845,7 +861,8 @@ async function finishMigration(request: Request, env: MigrationEnv) {
     target_counts: counts,
     progress,
     warnings,
-    skipped_service_config: ["原 SMTP/邮件驱动设置", "邮件服务商 API 凭据", "所有插件及插件配置", "支付渠道配置", "原主题与主题配置", "服务器机器负载历史"],
+    skipped_service_config: ["原 SMTP/邮件驱动设置", "邮件服务商 API 凭据", "所有插件及插件配置", "内部支付事务", "原主题与主题配置", "服务器机器负载历史"],
+    security_warnings: ["支付渠道配置已原样迁移，其中可能包含私钥、API Key 与 Webhook Secret"],
     skip_backup: Boolean(Number(run.skip_backup || 0)),
     theme: "Xboard"
   };
@@ -858,6 +875,8 @@ async function finishMigration(request: Request, env: MigrationEnv) {
         ]
       : [
           env.XBOARD_DB.prepare("DELETE FROM v2_server_machine_load_history"),
+          env.XBOARD_DB.prepare(`DELETE FROM ${PAYMENT_TRANSACTION_TABLE}`),
+          env.XBOARD_DB.prepare("DELETE FROM sqlite_sequence WHERE name = ?").bind(PAYMENT_TRANSACTION_TABLE),
           env.XBOARD_DB.prepare("DELETE FROM failed_jobs WHERE failed_at < ?").bind(ts - FAILED_JOB_RETENTION_SECONDS),
           env.XBOARD_DB.prepare("DELETE FROM v2_job_logs WHERE COALESCE(updated_at, created_at) < ?").bind(ts - FAILED_JOB_RETENTION_SECONDS)
         ];
