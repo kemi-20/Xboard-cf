@@ -17,40 +17,38 @@ export type ServerDeps<E extends ServerEnv> = {
   machineHistory: (env: E, machineId: number, limit: number, rangeHours: number | null) => Promise<Record<string, unknown>[] | null>;
 };
 
+export type AdminServerRowsOptions = {
+  freshAll?: boolean;
+};
+
 export async function groupById(env: ServerEnv, id: unknown) {
   if (!id) return null;
   return env.XBOARD_DB.prepare("SELECT id, name FROM v2_server_group WHERE id = ?").bind(id).first();
 }
 
 export async function adminServerGroupRows<E extends ServerEnv>(env: E, deps: ServerDeps<E>) {
-  const version = await deps.optionalKvGet(env, "servers_version") || "0";
-  return cachedData(`admin-server-groups:${version}`, 60, async () => {
-    const [groupsResult, usersResult, serversResult] = await Promise.all([
-      env.XBOARD_DB.prepare("SELECT * FROM v2_server_group ORDER BY id DESC").all<Record<string, any>>(),
-      env.XBOARD_DB.prepare("SELECT group_id, COUNT(*) AS count FROM v2_user WHERE group_id IS NOT NULL GROUP BY group_id").all<{ group_id: number; count: number }>(),
-      env.XBOARD_DB.prepare("SELECT group_ids FROM v2_server").all<{ group_ids: string | null }>()
-    ]);
-    const userCounts = new Map((usersResult.results || []).map(row => [Number(row.group_id), Number(row.count || 0)]));
-    const serverCounts = new Map<number, number>();
-    for (const server of serversResult.results || []) {
-      for (const groupId of new Set(deps.parseJsonArray(server.group_ids).map(Number).filter(Number.isFinite))) {
-        serverCounts.set(groupId, (serverCounts.get(groupId) || 0) + 1);
-      }
+  const [groupsResult, usersResult, serversResult] = await Promise.all([
+    env.XBOARD_DB.prepare("SELECT * FROM v2_server_group ORDER BY id DESC").all<Record<string, any>>(),
+    env.XBOARD_DB.prepare("SELECT group_id, COUNT(*) AS count FROM v2_user WHERE group_id IS NOT NULL GROUP BY group_id").all<{ group_id: number; count: number }>(),
+    env.XBOARD_DB.prepare("SELECT group_ids FROM v2_server").all<{ group_ids: string | null }>()
+  ]);
+  const userCounts = new Map((usersResult.results || []).map(row => [Number(row.group_id), Number(row.count || 0)]));
+  const serverCounts = new Map<number, number>();
+  for (const server of serversResult.results || []) {
+    for (const groupId of new Set(deps.parseJsonArray(server.group_ids).map(Number).filter(Number.isFinite))) {
+      serverCounts.set(groupId, (serverCounts.get(groupId) || 0) + 1);
     }
-    return (groupsResult.results || []).map(group => ({
-      ...group,
-      users_count: userCounts.get(Number(group.id)) || 0,
-      server_count: serverCounts.get(Number(group.id)) || 0
-    }));
-  }, 180);
+  }
+  return (groupsResult.results || []).map(group => ({
+    ...group,
+    users_count: userCounts.get(Number(group.id)) || 0,
+    server_count: serverCounts.get(Number(group.id)) || 0
+  }));
 }
 
 export async function adminRouteRows<E extends ServerEnv>(env: E, deps: ServerDeps<E>) {
-  const version = await deps.optionalKvGet(env, "servers_version") || "0";
-  return cachedData(`admin-routes:${version}`, 300, async () => {
-    const routes = await rows(env.XBOARD_DB, "v2_server_route", 1000) as any[];
-    return routes.map(route => ({ ...route, match: deps.routeMatchArray(route.match) }));
-  }, 900);
+  const routes = await rows(env.XBOARD_DB, "v2_server_route", 1000) as any[];
+  return routes.map(route => ({ ...route, match: deps.routeMatchArray(route.match) }));
 }
 
 export function statusTimeout(interval: unknown) {
@@ -69,19 +67,27 @@ export function normalizePublicPort(value: unknown) {
   return /^\d+\.0+$/.test(port) ? port.slice(0, port.indexOf(".")) : port;
 }
 
-export async function adminServerRows<E extends ServerEnv>(env: E, deps: ServerDeps<E>): Promise<Record<string, any>[]> {
-  const version = await deps.optionalKvGet(env, "servers_version") || "0";
+export async function adminServerRows<E extends ServerEnv>(
+  env: E,
+  deps: ServerDeps<E>,
+  options: AdminServerRowsOptions = {}
+): Promise<Record<string, any>[]> {
+  const loadBase = async () => {
+    const [serverResult, machineResult, groupResult, intervalResult] = await Promise.all([
+      env.XBOARD_DB.prepare("SELECT * FROM v2_server ORDER BY sort ASC, id ASC LIMIT 1000").all<Record<string, any>>(),
+      env.XBOARD_DB.prepare("SELECT * FROM v2_server_machine ORDER BY id ASC LIMIT 1000").all<Record<string, any>>(),
+      env.XBOARD_DB.prepare("SELECT * FROM v2_server_group ORDER BY id ASC LIMIT 1000").all<Record<string, any>>(),
+      env.XBOARD_DB.prepare("SELECT name, value FROM v2_settings WHERE name IN ('server_pull_interval', 'server_push_interval')").all<{ name: string; value: string }>()
+    ]);
+    const intervals = Object.fromEntries((intervalResult.results || []).map(row => [row.name, row.value]));
+    return { servers: serverResult.results || [], machines: machineResult.results || [], groups: groupResult.results || [], intervals };
+  };
+  const version = options.freshAll ? null : await deps.optionalKvGet(env, "servers_version") || "0";
+  const basePromise = options.freshAll
+    ? loadBase()
+    : cachedData(`admin-server-base:${version}`, 300, loadBase, 900);
   const [base, live] = await Promise.all([
-    cachedData(`admin-server-base:${version}`, 300, async () => {
-      const [serverResult, machineResult, groupResult, intervalResult] = await Promise.all([
-        env.XBOARD_DB.prepare("SELECT * FROM v2_server ORDER BY sort ASC, id ASC LIMIT 1000").all<Record<string, any>>(),
-        env.XBOARD_DB.prepare("SELECT * FROM v2_server_machine ORDER BY id ASC LIMIT 1000").all<Record<string, any>>(),
-        env.XBOARD_DB.prepare("SELECT * FROM v2_server_group ORDER BY id ASC LIMIT 1000").all<Record<string, any>>(),
-        env.XBOARD_DB.prepare("SELECT name, value FROM v2_settings WHERE name IN ('server_pull_interval', 'server_push_interval')").all<{ name: string; value: string }>()
-      ]);
-      const intervals = Object.fromEntries((intervalResult.results || []).map(row => [row.name, row.value]));
-      return { servers: serverResult.results || [], machines: machineResult.results || [], groups: groupResult.results || [], intervals };
-    }, 900),
+    basePromise,
     deps.statusSnapshot(env)
   ]);
   const { servers, machines, groups: groupRows, intervals } = base;
@@ -146,17 +152,15 @@ export async function adminServerRows<E extends ServerEnv>(env: E, deps: ServerD
 }
 
 export async function adminMachineRows<E extends ServerEnv>(env: E, deps: ServerDeps<E>) {
-  const version = await deps.optionalKvGet(env, "servers_version") || "0";
-  const [base, live] = await Promise.all([
-    cachedData(`admin-machine-base:${version}`, 300, async () => {
-      const [machines, counts] = await Promise.all([
-        env.XBOARD_DB.prepare("SELECT * FROM v2_server_machine ORDER BY id ASC LIMIT 1000").all<Record<string, any>>(),
-        env.XBOARD_DB.prepare("SELECT machine_id, COUNT(*) AS count FROM v2_server WHERE machine_id IS NOT NULL GROUP BY machine_id").all<{ machine_id: number; count: number }>()
-      ]);
-      return { machines: machines.results || [], counts: Object.fromEntries((counts.results || []).map(row => [String(row.machine_id), Number(row.count || 0)])) };
-    }, 900),
+  const [machines, counts, live] = await Promise.all([
+    env.XBOARD_DB.prepare("SELECT * FROM v2_server_machine ORDER BY id ASC LIMIT 1000").all<Record<string, any>>(),
+    env.XBOARD_DB.prepare("SELECT machine_id, COUNT(*) AS count FROM v2_server WHERE machine_id IS NOT NULL GROUP BY machine_id").all<{ machine_id: number; count: number }>(),
     deps.statusSnapshot(env)
   ]);
+  const base = {
+    machines: machines.results || [],
+    counts: Object.fromEntries((counts.results || []).map(row => [String(row.machine_id), Number(row.count || 0)]))
+  };
   const out = [];
   for (const machine of base.machines) {
     const { token: _token, ...safeMachine } = machine;

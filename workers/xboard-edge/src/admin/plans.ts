@@ -1,16 +1,12 @@
-import { cachedData } from "../cache";
 import { now } from "../compat";
-import { settings } from "../db";
-import type { D1Database, KVNamespace } from "../types";
+import { freshSettings } from "../db";
+import type { D1Database } from "../types";
 
 type PlanEnv = {
   XBOARD_DB: D1Database;
-  XBOARD_KV: KVNamespace;
-  SETTINGS_MEMORY_SCOPE?: string;
 };
 
 export type PlanDeps<E extends PlanEnv> = {
-  optionalKvGet: (env: E, key: string) => Promise<string | null>;
   parseJsonArray: (value: unknown) => any[];
   parseJsonObject: (value: unknown) => Record<string, any>;
   pickSetting: (all: Record<string, any>, key: string, fallback?: any) => any;
@@ -23,30 +19,27 @@ export async function planById(env: PlanEnv, id: unknown) {
 }
 
 export async function adminPlanRows<E extends PlanEnv>(env: E, deps: PlanDeps<E>) {
-  const version = await deps.optionalKvGet(env, "servers_version") || "0";
-  return cachedData(`admin-plans:${version}`, 60, async () => {
-    const current = now();
-    const [planResult, groupResult, countResult] = await Promise.all([
-      env.XBOARD_DB.prepare("SELECT * FROM v2_plan ORDER BY sort DESC, id DESC LIMIT 1000").all<Record<string, any>>(),
-      env.XBOARD_DB.prepare("SELECT id, name FROM v2_server_group").all<{ id: number; name: string }>(),
-      env.XBOARD_DB.prepare(`SELECT plan_id, COUNT(*) AS users_count,
+  const current = now();
+  const [planResult, groupResult, countResult] = await Promise.all([
+    env.XBOARD_DB.prepare("SELECT * FROM v2_plan ORDER BY sort DESC, id DESC LIMIT 1000").all<Record<string, any>>(),
+    env.XBOARD_DB.prepare("SELECT id, name FROM v2_server_group").all<{ id: number; name: string }>(),
+    env.XBOARD_DB.prepare(`SELECT plan_id, COUNT(*) AS users_count,
         SUM(CASE WHEN expired_at IS NULL OR expired_at > ? THEN 1 ELSE 0 END) AS active_users_count
         FROM v2_user WHERE plan_id IS NOT NULL GROUP BY plan_id`).bind(current).all<{ plan_id: number; users_count: number; active_users_count: number }>()
-    ]);
-    const groups = new Map((groupResult.results || []).map(group => [Number(group.id), group]));
-    const counts = new Map((countResult.results || []).map(row => [Number(row.plan_id), row]));
-    return (planResult.results || []).map((plan): Record<string, any> => {
-      const count = counts.get(Number(plan.id));
-      return {
-        ...plan,
-        group: groups.get(Number(plan.group_id)) || null,
-        users_count: Number(count?.users_count || 0),
-        active_users_count: Number(count?.active_users_count || 0),
-        prices: typeof plan.prices === "string" ? (() => { try { return JSON.parse(plan.prices || "{}"); } catch { return {}; } })() : plan.prices,
-        tags: deps.parseJsonArray(plan.tags)
-      } as Record<string, any>;
-    });
-  }, 180);
+  ]);
+  const groups = new Map((groupResult.results || []).map(group => [Number(group.id), group]));
+  const counts = new Map((countResult.results || []).map(row => [Number(row.plan_id), row]));
+  return (planResult.results || []).map((plan): Record<string, any> => {
+    const count = counts.get(Number(plan.id));
+    return {
+      ...plan,
+      group: groups.get(Number(plan.group_id)) || null,
+      users_count: Number(count?.users_count || 0),
+      active_users_count: Number(count?.active_users_count || 0),
+      prices: typeof plan.prices === "string" ? (() => { try { return JSON.parse(plan.prices || "{}"); } catch { return {}; } })() : plan.prices,
+      tags: deps.parseJsonArray(plan.tags)
+    } as Record<string, any>;
+  });
 }
 
 function requestLanguage(request: Request) {
@@ -57,7 +50,7 @@ function requestLanguage(request: Request) {
 }
 
 export async function publicPlanRows<E extends PlanEnv>(request: Request, env: E, deps: PlanDeps<E>) {
-  const all = await settings(env.XBOARD_DB, env.XBOARD_KV, env.SETTINGS_MEMORY_SCOPE || "primary");
+  const all = await freshSettings(env.XBOARD_DB);
   const language = requestLanguage(request);
   const text = {
     en: { unlimited: "No Limit", soldOut: "Sold out", reset: ["First Day of Month", "Monthly", "Never", "First Day of Year", "Yearly"] },

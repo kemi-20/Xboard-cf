@@ -413,9 +413,8 @@ test("unused Worker-local KV helpers stay deleted", () => {
   assert.equal(fs.existsSync("../xboard-server/src/kv.ts"), false);
 });
 
-test("worker settings use memory, versioned KV snapshots and D1 fallback", () => {
+test("backend settings use memory, versioned KV snapshots and D1 fallback", () => {
   for (const file of [
-    "src/db.ts",
     "../xboard-server/src/db.ts",
     "src/subscription/db.ts",
     "../xboard-jobs/src/db.ts"
@@ -431,12 +430,11 @@ test("worker settings use memory, versioned KV snapshots and D1 fallback", () =>
   }
 });
 
-test("missing settings version bypasses stale version-zero snapshots in every worker", async () => {
+test("missing settings version bypasses stale version-zero snapshots in cached backend readers", async () => {
   for (const [index, file] of [
-    [0, "../src/db.ts"],
-    [1, "../src/subscription/db.ts"],
-    [2, "../../xboard-server/src/db.ts"],
-    [3, "../../xboard-jobs/src/db.ts"]
+    [0, "../src/subscription/db.ts"],
+    [1, "../../xboard-server/src/db.ts"],
+    [2, "../../xboard-jobs/src/db.ts"]
   ]) {
     const module = await import(`${file}?missing-version=${Date.now()}-${index}`);
     module.invalidateSettingsCache?.();
@@ -724,21 +722,21 @@ test("storage optimization removes write-heavy unused traffic indexes", () => {
   assert.match(schema, /idx_v2_job_logs_failed_time ON v2_job_logs\(updated_at, created_at\) WHERE status = 'failed'/);
 });
 
-test("edge database requests default to primary and only audited guest reads use an unconstrained session", () => {
+test("edge frontend reads primary while subscriptions keep their audited unconstrained session", () => {
   const source = edgeSource();
   const db = fs.readFileSync("src/db.ts", "utf8");
+  const subscriptionDb = fs.readFileSync("src/subscription/db.ts", "utf8");
   assert.match(db, /db\.withSession\("first-primary"\)/);
-  assert.match(db, /db\.withSession\("first-unconstrained"\)/);
+  assert.match(subscriptionDb, /db\.withSession\("first-unconstrained"\)/);
   assert.match(source, /XBOARD_DB: primaryDatabase\(env\.XBOARD_DB\)/);
-  assert.match(source, /PUBLIC_READ_DB: unconstrainedDatabase\(env\.XBOARD_DB\)/);
+  assert.doesNotMatch(source, /PUBLIC_READ_DB/);
   const guest = source.slice(source.indexOf("async function guestApi"), source.indexOf("async function clientUser"));
   assert.match(guest, /request\.method === "GET" && path === "\/api\/v1\/guest\/plan\/fetch"/);
   assert.match(guest, /request\.method === "GET" && path === "\/api\/v1\/guest\/comm\/config"/);
-  assert.equal((guest.match(/const readEnv = env\.PUBLIC_READ_DB/g) || []).length, 1);
-  assert.equal((guest.match(/const readDb = env\.PUBLIC_READ_DB/g) || []).length, 1);
-  assert.match(guest, /SETTINGS_MEMORY_SCOPE: "public"/);
-  assert.match(db, /settingsCaches = new Map/);
-  assert.match(db, /settingsPromises = new Map/);
+  assert.match(guest, /publicPlanRows\(request, env\)/);
+  assert.match(guest, /freshSettings\(env\.XBOARD_DB\)/);
+  assert.match(db, /export async function settings[\s\S]*return freshSettings\(db\)/);
+  assert.doesNotMatch(db, /settingsCaches|settingsPromises|settings:snapshot/);
 });
 
 test("revenue overview reads the migrated daily statistics table", () => {
@@ -1241,8 +1239,8 @@ test("system settings skip subscription template reads unless that section is re
   const end = source.indexOf("function parseJsonArray", start);
   const adminConfig = source.slice(start, end);
   assert.match(adminConfig, /const needsTemplates = !key \|\| key === "subscribe_template"/);
-  assert.match(adminConfig, /Promise\.all\(\[settings\(env\.XBOARD_DB, env\.XBOARD_KV\), subscribeTemplateMap\(env\)\]\)/);
-  assert.match(adminConfig, /: \[await settings\(env\.XBOARD_DB, env\.XBOARD_KV\), \{\} as Record<string, string>\]/);
+  assert.match(adminConfig, /Promise\.all\(\[freshSettings\(env\.XBOARD_DB\), subscribeTemplateMap\(env\)\]\)/);
+  assert.match(adminConfig, /: \[await freshSettings\(env\.XBOARD_DB\), \{\} as Record<string, string>\]/);
 });
 
 test("RX compatibility fixes preserve upstream CRUD, plans, Telegram and filters", () => {

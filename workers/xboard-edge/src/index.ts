@@ -1,7 +1,7 @@
 import type { D1Database, D1PreparedStatement, ExecutionContext, Fetcher, KVNamespace, Queue } from "./types";
 import { body, fail, json, now, ok, ONLINE_RETENTION_SECONDS, randomString, token, uuid } from "./compat";
 import { createSession, currentUser, hashPassword, sessionTokenDigest, verifyPassword } from "./auth";
-import { invalidateSettingsCache, list, primaryDatabase, rows, settings, unconstrainedDatabase } from "./db";
+import { freshSettings, invalidateSettingsCache, list, primaryDatabase, rows, settings } from "./db";
 import { bump } from "./kv";
 import { handleAdminGiftCard, handleUserGiftCard } from "./gift-card";
 import { authorizeMigration, handleAdminMigration } from "./migration";
@@ -72,8 +72,6 @@ export interface Env {
   XBOARD_SERVER: Fetcher;
   XBOARD_JOBS: Fetcher;
   NOTIFICATION_EVENTS: Queue;
-  PUBLIC_READ_DB?: D1Database;
-  SETTINGS_MEMORY_SCOPE?: string;
   INTERNAL_SYNC_TOKEN?: string;
 }
 
@@ -577,8 +575,8 @@ async function adminConfig(env: Env, request: Request) {
   const key = new URL(request.url).searchParams.get("key");
   const needsTemplates = !key || key === "subscribe_template";
   const [all, templates] = needsTemplates
-    ? await Promise.all([settings(env.XBOARD_DB, env.XBOARD_KV), subscribeTemplateMap(env)])
-    : [await settings(env.XBOARD_DB, env.XBOARD_KV), {} as Record<string, string>];
+    ? await Promise.all([freshSettings(env.XBOARD_DB), subscribeTemplateMap(env)])
+    : [await freshSettings(env.XBOARD_DB), {} as Record<string, string>];
   const config: Record<string, any> = {
     invite: {
       invite_force: !!pickSetting(all, "invite_force", 0),
@@ -890,12 +888,10 @@ async function guestApi(request: Request, env: Env, path: string) {
     return ok(true);
   }
   if (request.method === "GET" && path === "/api/v1/guest/plan/fetch") {
-    const readEnv = env.PUBLIC_READ_DB ? { ...env, XBOARD_DB: env.PUBLIC_READ_DB, SETTINGS_MEMORY_SCOPE: "public" } : env;
-    return ok((await publicPlanRows(request, readEnv)).filter(row => Number(row.show) === 1 && Number(row.sell) === 1));
+    return ok((await publicPlanRows(request, env)).filter(row => Number(row.show) === 1 && Number(row.sell) === 1));
   }
   if (request.method === "GET" && path === "/api/v1/guest/comm/config") {
-    const readDb = env.PUBLIC_READ_DB || env.XBOARD_DB;
-    const all = await settings(readDb, env.XBOARD_KV, env.PUBLIC_READ_DB ? "public" : "primary");
+    const all = await freshSettings(env.XBOARD_DB);
     return ok({
       tos_url: pickSetting(all, "tos_url", ""),
       is_email_verify: Number(Boolean(pickSetting(all, "email_verify", 0))),
@@ -930,7 +926,7 @@ async function clientUser(request: Request, env: Env) {
 async function clientApi(request: Request, env: Env, path: string) {
   const user = await clientUser(request, env);
   if (!user) return fail(new URL(request.url).searchParams.get("token") ? "token is error" : "token is null", 403, 403);
-  const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
+  const all = await freshSettings(env.XBOARD_DB);
   if (request.method === "GET" && path.endsWith("/app/getVersion")) {
     const userAgent = request.headers.get("user-agent") || "";
     if (/tidalab\/4\.0\.0|tunnelab\/4\.0\.0/i.test(userAgent)) {
@@ -1148,7 +1144,7 @@ function adminUserQuery(input: Record<string, any>) {
   return buildAdminUserQuery(input, parseJsonArray);
 }
 function planDeps() {
-  return { optionalKvGet, parseJsonArray, parseJsonObject, pickSetting, orderPeriods };
+  return { parseJsonArray, parseJsonObject, pickSetting, orderPeriods };
 }
 
 function adminPlanRows(env: Env) {
@@ -1196,8 +1192,10 @@ function liveOnlineSummary(env: Env) {
   return runtimeOnlineSummary(env, () => internalAuthHeaders(env));
 }
 
-function adminServerRows(env: Env) {
-  return loadAdminServerRows(env, serverDeps());
+function adminServerRows(env: Env, freshness: "cached" | "all" = "cached") {
+  return loadAdminServerRows(env, serverDeps(), {
+    freshAll: freshness === "all"
+  });
 }
 
 function adminMachineRows(env: Env) {
@@ -2754,11 +2752,8 @@ async function adminApi(request: Request, env: Env, path: string) {
     return ok(data);
   }
   if (request.method === "GET" && route === "/knowledge/getCategory") {
-    const version = await optionalKvGet(env, "content_version") || "0";
-    return ok(await cachedData(`admin-knowledge-categories:${version}`, 300, async () => {
-      const result = await env.XBOARD_DB.prepare("SELECT DISTINCT category FROM v2_knowledge WHERE category IS NOT NULL AND category != '' ORDER BY category").all<{ category: string }>();
-      return (result.results || []).map(row => row.category);
-    }, 900));
+    const result = await env.XBOARD_DB.prepare("SELECT DISTINCT category FROM v2_knowledge WHERE category IS NOT NULL AND category != '' ORDER BY category").all<{ category: string }>();
+    return ok((result.results || []).map(row => row.category));
   }
   if (request.method === "GET" && route === "/stat/getStatRecord") {
     const url = new URL(request.url);
@@ -3140,28 +3135,22 @@ async function adminApi(request: Request, env: Env, path: string) {
   for (const [suffix, table] of Object.entries(directFetchTables)) {
     if (path.includes(suffix)) {
       if (suffix === "/server/group/fetch") return ok(await adminServerGroupRows(env));
-      if (suffix === "/server/manage/getNodes") return ok(await adminServerRows(env));
+      if (suffix === "/server/manage/getNodes") return ok(await adminServerRows(env, "all"));
       if (suffix === "/server/machine/fetch") return ok(await adminMachineRows(env));
       if (suffix === "/server/route/fetch") return ok(await adminRouteRows(env));
       if (suffix === "/plan/fetch") return ok(await adminPlanRows(env));
       if (suffix === "/notice/fetch") {
-        const version = await optionalKvGet(env, "content_version") || "0";
-        return ok(await cachedData(`admin-notices:${version}`, 300, async () => {
-          const result = await env.XBOARD_DB.prepare("SELECT * FROM v2_notice ORDER BY sort ASC, id DESC").all<Record<string, any>>();
-          return (result.results || []).map(row => ({ ...row, tags: parseJsonArray(row.tags), show: Boolean(Number(row.show)), popup: Boolean(Number(row.popup)) }));
-        }, 900));
+        const result = await env.XBOARD_DB.prepare("SELECT * FROM v2_notice ORDER BY sort ASC, id DESC").all<Record<string, any>>();
+        return ok((result.results || []).map(row => ({ ...row, tags: parseJsonArray(row.tags), show: Boolean(Number(row.show)), popup: Boolean(Number(row.popup)) })));
       }
       if (suffix === "/knowledge/fetch") {
         const requestedId = nullableNumber(new URL(request.url).searchParams.get("id"));
-        const version = await optionalKvGet(env, "content_version") || "0";
         if (requestedId) {
-          const value = await cachedData(`admin-knowledge:${version}:${requestedId}`, 300, () => env.XBOARD_DB.prepare("SELECT * FROM v2_knowledge WHERE id = ?").bind(requestedId).first<Record<string, any>>(), 900);
+          const value = await env.XBOARD_DB.prepare("SELECT * FROM v2_knowledge WHERE id = ?").bind(requestedId).first<Record<string, any>>();
           return value ? ok(value) : fail("知识不存在", 400, 400202);
         }
-        return ok(await cachedData(`admin-knowledge-list:${version}`, 300, async () => {
-          const result = await env.XBOARD_DB.prepare("SELECT title,id,updated_at,category,show FROM v2_knowledge ORDER BY sort ASC").all<Record<string, any>>();
-          return (result.results || []).map(row => ({ ...row, show: Boolean(Number(row.show)) }));
-        }, 900));
+        const result = await env.XBOARD_DB.prepare("SELECT title,id,updated_at,category,show FROM v2_knowledge ORDER BY sort ASC").all<Record<string, any>>();
+        return ok((result.results || []).map(row => ({ ...row, show: Boolean(Number(row.show)) })));
       }
       return ok(await rows(env.XBOARD_DB, table, 1000));
     }
@@ -3342,7 +3331,7 @@ async function userApi(request: Request, env: Env, path: string) {
     return json({ data: result.results || [], total: Number((totalResult.results?.[0] as any)?.c || 0) });
   }
   if (request.method === "GET" && route === "/comm/config") {
-    const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
+    const all = await freshSettings(env.XBOARD_DB);
     return ok({
       is_telegram: Number(Boolean(pickSetting(all, "telegram_bot_enable", 0))),
       telegram_discuss_link: pickSetting(all, "telegram_discuss_link", ""),
@@ -3358,7 +3347,7 @@ async function userApi(request: Request, env: Env, path: string) {
     });
   }
   if (request.method === "GET" && route === "/telegram/getBotInfo") {
-    const all = await settings(env.XBOARD_DB, env.XBOARD_KV);
+    const all = await freshSettings(env.XBOARD_DB);
     const botToken = String(pickSetting(all, "telegram_bot_token", ""));
     let username = "";
     if (botToken) {
@@ -3370,11 +3359,8 @@ async function userApi(request: Request, env: Env, path: string) {
     return ok({ enabled: Boolean(pickSetting(all, "telegram_bot_enable", 0)), username, discuss_link: pickSetting(all, "telegram_discuss_link", "") });
   }
   if (request.method === "GET" && route === "/knowledge/getCategory") {
-    const version = await optionalKvGet(env, "content_version") || "0";
-    return ok(await cachedData(`user-knowledge-categories:${version}`, 300, async () => {
-      const result = await env.XBOARD_DB.prepare("SELECT DISTINCT category FROM v2_knowledge WHERE show = 1 AND category IS NOT NULL AND category != '' ORDER BY category").all<{ category: string }>();
-      return (result.results || []).map(row => row.category);
-    }, 900));
+    const result = await env.XBOARD_DB.prepare("SELECT DISTINCT category FROM v2_knowledge WHERE show = 1 AND category IS NOT NULL AND category != '' ORDER BY category").all<{ category: string }>();
+    return ok((result.results || []).map(row => row.category));
   }
   if (request.method === "GET" && route === "/stat/getTrafficLog") {
     const result = await env.XBOARD_DB.prepare(`SELECT user_id, server_rate, SUM(u) AS u, SUM(d) AS d, record_at
@@ -3528,7 +3514,7 @@ async function userApi(request: Request, env: Env, path: string) {
   if (path.includes("/server/fetch")) {
     const available = userIsAvailable(user as Record<string, any>);
     if (!available) return ok([]);
-    const servers = (await adminServerRows(env))
+    const servers = (await adminServerRows(env, "all"))
       .filter(row => Number((row as any).show ?? 1) === 1 && parseJsonArray((row as any).group_ids).map(Number).includes(Number((user as any).group_id || 0)))
       .map(row => ({
         id: row.id, type: row.type, version: row.version ?? null, name: row.name, rate: Number(row.rate ?? 1),
@@ -3545,14 +3531,11 @@ async function userApi(request: Request, env: Env, path: string) {
     const url = new URL(request.url);
     const page = Math.max(1, Number(url.searchParams.get("current") || 1));
     const pageSize = 5;
-    const version = await optionalKvGet(env, "content_version") || "0";
-    return json(await cachedData(`user-notices:${version}:${page}`, 300, async () => {
-      const [result, total] = await Promise.all([
-        env.XBOARD_DB.prepare("SELECT * FROM v2_notice WHERE show = 1 ORDER BY sort ASC, id DESC LIMIT ? OFFSET ?").bind(pageSize, (page - 1) * pageSize).all(),
-        firstNumber(env, "SELECT COUNT(*) AS c FROM v2_notice WHERE show = 1")
-      ]);
-      return { data: result.results || [], total };
-    }, 900));
+    const [result, total] = await Promise.all([
+      env.XBOARD_DB.prepare("SELECT * FROM v2_notice WHERE show = 1 ORDER BY sort ASC, id DESC LIMIT ? OFFSET ?").bind(pageSize, (page - 1) * pageSize).all(),
+      firstNumber(env, "SELECT COUNT(*) AS c FROM v2_notice WHERE show = 1")
+    ]);
+    return json({ data: result.results || [], total });
   }
   if (path.includes("/knowledge/fetch")) {
     const url = new URL(request.url);
@@ -3571,12 +3554,9 @@ async function userApi(request: Request, env: Env, path: string) {
       if (keyword) { clauses.push("(title LIKE ? OR body LIKE ?)"); bindings.push(`%${keyword}%`, `%${keyword}%`); }
     }
     const selected = id ? "*" : "id, category, title, updated_at, body";
-    const version = await optionalKvGet(env, "content_version") || "0";
-    const rawKnowledge = await cachedData(`user-knowledge:${version}:${id || 0}:${language || "default"}:${keyword}`, 300, async () => {
-      const result = await env.XBOARD_DB.prepare(`SELECT ${selected} FROM v2_knowledge WHERE ${clauses.join(" AND ")} ORDER BY sort ASC, id ASC`).bind(...bindings).all<Record<string, any>>();
-      return result.results || [];
-    }, 900);
-    const allSettings = await settings(env.XBOARD_DB, env.XBOARD_KV);
+    const result = await env.XBOARD_DB.prepare(`SELECT ${selected} FROM v2_knowledge WHERE ${clauses.join(" AND ")} ORDER BY sort ASC, id ASC`).bind(...bindings).all<Record<string, any>>();
+    const rawKnowledge = result.results || [];
+    const allSettings = await freshSettings(env.XBOARD_DB);
     const subscription = await subscribeUrl(request, env, String((user as any).token || ""));
     const available = userIsAvailable(user as Record<string, any>);
     const safeBase64 = btoa(subscription).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
@@ -3859,7 +3839,6 @@ export default {
     const sessionEnv = {
       ...env,
       XBOARD_DB: primaryDatabase(env.XBOARD_DB),
-      PUBLIC_READ_DB: unconstrainedDatabase(env.XBOARD_DB),
       SUBSCRIPTION_DB: env.XBOARD_DB
     };
     const response = await edgeFetch(request, sessionEnv, ctx);
