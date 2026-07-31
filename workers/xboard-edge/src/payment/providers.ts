@@ -53,6 +53,16 @@ function decimal(amount: number) {
   return (amount / 100).toFixed(2);
 }
 
+function expiryTimestamp(value: unknown) {
+  if (value === null || value === undefined || value === "") return undefined;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    return Math.floor(numeric > 1_000_000_000_000 ? numeric / 1000 : numeric);
+  }
+  const parsed = Date.parse(String(value));
+  return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : undefined;
+}
+
 function canonical(params: Record<string, unknown>, exclude: string[] = []) {
   const ignored = new Set(exclude);
   return Object.entries(params)
@@ -206,7 +216,8 @@ const alipay: PaymentProvider = {
     const bizContent = JSON.stringify({
       subject: text(context.config, "product_name") || `${context.appName} - 订阅`,
       out_trade_no: context.tradeNo,
-      total_amount: decimal(context.amount)
+      total_amount: decimal(context.amount),
+      timeout_express: "30m"
     });
     const params: Record<string, string> = {
       app_id: text(context.config, "app_id"),
@@ -235,7 +246,12 @@ const alipay: PaymentProvider = {
     if (!result || String(result.code) !== "10000" || !result.qr_code) {
       throw new PaymentError(String(result?.sub_msg || result?.msg || "支付宝创建订单失败"), 502);
     }
-    return { type: 0, data: String(result.qr_code), providerReference: String(result.out_trade_no || context.tradeNo) };
+    return {
+      type: 0,
+      data: String(result.qr_code),
+      providerReference: String(result.out_trade_no || context.tradeNo),
+      expiresAt: Math.floor(Date.now() / 1000) + 30 * 60
+    };
   },
   async verifyCallback(request, config) {
     this.validateConfig(config);
@@ -294,7 +310,12 @@ const btcpay: PaymentProvider = {
     });
     const result = safeJson(raw);
     if (!result.id || !result.checkoutLink) throw new PaymentError("BTCPay 创建 Invoice 失败", 502);
-    return { type: 1, data: String(result.checkoutLink), providerReference: String(result.id) };
+    return {
+      type: 1,
+      data: String(result.checkoutLink),
+      providerReference: String(result.id),
+      expiresAt: expiryTimestamp(result.expirationTime)
+    };
   },
   async verifyCallback(request, config) {
     this.validateConfig(config);
@@ -365,7 +386,12 @@ const coinbase: PaymentProvider = {
     });
     const result = safeJson(raw).data;
     if (!result?.id || !result.hosted_url) throw new PaymentError("Coinbase Commerce 创建 Charge 失败", 502);
-    return { type: 1, data: String(result.hosted_url), providerReference: String(result.id) };
+    return {
+      type: 1,
+      data: String(result.hosted_url),
+      providerReference: String(result.id),
+      expiresAt: expiryTimestamp(result.expires_at)
+    };
   },
   async verifyCallback(request, config) {
     this.validateConfig(config);
@@ -479,7 +505,7 @@ const coinbaseBusiness: PaymentProvider = {
       type: 1,
       data: String(result.url),
       providerReference: String(result.id),
-      expiresAt: result.expiresAt ? Math.floor(Date.parse(String(result.expiresAt)) / 1000) : undefined
+      expiresAt: expiryTimestamp(result.expiresAt)
     };
   },
   async verifyCallback(request, config) {
@@ -502,13 +528,16 @@ const coinbaseBusiness: PaymentProvider = {
     if (checkout.mode && ![expectedMode, text(config, "coinbase_business_environment")].includes(String(checkout.mode))) {
       throw new PaymentError("Coinbase Business 环境不匹配", 400);
     }
+    const hasFiatAmount = checkout.fiatAmount !== null && checkout.fiatAmount !== undefined;
+    const hasFiatCurrency = checkout.fiatCurrency !== null && checkout.fiatCurrency !== undefined;
+    if (hasFiatAmount !== hasFiatCurrency) throw new PaymentError("Coinbase Business 法币金额字段不完整", 400);
     return {
       state: "paid",
       tradeNo: String(checkout.metadata?.orderId || event.metadata?.orderId || ""),
       callbackNo: reference,
       providerReference: reference,
-      amount: cents(checkout.amount),
-      currency: String(checkout.currency || "").toUpperCase(),
+      amount: cents(hasFiatAmount ? checkout.fiatAmount : checkout.amount),
+      currency: String(hasFiatCurrency ? checkout.fiatCurrency : checkout.currency || "").toUpperCase(),
       responseText: "OK"
     };
   }
@@ -652,7 +681,12 @@ const mgate: PaymentProvider = {
     });
     const result = safeJson(raw);
     if (!result.data?.trade_no || !result.data?.pay_url) throw new PaymentError(String(result.message || "MGate 创建支付失败"), 502);
-    return { type: 1, data: String(result.data.pay_url), providerReference: String(result.data.trade_no) };
+    return {
+      type: 1,
+      data: String(result.data.pay_url),
+      providerReference: String(result.data.trade_no),
+      expiresAt: expiryTimestamp(result.data.expires_at ?? result.data.expired_at)
+    };
   },
   async verifyCallback(request, config) {
     this.validateConfig(config);
@@ -779,7 +813,7 @@ const stripe: PaymentProvider = {
       type: 1,
       data: String(result.url),
       providerReference: String(result.id),
-      expiresAt: Number(result.expires_at || 0) || undefined
+      expiresAt: expiryTimestamp(result.expires_at)
     };
   },
   async verifyCallback(request, config) {
@@ -798,6 +832,7 @@ const stripe: PaymentProvider = {
     const { raw: sessionRaw } = await stripeRequest(config, `/v1/checkout/sessions/${encodeURIComponent(reference)}`);
     const session = safeJson(sessionRaw);
     if (String(session.id || "") !== reference) throw new PaymentError("Stripe Checkout Session ID 不匹配", 400);
+    if (String(session.mode || "") !== "payment") throw new PaymentError("Stripe Checkout Session 模式不匹配", 400);
     if (String(session.payment_status) !== "paid") return { state: "pending", responseText: "OK" };
     if (!session.payment_intent) throw new PaymentError("Stripe PaymentIntent 缺失", 400);
     const expectsLive = text(config, "stripe_secret_key").startsWith("sk_live_");
@@ -829,6 +864,7 @@ export const __test = {
   verifyStripeSignature,
   stripeMinorAmount,
   stripeXboardAmount,
+  expiryTimestamp,
   validGatewayUrl,
   STRIPE_API_VERSION
 };

@@ -2,7 +2,8 @@ import type { D1Database, Fetcher, KVNamespace } from "./types";
 import { invalidateSettingsCache } from "./db";
 import { body, fail, json, now, ok, randomString, sha256Hex } from "./compat";
 import { internalAuthHeaders, invalidateInternalTokenCache } from "./internal/auth";
-import { paymentMethodNames } from "./payment/providers.ts";
+import { paymentMethodNames, paymentProviders } from "./payment/providers.ts";
+import { safeAppOrigin, safeHttpsOrigin, safeNotificationOrigin } from "./payment/index.ts";
 
 interface MigrationEnv {
   XBOARD_DB: D1Database;
@@ -494,7 +495,9 @@ async function prepareMigration(request: Request, env: MigrationEnv) {
     if (run.mode === "overwrite") {
       await env.XBOARD_DB.batch([
         ...DELETE_TABLES.map(table => env.XBOARD_DB.prepare(`DELETE FROM ${table}`)),
-        env.XBOARD_DB.prepare(`DELETE FROM sqlite_sequence WHERE name IN (${MIGRATION_TABLES.map(() => "?").join(",")})`).bind(...MIGRATION_TABLES)
+        env.XBOARD_DB.prepare(`DELETE FROM ${PAYMENT_TRANSACTION_TABLE}`),
+        env.XBOARD_DB.prepare(`DELETE FROM sqlite_sequence WHERE name IN (${[...MIGRATION_TABLES, PAYMENT_TRANSACTION_TABLE].map(() => "?").join(",")})`)
+          .bind(...MIGRATION_TABLES, PAYMENT_TRANSACTION_TABLE)
       ]);
     }
     const ts = now();
@@ -796,6 +799,8 @@ async function finishRollback(request: Request, env: MigrationEnv) {
   }
   await env.XBOARD_DB.batch([
     env.XBOARD_DB.prepare("DELETE FROM v2_server_machine_load_history"),
+    env.XBOARD_DB.prepare(`DELETE FROM ${PAYMENT_TRANSACTION_TABLE}`),
+    env.XBOARD_DB.prepare("DELETE FROM sqlite_sequence WHERE name = ?").bind(PAYMENT_TRANSACTION_TABLE),
     env.XBOARD_DB.prepare("UPDATE v2_server_machine SET last_seen_at = NULL, load_status = NULL"),
     env.XBOARD_DB.prepare("UPDATE v2_server SET last_check_at = NULL, last_push_at = NULL, online_user = 0, metrics = NULL")
   ]);
@@ -842,6 +847,23 @@ async function finishMigration(request: Request, env: MigrationEnv) {
     await env.XBOARD_DB.prepare("UPDATE v2_payment SET enable=0,updated_at=? WHERE payment=? AND uuid=?")
       .bind(now(), row.payment, row.uuid).run();
     warnings.push(`v2_payment: 渠道 ${row.payment} 存在重复回调 UUID，相关配置已保留并停用`);
+  }
+  const appUrlRow = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name='app_url'").first<{ value: string }>();
+  const enabledPayments = await env.XBOARD_DB.prepare(`SELECT id,payment,config,notify_domain FROM v2_payment
+    WHERE enable=1 AND payment IN (${supportedPayments.map(() => "?").join(",")})`)
+    .bind(...supportedPayments).all<{ id: number; payment: string; config: string; notify_domain: string | null }>();
+  for (const row of enabledPayments.results || []) {
+    const provider = paymentProviders.get(String(row.payment));
+    try {
+      provider?.validateConfig(safeJson(row.config) as Record<string, unknown>);
+      safeAppOrigin(String(appUrlRow?.value || ""));
+      if (row.notify_domain) safeHttpsOrigin(String(row.notify_domain));
+      else safeNotificationOrigin(String(appUrlRow?.value || ""));
+    } catch {
+      await env.XBOARD_DB.prepare("UPDATE v2_payment SET enable=0,updated_at=? WHERE id=?")
+        .bind(now(), row.id).run();
+      warnings.push(`v2_payment: 渠道 ${row.payment} 配置或通知地址无效，配置已保留并停用`);
+    }
   }
   const targetMismatches: Array<{ table: string; expected: number; actual: number }> = [];
   if (run.source_type !== "redis") {

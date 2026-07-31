@@ -123,11 +123,15 @@ test("Alipay signs requests, verifies responses, and binds callbacks to out_trad
     const requestSignature = params.sign;
     delete params.sign;
     assert.equal(verify("RSA-SHA256", Buffer.from(providerTest.canonical(params)), keys.publicKey, Buffer.from(requestSignature, "base64")), true);
+    assert.equal(JSON.parse(params.biz_content).timeout_express, "30m");
     const responseBody = JSON.stringify({ code: "10000", msg: "Success", out_trade_no: context.tradeNo, qr_code: "https://qr.example/pay" });
     const responseSignature = sign("RSA-SHA256", Buffer.from(responseBody), keys.privateKey).toString("base64");
     return new Response(`{"alipay_trade_precreate_response":${responseBody},"sign":"${responseSignature}"}`);
   }, () => provider.createCheckout({ ...context, config }));
-  assert.deepEqual(result, { type: 0, data: "https://qr.example/pay", providerReference: context.tradeNo });
+  assert.equal(result.type, 0);
+  assert.equal(result.data, "https://qr.example/pay");
+  assert.equal(result.providerReference, context.tradeNo);
+  assert.ok(result.expiresAt > Math.floor(Date.now() / 1000) + 29 * 60);
 
   const callback = {
     app_id: config.app_id,
@@ -163,7 +167,7 @@ test("BTCPay uses idempotency, validates HMAC, and re-reads the settled invoice"
       createSeen = true;
       assert.equal(new Headers(init.headers).get("idempotency-key"), context.idempotencyKey);
       assert.equal(JSON.parse(String(init.body)).metadata.orderId, context.tradeNo);
-      return Response.json({ id: "invoice-1", checkoutLink: "https://btcpay.example.com/i/invoice-1" });
+      return Response.json({ id: "invoice-1", checkoutLink: "https://btcpay.example.com/i/invoice-1", expirationTime: 2000000000 });
     }
     assert.equal(url.pathname.endsWith("/invoices/invoice-1"), true);
     return Response.json({
@@ -181,6 +185,7 @@ test("BTCPay uses idempotency, validates HMAC, and re-reads the settled invoice"
   });
   assert.equal(createSeen, true);
   assert.equal(result.created.providerReference, "invoice-1");
+  assert.equal(result.created.expiresAt, 2000000000);
   assert.equal(result.verified.tradeNo, context.tradeNo);
   assert.equal(result.verified.amount, 12345);
 });
@@ -202,7 +207,7 @@ test("legacy Coinbase Commerce remains compatible and verifies the fetched Charg
       const payload = JSON.parse(String(init.body));
       assert.equal(payload.local_price.amount, "123.45");
       assert.equal(payload.metadata.outTradeNo, context.tradeNo);
-      return Response.json({ data: { id: chargeId, hosted_url: "https://commerce.coinbase.com/charges/local" } });
+      return Response.json({ data: { id: chargeId, hosted_url: "https://commerce.coinbase.com/charges/local", expires_at: "2033-05-18T03:33:20Z" } });
     }
     assert.equal(url.pathname.endsWith(`/charges/${chargeId}`), true);
     return Response.json({ data: {
@@ -226,6 +231,7 @@ test("legacy Coinbase Commerce remains compatible and verifies the fetched Charg
     return { created, verified };
   });
   assert.equal(result.created.providerReference, chargeId);
+  assert.equal(result.created.expiresAt, 2000000000);
   assert.equal(result.verified.callbackNo, "event-local");
   assert.equal(result.verified.providerReference, chargeId);
   assert.equal(result.verified.amount, 12345);
@@ -259,7 +265,8 @@ test("Coinbase Business uses a signed JWT, sandbox path, Hook0, and a verified c
       return Response.json({ id: checkoutId, url: "https://payments.coinbase.com/payment-links/test" });
     }
     return Response.json({
-      id: checkoutId, status: "COMPLETED", amount: "123.45", currency: "CNY",
+      id: checkoutId, status: "COMPLETED", amount: "123.45", currency: "USDC",
+      fiatAmount: "123.45", fiatCurrency: "CNY",
       metadata: { orderId: context.tradeNo }
     });
   }, async () => {
@@ -310,6 +317,7 @@ test("Stripe creates hosted Checkout and only accepts a paid, re-read Session", 
     assert.equal(url.pathname, `/v1/checkout/sessions/${sessionId}`);
     return Response.json({
       id: sessionId,
+      mode: "payment",
       payment_status: "paid",
       livemode: false,
       client_reference_id: context.tradeNo,
@@ -513,6 +521,9 @@ test("callback and checkout URL guards reject oversized or executable input", as
   }), /本地或私有/);
   assert.equal(paymentTest.safeAppOrigin("http://127.0.0.1:8787/path"), "http://127.0.0.1:8787");
   assert.throws(() => paymentTest.safeAppOrigin("http://panel.example.com"), /HTTPS/);
+  assert.equal(paymentTest.safeNotificationOrigin("http://127.0.0.1:8787/path"), "http://127.0.0.1:8787");
+  assert.throws(() => paymentTest.safeNotificationOrigin("https://127.0.0.1"), /公开可访问/);
+  assert.equal(paymentTest.safeNotificationOrigin("https://panel.example.com/path"), "https://panel.example.com");
 });
 
 test("migration keeps unsupported payment warnings non-fatal", () => {
@@ -530,6 +541,11 @@ test("payment migration preserves credentials and disables only unsupported prov
   assert.match(source, /UPDATE v2_payment SET enable=0,updated_at=\? WHERE uuid IS NULL OR TRIM\(uuid\)=''/);
   assert.match(source, /GROUP BY payment,uuid HAVING COUNT\(\*\)>1/);
   assert.match(source, /渠道 \$\{row\.payment\} 存在重复回调 UUID，相关配置已保留并停用/);
+  const prepare = source.slice(source.indexOf("async function prepareMigration"), source.indexOf("async function importBatch"));
+  const rollback = source.slice(source.indexOf("async function finishRollback"), source.indexOf("async function finishMigration"));
+  assert.match(prepare, /DELETE FROM \$\{PAYMENT_TRANSACTION_TABLE\}/);
+  assert.match(rollback, /DELETE FROM \$\{PAYMENT_TRANSACTION_TABLE\}/);
+  assert.match(rollback, /DELETE FROM sqlite_sequence WHERE name = \?/);
 });
 
 class SqlStatement {
@@ -621,6 +637,7 @@ const settlementDeps = bumps => ({
 const emptyKv = { get: async () => null, put: async () => {}, delete: async () => {} };
 
 async function paymentDatabase() {
+  paymentTest.resetPaymentSchema();
   const SQL = await initSqlJs();
   const raw = new SQL.Database();
   raw.run(`
@@ -642,6 +659,46 @@ async function paymentDatabase() {
   ]);
   return { raw, d1: new SqlD1(raw) };
 }
+
+test("payment channels validate migrated configuration before activation", async () => {
+  invalidateSettingsCache();
+  const { raw, d1 } = await paymentDatabase();
+  const env = { XBOARD_DB: d1, XBOARD_KV: emptyKv };
+  raw.run("UPDATE v2_payment SET enable=0,config='{}' WHERE id=1");
+  const toggle = () => handleAdminPayment(new Request("https://panel.example.com/api/v1/admin/payment/show", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id: 1 })
+  }), env, "/payment/show");
+
+  const invalid = await toggle();
+  assert.equal(invalid.status, 422);
+  assert.equal(raw.exec("SELECT enable FROM v2_payment WHERE id=1")[0].values[0][0], 0);
+
+  raw.run("UPDATE v2_payment SET config=?,uuid=NULL WHERE id=1", [
+    JSON.stringify({ stripe_secret_key: "sk_test_local", stripe_webhook_secret: "whsec_local" })
+  ]);
+  const missingUuid = await toggle();
+  assert.equal(missingUuid.status, 422);
+
+  raw.run("UPDATE v2_payment SET uuid='stripeuuid' WHERE id=1");
+  raw.run(`INSERT INTO v2_payment VALUES (2,'Duplicate','Stripe',?,0,'stripeuuid','S',0,0,NULL,2,0,0)`, [
+    JSON.stringify({ stripe_secret_key: "sk_test_other", stripe_webhook_secret: "whsec_other" })
+  ]);
+  const duplicate = await toggle();
+  assert.equal(duplicate.status, 409);
+  assert.equal((await duplicate.json()).code, 409);
+
+  raw.run("DELETE FROM v2_payment WHERE id=2");
+  const enabled = await toggle();
+  assert.equal(enabled.status, 200);
+  assert.equal(raw.exec("SELECT enable FROM v2_payment WHERE id=1")[0].values[0][0], 1);
+
+  raw.run("UPDATE v2_payment SET config='{}' WHERE id=1");
+  const disabled = await toggle();
+  assert.equal(disabled.status, 200);
+  assert.equal(raw.exec("SELECT enable FROM v2_payment WHERE id=1")[0].values[0][0], 0);
+});
 
 test("checkout freezes amount and currency while active channels cannot be mutated or deleted", async () => {
   invalidateSettingsCache();
@@ -751,6 +808,7 @@ test("callbacks use the frozen transaction currency and preserve the first event
     const signature = await hmacHex("SHA-256", "whsec_local", `${timestamp}.${rawEvent}`);
     return withFetch(async () => Response.json({
       id: "cs_test_callback",
+      mode: "payment",
       payment_status: "paid",
       livemode: false,
       client_reference_id: context.tradeNo,
@@ -787,6 +845,7 @@ test("callbacks use the frozen transaction currency and preserve the first event
   const replaySignature = await hmacHex("SHA-256", "whsec_local", `${replayTimestamp}.${replayRaw}`);
   const replay = await withFetch(async () => Response.json({
     id: "cs_test_replay",
+    mode: "payment",
     payment_status: "paid",
     livemode: false,
     client_reference_id: "ORDER-REPLAY",
@@ -863,7 +922,189 @@ test("stale checkout claims recover while unsafe provider URLs fail closed", asy
   }, 1, async () => false));
   assert.equal(rejected.status, 502);
   assert.equal(unsafe.raw.exec("SELECT status FROM v2_payment_transactions")[0].values[0][0], "failed");
-  assert.deepEqual(unsafe.raw.exec("SELECT payment_id,handling_amount FROM v2_order WHERE id=9")[0].values[0], [null, 0]);
+  assert.deepEqual(unsafe.raw.exec("SELECT payment_id,handling_amount FROM v2_order WHERE id=9")[0].values[0], [1, 100]);
+});
+
+test("expired hosted sessions require a new order instead of reusing an idempotency key", async () => {
+  invalidateSettingsCache();
+  const { raw, d1 } = await paymentDatabase();
+  const env = { XBOARD_DB: d1, XBOARD_KV: emptyKv };
+  await env.XBOARD_DB.prepare(`CREATE TABLE IF NOT EXISTS v2_payment_transactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,order_id INTEGER NOT NULL,trade_no TEXT NOT NULL,payment_id INTEGER NOT NULL,
+    provider TEXT NOT NULL,provider_reference TEXT,expected_amount INTEGER NOT NULL,currency TEXT NOT NULL,
+    checkout_url TEXT,idempotency_key TEXT NOT NULL,event_id TEXT,status TEXT NOT NULL,expires_at INTEGER,
+    created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,
+    UNIQUE(order_id,payment_id),UNIQUE(provider,provider_reference),UNIQUE(provider,event_id),UNIQUE(idempotency_key)
+  )`).run();
+  raw.run(`INSERT INTO v2_payment_transactions(
+    order_id,trade_no,payment_id,provider,provider_reference,expected_amount,currency,checkout_url,idempotency_key,status,expires_at,created_at,updated_at
+  ) VALUES (9,?,1,'Stripe:1','cs_expired',1100,'CNY','https://checkout.stripe.com/c/pay/expired','expired-key','ready',1,1,1)`, [context.tradeNo]);
+  let providerCalls = 0;
+  const response = await withFetch(async () => {
+    providerCalls++;
+    throw new Error("expired checkout must not call the provider");
+  }, () => checkoutPayment(
+    new Request("https://panel.example.com/api/v1/user/order/checkout"), env,
+    { id: 9, trade_no: context.tradeNo, total_amount: 1000 },
+    { id: 7, email: "user@example.com" }, 1, async () => false
+  ));
+  assert.equal(response.status, 409);
+  assert.match((await response.json()).message, /取消当前订单后重新下单/);
+  assert.equal(providerCalls, 0);
+  assert.deepEqual(raw.exec("SELECT idempotency_key,status FROM v2_payment_transactions")[0].values[0], ["expired-key", "ready"]);
+});
+
+test("checkout binds the payment before an early provider callback can arrive", async () => {
+  invalidateSettingsCache();
+  const { raw, d1 } = await paymentDatabase();
+  const env = { XBOARD_DB: d1, XBOARD_KV: emptyKv };
+  let callbackResponse;
+  let settleCalls = 0;
+  const checkout = await withFetch(async (input, init = {}) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/v1/checkout/sessions" && init.method === "POST") {
+      assert.deepEqual(raw.exec("SELECT payment_id,handling_amount FROM v2_order WHERE id=9")[0].values[0], [1, 100]);
+      const eventRaw = JSON.stringify({
+        id: "evt_early",
+        type: "checkout.session.completed",
+        data: { object: { id: "cs_test_early" } }
+      });
+      const timestamp = Math.floor(Date.now() / 1000);
+      const signature = await hmacHex("SHA-256", "whsec_local", `${timestamp}.${eventRaw}`);
+      callbackResponse = await handlePaymentCallback(new Request(
+        "https://panel.example.com/api/v1/guest/payment/notify/Stripe/stripeuuid",
+        {
+          method: "POST",
+          headers: { "stripe-signature": `t=${timestamp},v1=${signature}` },
+          body: eventRaw
+        }
+      ), env, "Stripe", "stripeuuid", async () => {
+        settleCalls++;
+        return true;
+      });
+      return Response.json({
+        id: "cs_test_early",
+        url: "https://checkout.stripe.com/c/pay/early",
+        expires_at: Math.floor(Date.now() / 1000) + 3600
+      });
+    }
+    if (url.pathname === "/v1/checkout/sessions/cs_test_early") {
+      return Response.json({
+        id: "cs_test_early",
+        mode: "payment",
+        payment_status: "paid",
+        livemode: false,
+        client_reference_id: context.tradeNo,
+        metadata: { order_id: context.tradeNo },
+        amount_total: 1100,
+        currency: "cny",
+        payment_intent: "pi_early"
+      });
+    }
+    throw new Error(`Unexpected provider request: ${url}`);
+  }, () => checkoutPayment(
+    new Request("https://panel.example.com/api/v1/user/order/checkout"),
+    env,
+    { id: 9, trade_no: context.tradeNo, total_amount: 1000 },
+    { id: 7, email: "user@example.com" },
+    1,
+    async () => false
+  ));
+  assert.equal(callbackResponse?.status, 200);
+  assert.equal(checkout.status, 200);
+  assert.equal(settleCalls, 1);
+  assert.deepEqual(raw.exec("SELECT status,provider_reference,checkout_url FROM v2_payment_transactions")[0].values[0], [
+    "paid", "cs_test_early", "https://checkout.stripe.com/c/pay/early"
+  ]);
+});
+
+test("percentage and fixed payment fees are rounded once in integer cents", async () => {
+  invalidateSettingsCache();
+  const { raw, d1 } = await paymentDatabase();
+  raw.run("UPDATE v2_payment SET handling_fee_fixed=3,handling_fee_percent=2.5 WHERE id=1");
+  raw.run("UPDATE v2_order SET total_amount=1001 WHERE id=9");
+  const env = { XBOARD_DB: d1, XBOARD_KV: emptyKv };
+  const response = await withFetch(async (_input, init = {}) => {
+    const params = new URLSearchParams(String(init.body || ""));
+    assert.equal(params.get("line_items[0][price_data][unit_amount]"), "1029");
+    return Response.json({
+      id: "cs_fee_rounding",
+      url: "https://checkout.stripe.com/c/pay/fee-rounding",
+      expires_at: Math.floor(Date.now() / 1000) + 3600
+    });
+  }, () => checkoutPayment(
+    new Request("https://panel.example.com/api/v1/user/order/checkout"), env,
+    { id: 9, trade_no: context.tradeNo, total_amount: 1001 },
+    { id: 7, email: "user@example.com" }, 1, async () => false
+  ));
+  assert.equal(response.status, 200);
+  assert.deepEqual(raw.exec("SELECT expected_amount FROM v2_payment_transactions")[0].values[0], [1029]);
+  assert.deepEqual(raw.exec("SELECT handling_amount FROM v2_order WHERE id=9")[0].values[0], [28]);
+});
+
+test("separate merchant channels do not collide on provider references or event ids", async () => {
+  invalidateSettingsCache();
+  const { raw, d1 } = await paymentDatabase();
+  raw.run(`INSERT INTO v2_payment VALUES (2,'Stripe 2','Stripe',?,1,'stripeuuid2','S',100,0,NULL,2,0,0)`, [
+    JSON.stringify({ stripe_secret_key: "sk_test_other", stripe_webhook_secret: "whsec_other" })
+  ]);
+  raw.run("INSERT INTO v2_order VALUES (10,7,'ORDER-SECOND',0,1000,NULL,0,0)");
+  const env = { XBOARD_DB: d1, XBOARD_KV: emptyKv };
+  for (const [orderId, tradeNo, paymentId] of [[9, context.tradeNo, 1], [10, "ORDER-SECOND", 2]]) {
+    const response = await withFetch(async () => Response.json({
+      id: "cs_shared_reference",
+      url: `https://checkout.stripe.com/c/pay/channel-${paymentId}`,
+      expires_at: Math.floor(Date.now() / 1000) + 3600
+    }), () => checkoutPayment(
+      new Request("https://panel.example.com/api/v1/user/order/checkout"), env,
+      { id: orderId, trade_no: tradeNo, total_amount: 1000 },
+      { id: 7, email: "user@example.com" }, paymentId, async () => false
+    ));
+    assert.equal(response.status, 200);
+  }
+  assert.deepEqual(raw.exec("SELECT provider FROM v2_payment_transactions ORDER BY payment_id")[0].values, [
+    ["Stripe:1"], ["Stripe:2"]
+  ]);
+
+  let settles = 0;
+  for (const [uuid, webhookSecret, tradeNo] of [
+    ["stripeuuid", "whsec_local", context.tradeNo],
+    ["stripeuuid2", "whsec_other", "ORDER-SECOND"]
+  ]) {
+    const eventRaw = JSON.stringify({
+      id: "evt_shared_event",
+      type: "checkout.session.completed",
+      data: { object: { id: "cs_shared_reference" } }
+    });
+    const timestamp = Math.floor(Date.now() / 1000);
+    const signature = await hmacHex("SHA-256", webhookSecret, `${timestamp}.${eventRaw}`);
+    const response = await withFetch(async () => Response.json({
+      id: "cs_shared_reference",
+      mode: "payment",
+      payment_status: "paid",
+      livemode: false,
+      client_reference_id: tradeNo,
+      metadata: { order_id: tradeNo },
+      amount_total: 1100,
+      currency: "cny",
+      payment_intent: `pi_${tradeNo}`
+    }), () => handlePaymentCallback(new Request(
+      `https://panel.example.com/api/v1/guest/payment/notify/Stripe/${uuid}`,
+      {
+        method: "POST",
+        headers: { "stripe-signature": `t=${timestamp},v1=${signature}` },
+        body: eventRaw
+      }
+    ), env, "Stripe", uuid, async () => {
+      settles++;
+      return true;
+    }));
+    assert.equal(response.status, 200);
+  }
+  assert.equal(settles, 2);
+  assert.deepEqual(raw.exec("SELECT status,event_id FROM v2_payment_transactions ORDER BY payment_id")[0].values, [
+    ["paid", "evt_shared_event"], ["paid", "evt_shared_event"]
+  ]);
 });
 
 test("a verified late payment after cancellation is recorded without opening service", async () => {
@@ -891,6 +1132,7 @@ test("a verified late payment after cancellation is recorded without opening ser
   let settleCalls = 0;
   const response = await withFetch(async () => Response.json({
     id: "cs_test_canceled",
+    mode: "payment",
     payment_status: "paid",
     livemode: false,
     client_reference_id: context.tradeNo,
@@ -926,6 +1168,22 @@ test("settlement is atomic, idempotent, and leaves no processing status", async 
   assert.equal(raw.exec("SELECT COUNT(*) FROM v2_traffic_reset_logs")[0].values[0][0], 1);
   assert.deepEqual(bumps, ["user_version:7"]);
   assert.equal(await settleOrder(env, order, "duplicate", settlementDeps(bumps)), true);
+  assert.equal(raw.exec("SELECT COUNT(*) FROM v2_traffic_reset_logs")[0].values[0][0], 1);
+  assert.deepEqual(bumps, ["user_version:7"]);
+});
+
+test("concurrent settlement attempts apply business side effects only once", async () => {
+  invalidateSettingsCache();
+  const { raw, d1 } = await settlementDatabase();
+  const bumps = [];
+  const env = { XBOARD_DB: d1, XBOARD_KV: emptyKv };
+  const results = await Promise.all([
+    settleOrder(env, { id: 9 }, "callback-a", settlementDeps(bumps)),
+    settleOrder(env, { id: 9 }, "callback-b", settlementDeps(bumps))
+  ]);
+  assert.deepEqual(results, [true, true]);
+  assert.equal(raw.exec("SELECT status FROM v2_order WHERE id=9")[0].values[0][0], 3);
+  assert.equal(raw.exec("SELECT reset_count FROM v2_user WHERE id=7")[0].values[0][0], 1);
   assert.equal(raw.exec("SELECT COUNT(*) FROM v2_traffic_reset_logs")[0].values[0][0], 1);
   assert.deepEqual(bumps, ["user_version:7"]);
 });

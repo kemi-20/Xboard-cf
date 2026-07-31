@@ -1,8 +1,8 @@
 # XBoard CF
 
-XBoard CF 是基于 Cloudflare Workers、D1、KV、Queues、Durable Objects 和 Static Assets 重写的 XBoard。项目保留官方后台 WebUI、用户 API、订阅接口、节点协议、礼品卡、订单分配、邮件和 Telegram 等非支付功能，不需要部署 Laravel、PHP、MySQL 或 Redis。
+XBoard CF 是基于 Cloudflare Workers、D1、KV、Queues、Durable Objects 和 Static Assets 重写的 XBoard。项目保留官方后台 WebUI、用户 API、订阅接口、节点协议、支付、礼品卡、订单分配、邮件和 Telegram 等功能，不需要部署 Laravel、PHP、MySQL 或 Redis。
 
-> 当前仅暂缓需要真实收款、支付回调或资金提现的功能。余额、套餐、流量、邮件和其他非支付业务均使用真实数据处理。
+> 固定的 Cloudflare-native 支付 Provider、支付回调和订单结算已经实现；需要真实出金的佣金提现仍暂缓。余额、套餐、流量、邮件及其他业务均使用真实数据处理。
 
 ## 主要功能
 
@@ -267,6 +267,8 @@ Stripe
 
 所有回调都必须通过签名、订单号、唯一渠道 UUID、支付会话、金额、币种和成功状态校验。合法回调还会向 Provider 二次查询最终状态（适用的渠道），随后通过同一个 D1 原子结算服务开通套餐。重复、并发或重放回调不会重复开通；迁移数据中若缺少渠道 UUID 或出现重复 UUID，相关渠道会保留但停用，回调也会拒绝猜测其中任意一个。D1 批次失败不会留下 `status=1` 的半完成订单。内部 `v2_payment_transactions` 只保存必要的幂等元数据，不保存完整 webhook 正文。
 
+仍有效的托管支付会话会在重复点击结账时复用。Provider 明确给出到期时间后，过期会话不会使用同一幂等键盲目重建；用户需要取消当前待支付订单并重新下单，以生成新的订单号和支付会话，避免重复扣款或反复跳回失效页面。
+
 支付配置保存在 `v2_payment.config`，管理员读取配置和 SQLite 完整导出均会包含私钥、API Key 与 Webhook Secret。管理员审计日志会递归脱敏这些字段，但导出的数据库不会脱敏，必须作为敏感凭据安全保管。渠道一旦被订单或支付事务引用，其 Provider、密钥与 Webhook 配置将被冻结；需要轮换凭据时应停用旧渠道并新建渠道，使已创建支付会话的旧回调仍可安全验签。自定义网关和通知域名只接受公开 HTTPS 地址；Provider 请求有超时、响应大小和返回结构限制。
 
 Stripe 应在 Dashboard 为当前支付渠道的通知 URL 创建 webhook endpoint，并订阅：
@@ -419,13 +421,12 @@ Cloudflare 内部可以使用 D1、KV、Queues 和 Durable Objects 替代 Larave
 
 以下功能暂不进行真实业务处理：
 
-- 在线支付和支付回调
 - 需要真实出金的佣金提现
 - 任意第三方 PHP 支付插件（固定原生 Provider 除外）
 
 Cloudflare Workers 无法在运行时解压并执行 Laravel Blade 主题或任意 PHP 插件。主题配置和插件管理目前在菜单与全局搜索中隐藏；上传 PHP/Blade ZIP 包不会被执行。支付不执行 PHP 插件，而是由 Edge 内置的固定 Provider Registry 提供；Telegram 机器人同样是内置功能，不需要安装插件。
 
-支付相关表和兼容接口仍然保留，用于避免后台页面崩溃。
+固定支付 Provider 使用真实的创建支付、回调验签、Provider 二次核验和 D1 原子结算；内部交易表仅保存幂等所需元数据。任意 PHP 支付插件不会被加载或执行。
 
 ## 上游项目与许可
 

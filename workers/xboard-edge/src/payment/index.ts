@@ -6,7 +6,7 @@ import type { PaymentConfig, PaymentEnv, PaymentRow } from "./types.ts";
 type SettleOrder = (order: Record<string, any>, callbackNo: string) => Promise<boolean>;
 const MAX_CALLBACK_BODY_BYTES = 512 * 1024;
 const PAYMENT_CREATE_STALE_SECONDS = 120;
-const paymentSchemaPromises = new WeakMap<object, Promise<void>>();
+let paymentSchemaPromise: Promise<void> | null = null;
 
 function parseConfig(value: unknown): PaymentConfig {
   if (value && typeof value === "object" && !Array.isArray(value)) return value as PaymentConfig;
@@ -24,7 +24,7 @@ function numberOrNull(value: unknown) {
   return Number.isFinite(number) ? number : null;
 }
 
-function safeHttpsOrigin(value: string) {
+export function safeHttpsOrigin(value: string) {
   const url = new URL(value);
   if (url.protocol !== "https:" || url.username || url.password || isPrivateNetworkHost(url.hostname)) {
     throw new PaymentError("通知域名必须是公开可访问的 HTTPS 地址", 422);
@@ -37,13 +37,23 @@ function isLoopbackHost(hostname: string) {
   return host === "localhost" || host === "::1" || host.endsWith(".localhost") || /^127\./.test(host);
 }
 
-function safeAppOrigin(value: string) {
+export function safeAppOrigin(value: string) {
   const url = new URL(value);
   const localHttp = url.protocol === "http:" && isLoopbackHost(url.hostname);
   if ((!localHttp && url.protocol !== "https:") || url.username || url.password) {
     throw new PaymentError("站点地址必须是 HTTPS 地址", 422);
   }
   return url.origin;
+}
+
+export function safeNotificationOrigin(value: string) {
+  const origin = safeAppOrigin(value);
+  const url = new URL(origin);
+  const localTestOrigin = url.protocol === "http:" && isLoopbackHost(url.hostname);
+  if (!localTestOrigin && isPrivateNetworkHost(url.hostname)) {
+    throw new PaymentError("支付通知地址必须是公开可访问的 HTTPS 地址", 422);
+  }
+  return origin;
 }
 
 function safeCheckoutUrl(value: unknown) {
@@ -58,7 +68,7 @@ function paymentNotifyUrl(request: Request, payment: PaymentRow, appUrl: string)
   const path = `/api/v1/guest/payment/notify/${encodeURIComponent(payment.payment)}/${encodeURIComponent(payment.uuid)}`;
   let base = new URL(request.url).origin;
   try {
-    base = payment.notify_domain ? safeHttpsOrigin(String(payment.notify_domain)) : safeAppOrigin(appUrl);
+    base = payment.notify_domain ? safeHttpsOrigin(String(payment.notify_domain)) : safeNotificationOrigin(appUrl);
   } catch {
     // A migrated invalid URL must not break the entire payment settings page.
   }
@@ -66,9 +76,7 @@ function paymentNotifyUrl(request: Request, payment: PaymentRow, appUrl: string)
 }
 
 async function ensurePaymentSchema(env: PaymentEnv) {
-  const key = env.XBOARD_DB as unknown as object;
-  const existing = paymentSchemaPromises.get(key);
-  if (existing) return existing;
+  if (paymentSchemaPromise) return paymentSchemaPromise;
   const pending = (async () => {
     await env.XBOARD_DB.prepare(`CREATE TABLE IF NOT EXISTS v2_payment_transactions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -93,14 +101,33 @@ async function ensurePaymentSchema(env: PaymentEnv) {
     )`).run();
     await env.XBOARD_DB.prepare("CREATE INDEX IF NOT EXISTS idx_payment_transactions_trade ON v2_payment_transactions(trade_no, payment_id)").run();
     await env.XBOARD_DB.prepare("CREATE INDEX IF NOT EXISTS idx_payment_transactions_status ON v2_payment_transactions(status, updated_at)").run();
+    await env.XBOARD_DB.prepare(`UPDATE v2_payment_transactions
+      SET provider=provider || ':' || payment_id
+      WHERE provider IN (${paymentMethodNames.map(() => "?").join(",")})`)
+      .bind(...paymentMethodNames).run();
   })();
-  paymentSchemaPromises.set(key, pending);
+  paymentSchemaPromise = pending;
   try {
     await pending;
   } catch (error) {
-    paymentSchemaPromises.delete(key);
+    paymentSchemaPromise = null;
     throw error;
   }
+}
+
+async function validatePaymentActivation(env: PaymentEnv, payment: PaymentRow, appUrl: string) {
+  const provider = paymentProviders.get(String(payment.payment || ""));
+  if (!provider) throw new PaymentError("支付方式不存在或未启用", 422);
+  if (!String(payment.uuid || "").trim()) throw new PaymentError("支付渠道缺少回调 UUID，请停用后新建渠道", 422);
+  if (!appUrl) throw new PaymentError("请在站点配置中配置站点地址", 422);
+  try { safeNotificationOrigin(appUrl); } catch (error) {
+    throw error instanceof PaymentError ? error : new PaymentError("站点地址必须是 HTTPS 地址", 422);
+  }
+  if (payment.notify_domain) safeHttpsOrigin(String(payment.notify_domain));
+  provider.validateConfig(parseConfig(payment.config));
+  const duplicate = await env.XBOARD_DB.prepare("SELECT COUNT(*) AS count FROM v2_payment WHERE payment=? AND uuid=?")
+    .bind(payment.payment, payment.uuid).first<{ count: number }>();
+  if (Number(duplicate?.count || 0) !== 1) throw new PaymentError("支付渠道回调 UUID 重复，请停用后新建渠道", 409);
 }
 
 async function hasPaymentTransactions(env: PaymentEnv, paymentId: number) {
@@ -129,6 +156,15 @@ async function uniquePaymentUuid(env: PaymentEnv, method: string) {
 
 function stableConfig(config: PaymentConfig) {
   return JSON.stringify(Object.fromEntries(Object.entries(config).sort(([left], [right]) => left.localeCompare(right))));
+}
+
+function transactionProvider(method: string, paymentId: number) {
+  return `${method}:${paymentId}`;
+}
+
+function transactionProviderMatches(value: unknown, method: string, paymentId: number) {
+  const provider = String(value || "");
+  return provider === method || provider === transactionProvider(method, paymentId);
 }
 
 async function boundedCallbackRequest(request: Request) {
@@ -252,7 +288,16 @@ export async function handleAdminPayment(request: Request, env: PaymentEnv, rout
   const id = Number(input.id || 0);
   if (!Number.isInteger(id) || id < 1) return fail("参数有误", 422, 422);
   if (request.method === "POST" && route === "/payment/show") {
-    const result = await env.XBOARD_DB.prepare("UPDATE v2_payment SET enable=CASE WHEN enable=1 THEN 0 ELSE 1 END,updated_at=? WHERE id=?").bind(now(), id).run();
+    const payment = await env.XBOARD_DB.prepare("SELECT * FROM v2_payment WHERE id=?").bind(id).first<PaymentRow>();
+    if (!payment) return fail("支付方式不存在", 400, 400202);
+    if (!Number(payment.enable)) {
+      try { await validatePaymentActivation(env, payment, appUrl); } catch (error) {
+        const status = error instanceof PaymentError ? error.status : 422;
+        return fail(error instanceof PaymentError ? error.message : "支付配置无效", status, status);
+      }
+    }
+    const result = await env.XBOARD_DB.prepare("UPDATE v2_payment SET enable=?,updated_at=? WHERE id=? AND enable=?")
+      .bind(Number(payment.enable) ? 0 : 1, now(), id, Number(payment.enable) ? 1 : 0).run();
     return Number((result.meta as any)?.changes || 0) === 1 ? ok(true) : fail("支付方式不存在", 400, 400202);
   }
   if (request.method === "POST" && route === "/payment/drop") {
@@ -318,7 +363,7 @@ export async function checkoutPayment(
   let notifyBase: string;
   try {
     appOrigin = safeAppOrigin(appUrl);
-    notifyBase = payment.notify_domain ? safeHttpsOrigin(String(payment.notify_domain)) : appOrigin;
+    notifyBase = payment.notify_domain ? safeHttpsOrigin(String(payment.notify_domain)) : safeNotificationOrigin(appUrl);
   } catch (error) {
     return fail(error instanceof Error ? error.message : "站点或通知地址无效", 422, 422);
   }
@@ -330,14 +375,16 @@ export async function checkoutPayment(
   await ensurePaymentSchema(env);
   const timestamp = now();
   const insertKey = crypto.randomUUID();
+  const providerScope = transactionProvider(provider.method, Number(payment.id));
   await env.XBOARD_DB.prepare(`INSERT OR IGNORE INTO v2_payment_transactions
     (order_id,trade_no,payment_id,provider,expected_amount,currency,idempotency_key,status,created_at,updated_at)
     VALUES (?,?,?,?,?,?,?,'pending',?,?)`)
-    .bind(order.id, order.trade_no, payment.id, provider.method, initialExpectedAmount, initialCurrency, insertKey, timestamp, timestamp).run();
+    .bind(order.id, order.trade_no, payment.id, providerScope, initialExpectedAmount, initialCurrency, insertKey, timestamp, timestamp).run();
   let transaction = await env.XBOARD_DB.prepare("SELECT * FROM v2_payment_transactions WHERE order_id=? AND payment_id=?")
     .bind(order.id, payment.id).first<Record<string, any>>();
   if (!transaction) return fail("创建支付会话失败", 500, 500);
-  if (String(transaction.provider) !== provider.method || String(transaction.trade_no) !== String(order.trade_no)) {
+  if (!transactionProviderMatches(transaction.provider, provider.method, Number(payment.id))
+    || String(transaction.trade_no) !== String(order.trade_no)) {
     return fail("支付交易与订单不匹配", 409, 409);
   }
   const expectedAmount = Number(transaction.expected_amount);
@@ -355,7 +402,10 @@ export async function checkoutPayment(
     return fail("MGate 源货币必须与站点货币一致", 400, 400);
   }
   if (String(transaction.status) === "paid") return fail("支付已确认，订单正在开通", 409, 409);
-  if (transaction.checkout_url && (!transaction.expires_at || Number(transaction.expires_at) > timestamp + 30)) {
+  if (transaction.checkout_url && transaction.expires_at && Number(transaction.expires_at) <= timestamp + 30) {
+    return fail("支付会话已过期，请取消当前订单后重新下单", 409, 409);
+  }
+  if (transaction.checkout_url) {
     let checkoutUrl: string;
     try {
       checkoutUrl = safeCheckoutUrl(transaction.checkout_url);
@@ -371,13 +421,26 @@ export async function checkoutPayment(
       return json({ type: provider.method === "AlipayF2F" ? 0 : 1, data: checkoutUrl });
     }
   }
-  const claim = await env.XBOARD_DB.prepare(`UPDATE v2_payment_transactions SET status='creating',updated_at=?
-    WHERE id=? AND (
-      status IN ('pending','failed')
-      OR (status='creating' AND updated_at<?)
-      OR (status='ready' AND expires_at IS NOT NULL AND expires_at<=?)
-    )`).bind(timestamp, transaction.id, timestamp - PAYMENT_CREATE_STALE_SECONDS, timestamp + 30).run();
-  if (Number((claim.meta as any)?.changes || 0) !== 1) return fail("支付会话正在创建，请稍后重试", 409, 409);
+  const claimResults = await env.XBOARD_DB.batch([
+    env.XBOARD_DB.prepare(`UPDATE v2_payment_transactions SET status='creating',updated_at=?
+      WHERE id=? AND (
+        status IN ('pending','failed')
+        OR (status='creating' AND updated_at<?)
+        OR (status='ready' AND checkout_url IS NULL)
+      )`).bind(timestamp, transaction.id, timestamp - PAYMENT_CREATE_STALE_SECONDS),
+    env.XBOARD_DB.prepare(`UPDATE v2_order SET payment_id=?,handling_amount=?,updated_at=?
+      WHERE id=? AND status=0
+        AND EXISTS (SELECT 1 FROM v2_payment_transactions WHERE id=? AND status='creating')`)
+      .bind(payment.id, handlingAmount, timestamp, order.id, transaction.id)
+  ]);
+  const claimed = Number((claimResults[0]?.meta as any)?.changes || 0) === 1;
+  const orderBound = Number((claimResults[1]?.meta as any)?.changes || 0) === 1;
+  if (!claimed) return fail("支付会话正在创建，请稍后重试", 409, 409);
+  if (!orderBound) {
+    await env.XBOARD_DB.prepare("UPDATE v2_payment_transactions SET status='canceled',updated_at=? WHERE id=? AND status='creating'")
+      .bind(now(), transaction.id).run();
+    return fail("订单状态已变化", 400, 400);
+  }
   const callbackPath = `/api/v1/guest/payment/notify/${encodeURIComponent(provider.method)}/${encodeURIComponent(callbackUuid)}`;
   const returnUrl = `${appOrigin}/#/order/${encodeURIComponent(String(order.trade_no))}`;
   try {
@@ -394,14 +457,16 @@ export async function checkoutPayment(
       idempotencyKey: String(transaction.idempotency_key)
     });
     const checkoutUrl = safeCheckoutUrl(result.data);
-    const results = await env.XBOARD_DB.batch([
-      env.XBOARD_DB.prepare(`UPDATE v2_payment_transactions SET provider_reference=?,checkout_url=?,status='ready',expires_at=?,updated_at=?
-        WHERE id=? AND status='creating' AND EXISTS (SELECT 1 FROM v2_order WHERE id=? AND status=0)`)
-        .bind(result.providerReference || null, checkoutUrl, result.expiresAt || null, now(), transaction.id, order.id),
-      env.XBOARD_DB.prepare("UPDATE v2_order SET payment_id=?,handling_amount=?,updated_at=? WHERE id=? AND status=0")
-        .bind(payment.id, handlingAmount, now(), order.id)
-    ]);
-    if (Number((results[0]?.meta as any)?.changes || 0) !== 1 || Number((results[1]?.meta as any)?.changes || 0) !== 1) {
+    const stored = await env.XBOARD_DB.prepare(`UPDATE v2_payment_transactions SET
+      provider_reference=COALESCE(provider_reference,?),checkout_url=?,
+      status=CASE WHEN status='creating' THEN 'ready' ELSE status END,
+      expires_at=?,updated_at=?
+      WHERE id=? AND status IN ('creating','verified','paid')
+        AND (provider_reference IS NULL OR provider_reference=?)
+        AND EXISTS (SELECT 1 FROM v2_order WHERE id=? AND payment_id=? AND status IN (0,1,3))`)
+      .bind(result.providerReference || null, checkoutUrl, result.expiresAt || null, now(), transaction.id,
+        result.providerReference || null, order.id, payment.id).run();
+    if (Number((stored.meta as any)?.changes || 0) !== 1) {
       await env.XBOARD_DB.prepare("UPDATE v2_payment_transactions SET status='canceled',updated_at=? WHERE id=? AND status='creating'")
         .bind(now(), transaction.id).run();
       return fail("订单状态已变化", 400, 400);
@@ -438,6 +503,7 @@ export async function handlePaymentCallback(
     });
   }
   const payment = paymentRows.results![0];
+  const providerScope = transactionProvider(method, Number(payment.id));
   const config = parseConfig(payment.config);
   try {
     const callback = await provider.verifyCallback(await boundedCallbackRequest(request), config);
@@ -449,16 +515,17 @@ export async function handlePaymentCallback(
     const timestamp = now();
     const existing = await env.XBOARD_DB.prepare("SELECT * FROM v2_payment_transactions WHERE order_id=? AND payment_id=?")
       .bind(order.id, payment.id).first<Record<string, any>>();
-    if (existing && (String(existing.provider) !== method || String(existing.trade_no) !== String(order.trade_no))) {
+    if (existing && (!transactionProviderMatches(existing.provider, method, Number(payment.id))
+      || String(existing.trade_no) !== String(order.trade_no))) {
       throw new PaymentError("支付交易与订单不匹配", 400);
     }
     if (existing?.provider_reference && String(existing.provider_reference) !== callback.providerReference) {
       throw new PaymentError("支付会话标识不匹配", 400);
     }
     const conflicting = await env.XBOARD_DB.prepare(`SELECT order_id,payment_id FROM v2_payment_transactions
-      WHERE provider=? AND (provider_reference=? OR event_id=?)
+      WHERE provider IN (?,?) AND (provider_reference=? OR event_id=?)
         AND NOT (order_id=? AND payment_id=?)
-      LIMIT 1`).bind(method, callback.providerReference, callback.callbackNo, order.id, payment.id)
+      LIMIT 1`).bind(providerScope, method, callback.providerReference, callback.callbackNo, order.id, payment.id)
       .first<{ order_id: number; payment_id: number }>();
     if (conflicting) throw new PaymentError("支付回调已绑定到其他订单", 409);
     const expectedAmount = existing
@@ -473,7 +540,7 @@ export async function handlePaymentCallback(
       await env.XBOARD_DB.prepare(`INSERT INTO v2_payment_transactions
         (order_id,trade_no,payment_id,provider,provider_reference,expected_amount,currency,idempotency_key,event_id,status,created_at,updated_at)
         VALUES (?,?,?,?,?,?,?,?,?,'verified',?,?)`)
-        .bind(order.id, order.trade_no, payment.id, method, callback.providerReference, expectedAmount, expectedCurrency, crypto.randomUUID(), callback.callbackNo, timestamp, timestamp).run();
+        .bind(order.id, order.trade_no, payment.id, providerScope, callback.providerReference, expectedAmount, expectedCurrency, crypto.randomUUID(), callback.callbackNo, timestamp, timestamp).run();
     } else {
       await env.XBOARD_DB.prepare(`UPDATE v2_payment_transactions
         SET provider_reference=COALESCE(provider_reference,?),event_id=COALESCE(event_id,?),status='verified',updated_at=?
@@ -508,7 +575,12 @@ export const __test = {
   paymentNotifyUrl,
   safeHttpsOrigin,
   safeAppOrigin,
+  safeNotificationOrigin,
   safeCheckoutUrl,
   boundedCallbackRequest,
-  uniquePaymentUuid
+  uniquePaymentUuid,
+  validatePaymentActivation,
+  transactionProvider,
+  transactionProviderMatches,
+  resetPaymentSchema() { paymentSchemaPromise = null; }
 };
