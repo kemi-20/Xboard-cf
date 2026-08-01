@@ -528,16 +528,20 @@ const coinbaseBusiness: PaymentProvider = {
     if (checkout.mode && ![expectedMode, text(config, "coinbase_business_environment")].includes(String(checkout.mode))) {
       throw new PaymentError("Coinbase Business 环境不匹配", 400);
     }
-    const hasFiatAmount = checkout.fiatAmount !== null && checkout.fiatAmount !== undefined;
-    const hasFiatCurrency = checkout.fiatCurrency !== null && checkout.fiatCurrency !== undefined;
+    // The documented response uses top-level fiat fields. Accept a nested
+    // settlement compatibility shape as well so existing integrations survive.
+    const fiatAmount = checkout.settlement?.fiatAmount ?? checkout.fiatAmount;
+    const fiatCurrency = checkout.settlement?.fiatCurrency ?? checkout.fiatCurrency;
+    const hasFiatAmount = fiatAmount !== null && fiatAmount !== undefined;
+    const hasFiatCurrency = fiatCurrency !== null && fiatCurrency !== undefined;
     if (hasFiatAmount !== hasFiatCurrency) throw new PaymentError("Coinbase Business 法币金额字段不完整", 400);
     return {
       state: "paid",
       tradeNo: String(checkout.metadata?.orderId || event.metadata?.orderId || ""),
       callbackNo: reference,
       providerReference: reference,
-      amount: cents(hasFiatAmount ? checkout.fiatAmount : checkout.amount),
-      currency: String(hasFiatCurrency ? checkout.fiatCurrency : checkout.currency || "").toUpperCase(),
+      amount: cents(hasFiatAmount ? fiatAmount : checkout.amount),
+      currency: String(hasFiatCurrency ? fiatCurrency : checkout.currency || "").toUpperCase(),
       responseText: "OK"
     };
   }

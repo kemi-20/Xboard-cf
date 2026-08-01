@@ -256,19 +256,32 @@ export async function handleAdminPayment(request: Request, env: PaymentEnv, rout
     const timestamp = now();
     if (input.id) {
       const paymentId = Number(input.id);
-      const existing = await env.XBOARD_DB.prepare("SELECT payment,config,notify_domain FROM v2_payment WHERE id=?")
-        .bind(paymentId).first<{ payment: string; config: string; notify_domain: string | null }>();
+      const existing = await env.XBOARD_DB.prepare("SELECT payment,config,notify_domain,enable FROM v2_payment WHERE id=?")
+        .bind(paymentId).first<{ payment: string; config: string; notify_domain: string | null; enable: number }>();
       if (!existing) return fail("支付方式不存在", 400, 400202);
       if (existing.payment !== method) return fail("已有支付渠道不能更换 Provider，请新建渠道", 409, 409);
       const changesCredentials = stableConfig(parseConfig(existing.config)) !== stableConfig(config);
-      if (changesCredentials && await hasPaymentReferences(env, paymentId)) {
-        return fail("该渠道已有支付记录，网关密钥不可修改；请停用后新建渠道", 409, 409);
+      const changesNotifyDomain = String(existing.notify_domain || "") !== String(notifyDomain || "");
+      const changesTransport = changesCredentials || changesNotifyDomain;
+      if (changesTransport && Number(existing.enable)) {
+        return fail("请先停用支付渠道再修改网关密钥或通知域名", 409, 409);
+      }
+      if (changesTransport && await hasPaymentReferences(env, paymentId)) {
+        return fail("该渠道已有支付记录，网关密钥和通知域名不可修改；请新建渠道", 409, 409);
       }
       const result = await env.XBOARD_DB.prepare(`UPDATE v2_payment
         SET name=?,payment=?,config=?,icon=?,handling_fee_fixed=?,handling_fee_percent=?,notify_domain=?,updated_at=?
-        WHERE id=?`)
-        .bind(name, method, JSON.stringify(config), String(input.icon || provider.icon), fixed, percent, notifyDomain, timestamp, paymentId).run();
-      if (Number((result.meta as any)?.changes || 0) !== 1) return fail("支付方式不存在", 400, 400202);
+        WHERE id=?
+          AND (?=0 OR (enable=0
+            AND NOT EXISTS (SELECT 1 FROM v2_payment_transactions WHERE payment_id=v2_payment.id)
+            AND NOT EXISTS (SELECT 1 FROM v2_order WHERE payment_id=v2_payment.id)))`)
+        .bind(name, method, JSON.stringify(config), String(input.icon || provider.icon), fixed, percent, notifyDomain,
+          timestamp, paymentId, changesTransport ? 1 : 0).run();
+      if (Number((result.meta as any)?.changes || 0) !== 1) {
+        return changesTransport
+          ? fail("支付渠道状态或交易记录已变化，请刷新后重试", 409, 409)
+          : fail("支付方式不存在", 400, 400202);
+      }
     } else {
       const uuid = await uniquePaymentUuid(env, method);
       await env.XBOARD_DB.prepare(`INSERT INTO v2_payment
@@ -374,14 +387,27 @@ export async function checkoutPayment(
   }
   await ensurePaymentSchema(env);
   const timestamp = now();
-  const insertKey = crypto.randomUUID();
   const providerScope = transactionProvider(provider.method, Number(payment.id));
-  await env.XBOARD_DB.prepare(`INSERT OR IGNORE INTO v2_payment_transactions
-    (order_id,trade_no,payment_id,provider,expected_amount,currency,idempotency_key,status,created_at,updated_at)
-    VALUES (?,?,?,?,?,?,?,'pending',?,?)`)
-    .bind(order.id, order.trade_no, payment.id, providerScope, initialExpectedAmount, initialCurrency, insertKey, timestamp, timestamp).run();
   let transaction = await env.XBOARD_DB.prepare("SELECT * FROM v2_payment_transactions WHERE order_id=? AND payment_id=?")
     .bind(order.id, payment.id).first<Record<string, any>>();
+  if (!transaction) {
+    if (provider.method === "AlipayF2F" && initialCurrency !== "CNY") return fail("支付宝当面付仅支持 CNY 订单", 400, 400);
+    if (provider.method === "EPay" && initialCurrency !== "CNY") return fail("易支付仅支持 CNY 订单", 400, 400);
+    if (provider.method === "CoinPayments" && String(config.coinpayments_currency || "").toUpperCase() !== initialCurrency) {
+      return fail("CoinPayments 货币必须与站点货币一致", 400, 400);
+    }
+    if (provider.method === "MGate" && config.mgate_source_currency
+      && String(config.mgate_source_currency).toUpperCase() !== initialCurrency) {
+      return fail("MGate 源货币必须与站点货币一致", 400, 400);
+    }
+    const insertKey = crypto.randomUUID();
+    await env.XBOARD_DB.prepare(`INSERT OR IGNORE INTO v2_payment_transactions
+      (order_id,trade_no,payment_id,provider,expected_amount,currency,idempotency_key,status,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,'pending',?,?)`)
+      .bind(order.id, order.trade_no, payment.id, providerScope, initialExpectedAmount, initialCurrency, insertKey, timestamp, timestamp).run();
+    transaction = await env.XBOARD_DB.prepare("SELECT * FROM v2_payment_transactions WHERE order_id=? AND payment_id=?")
+      .bind(order.id, payment.id).first<Record<string, any>>();
+  }
   if (!transaction) return fail("创建支付会话失败", 500, 500);
   if (!transactionProviderMatches(transaction.provider, provider.method, Number(payment.id))
     || String(transaction.trade_no) !== String(order.trade_no)) {
@@ -416,8 +442,9 @@ export async function checkoutPayment(
       checkoutUrl = "";
     }
     if (checkoutUrl) {
-    await env.XBOARD_DB.prepare("UPDATE v2_order SET payment_id=?,handling_amount=?,updated_at=? WHERE id=? AND status=0")
+      const rebound = await env.XBOARD_DB.prepare("UPDATE v2_order SET payment_id=?,handling_amount=?,updated_at=? WHERE id=? AND status=0")
         .bind(payment.id, handlingAmount, timestamp, order.id).run();
+      if (Number((rebound.meta as any)?.changes || 0) !== 1) return fail("订单状态已变化", 400, 400);
       return json({ type: provider.method === "AlipayF2F" ? 0 : 1, data: checkoutUrl });
     }
   }
@@ -440,6 +467,20 @@ export async function checkoutPayment(
     await env.XBOARD_DB.prepare("UPDATE v2_payment_transactions SET status='canceled',updated_at=? WHERE id=? AND status='creating'")
       .bind(now(), transaction.id).run();
     return fail("订单状态已变化", 400, 400);
+  }
+  const lockedPayment = await env.XBOARD_DB.prepare("SELECT enable,config,notify_domain,updated_at FROM v2_payment WHERE id=?")
+    .bind(payment.id).first<{ enable: number; config: string; notify_domain: string | null; updated_at: number }>();
+  const paymentChanged = !lockedPayment || !Number(lockedPayment.enable)
+    || Number(lockedPayment.updated_at || 0) !== Number(payment.updated_at || 0)
+    || stableConfig(parseConfig(lockedPayment.config)) !== stableConfig(config)
+    || String(lockedPayment.notify_domain || "") !== String(payment.notify_domain || "");
+  if (paymentChanged) {
+    await env.XBOARD_DB.batch([
+      env.XBOARD_DB.prepare("DELETE FROM v2_payment_transactions WHERE id=? AND status='creating'").bind(transaction.id),
+      env.XBOARD_DB.prepare(`UPDATE v2_order SET payment_id=NULL,handling_amount=0,updated_at=?
+        WHERE id=? AND status=0 AND payment_id=?`).bind(now(), order.id, payment.id)
+    ]);
+    return fail("支付渠道配置已变化，请重新选择支付方式", 409, 409);
   }
   const callbackPath = `/api/v1/guest/payment/notify/${encodeURIComponent(provider.method)}/${encodeURIComponent(callbackUuid)}`;
   const returnUrl = `${appOrigin}/#/order/${encodeURIComponent(String(order.trade_no))}`;

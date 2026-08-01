@@ -266,7 +266,7 @@ test("Coinbase Business uses a signed JWT, sandbox path, Hook0, and a verified c
     }
     return Response.json({
       id: checkoutId, status: "COMPLETED", amount: "123.45", currency: "USDC",
-      fiatAmount: "123.45", fiatCurrency: "CNY",
+      settlement: { fiatAmount: "123.45", fiatCurrency: "CNY" },
       metadata: { orderId: context.tradeNo }
     });
   }, async () => {
@@ -292,6 +292,47 @@ test("Coinbase Business uses a signed JWT, sandbox path, Hook0, and a verified c
   assert.equal(result.verified.providerReference, checkoutId);
   assert.equal(result.verified.tradeNo, context.tradeNo);
   assert.equal(result.verified.amount, 12345);
+  assert.equal(result.verified.currency, "CNY");
+});
+
+test("Coinbase Business accepts the documented top-level fiat amount pair", async () => {
+  const keys = generateKeyPairSync("ec", {
+    namedCurve: "prime256v1",
+    privateKeyEncoding: { type: "sec1", format: "pem" },
+    publicKeyEncoding: { type: "spki", format: "pem" }
+  });
+  const provider = paymentProviders.get("CoinbaseBusiness");
+  const checkoutId = "68f7a946db0529ea9b6d3a12";
+  const config = {
+    coinbase_business_key_name: `organizations/test/apiKeys/${crypto.randomUUID()}`,
+    coinbase_business_private_key: keys.privateKey,
+    coinbase_business_webhook_secret: "hook-secret",
+    coinbase_business_environment: "sandbox"
+  };
+  const raw = JSON.stringify({
+    id: checkoutId,
+    eventType: "checkout.payment.success",
+    metadata: { orderId: context.tradeNo }
+  });
+  const timestamp = Math.floor(Date.now() / 1000);
+  const signature = await hmacHex("SHA-256", config.coinbase_business_webhook_secret, `${timestamp}...${raw}`);
+  await withFetch(async () => Response.json({
+    id: checkoutId,
+    status: "COMPLETED",
+    amount: "100.00",
+    currency: "USDC",
+    fiatAmount: "123.45",
+    fiatCurrency: "CNY",
+    metadata: { orderId: context.tradeNo }
+  }), async () => {
+    const verified = await provider.verifyCallback(new Request("https://panel.example.com/notify", {
+      method: "POST",
+      headers: { "x-hook0-signature": `t=${timestamp},h=,v1=${signature}` },
+      body: raw
+    }), config);
+    assert.equal(verified.amount, 12345);
+    assert.equal(verified.currency, "CNY");
+  });
 });
 
 test("Stripe creates hosted Checkout and only accepts a paid, re-read Session", async () => {
@@ -760,6 +801,160 @@ test("checkout freezes amount and currency while active channels cannot be mutat
     body: JSON.stringify({ id: 1 })
   }), env, "/payment/drop");
   assert.equal(dropped.status, 409);
+});
+
+test("enabled payment channels reject credential and callback-domain changes before their first checkout", async () => {
+  invalidateSettingsCache();
+  const { raw, d1 } = await paymentDatabase();
+  const env = { XBOARD_DB: d1, XBOARD_KV: emptyKv };
+  const save = config => handleAdminPayment(new Request("https://panel.example.com/api/v1/admin/payment/save", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      id: 1,
+      name: "Stripe",
+      payment: "Stripe",
+      config,
+      notify_domain: "https://payments.example.com",
+      handling_fee_fixed: 100,
+      handling_fee_percent: 0
+    })
+  }), env, "/payment/save");
+
+  const blocked = await save({ stripe_secret_key: "sk_test_changed", stripe_webhook_secret: "whsec_changed" });
+  assert.equal(blocked.status, 409);
+  assert.match((await blocked.json()).message, /先停用支付渠道/);
+  assert.equal(JSON.parse(raw.exec("SELECT config FROM v2_payment WHERE id=1")[0].values[0][0]).stripe_secret_key, "sk_test_local");
+
+  raw.run("UPDATE v2_payment SET enable=0 WHERE id=1");
+  const saved = await save({ stripe_secret_key: "sk_test_changed", stripe_webhook_secret: "whsec_changed" });
+  assert.equal(saved.status, 200);
+  assert.deepEqual(raw.exec("SELECT enable,notify_domain FROM v2_payment WHERE id=1")[0].values[0], [0, "https://payments.example.com"]);
+});
+
+test("payment configuration update stays atomic when a checkout transaction appears after the precheck", async () => {
+  invalidateSettingsCache();
+  const { raw } = await paymentDatabase();
+  raw.run("UPDATE v2_payment SET enable=0 WHERE id=1");
+  class RacingSqlD1 extends SqlD1 {
+    inserted = false;
+    query(statement) {
+      const result = super.query(statement);
+      if (!this.inserted && /SELECT 1 AS found FROM v2_payment_transactions/.test(statement.sql)) {
+        this.inserted = true;
+        this.db.run(`INSERT INTO v2_payment_transactions(
+          order_id,trade_no,payment_id,provider,expected_amount,currency,idempotency_key,status,created_at,updated_at
+        ) VALUES (9,'ORDER-20260729',1,'Stripe:1',1100,'CNY','race-key','pending',1,1)`);
+      }
+      return result;
+    }
+  }
+  paymentTest.resetPaymentSchema();
+  const env = { XBOARD_DB: new RacingSqlD1(raw), XBOARD_KV: emptyKv };
+  const response = await handleAdminPayment(new Request("https://panel.example.com/api/v1/admin/payment/save", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      id: 1,
+      name: "Stripe",
+      payment: "Stripe",
+      config: { stripe_secret_key: "sk_test_race", stripe_webhook_secret: "whsec_race" },
+      handling_fee_fixed: 100,
+      handling_fee_percent: 0
+    })
+  }), env, "/payment/save");
+  assert.equal(response.status, 409);
+  assert.equal(JSON.parse(raw.exec("SELECT config FROM v2_payment WHERE id=1")[0].values[0][0]).stripe_secret_key, "sk_test_local");
+});
+
+test("checkout detects a channel change before provider I/O and removes its unused claim", async () => {
+  invalidateSettingsCache();
+  const { raw } = await paymentDatabase();
+  class ChangedPaymentSqlD1 extends SqlD1 {
+    changed = false;
+    execute(statement) {
+      const result = super.execute(statement);
+      if (!this.changed && /INSERT OR IGNORE INTO v2_payment_transactions/.test(statement.sql)) {
+        this.changed = true;
+        this.db.run("UPDATE v2_payment SET config=?,updated_at=1 WHERE id=1", [
+          JSON.stringify({ stripe_secret_key: "sk_test_new", stripe_webhook_secret: "whsec_new" })
+        ]);
+      }
+      return result;
+    }
+  }
+  paymentTest.resetPaymentSchema();
+  let providerCalls = 0;
+  const response = await withFetch(async () => {
+    providerCalls++;
+    throw new Error("provider must not be called with stale credentials");
+  }, () => checkoutPayment(
+    new Request("https://panel.example.com/api/v1/user/order/checkout"),
+    { XBOARD_DB: new ChangedPaymentSqlD1(raw), XBOARD_KV: emptyKv },
+    { id: 9, trade_no: context.tradeNo, total_amount: 1000 },
+    { id: 7, email: "user@example.com" },
+    1,
+    async () => false
+  ));
+  assert.equal(response.status, 409);
+  assert.equal(providerCalls, 0);
+  assert.equal(raw.exec("SELECT COUNT(*) FROM v2_payment_transactions")[0].values[0][0], 0);
+  assert.deepEqual(raw.exec("SELECT payment_id,handling_amount FROM v2_order WHERE id=9")[0].values[0], [null, 0]);
+});
+
+test("a statically incompatible payment currency leaves no transaction or order binding", async () => {
+  invalidateSettingsCache();
+  const { raw, d1 } = await paymentDatabase();
+  raw.run("UPDATE v2_settings SET value='USD' WHERE name='currency'");
+  raw.run("UPDATE v2_payment SET payment='EPay',config=? WHERE id=1", [
+    JSON.stringify({ url: "https://epay.example.com", pid: "1001", key: "secret" })
+  ]);
+  paymentTest.resetPaymentSchema();
+  const response = await checkoutPayment(
+    new Request("https://panel.example.com/api/v1/user/order/checkout"),
+    { XBOARD_DB: d1, XBOARD_KV: emptyKv },
+    { id: 9, trade_no: context.tradeNo, total_amount: 1000 },
+    { id: 7, email: "user@example.com" },
+    1,
+    async () => false
+  );
+  assert.equal(response.status, 400);
+  assert.equal(raw.exec("SELECT COUNT(*) FROM v2_payment_transactions")[0].values[0][0], 0);
+  assert.deepEqual(raw.exec("SELECT payment_id,handling_amount FROM v2_order WHERE id=9")[0].values[0], [null, 0]);
+});
+
+test("a canceled order cannot receive a reused hosted checkout URL", async () => {
+  invalidateSettingsCache();
+  const { raw, d1 } = await paymentDatabase();
+  const order = { id: 9, trade_no: context.tradeNo, total_amount: 1000 };
+  const user = { id: 7, email: "user@example.com" };
+  const created = await withFetch(async () => Response.json({
+    id: "cs_test_reused",
+    url: "https://checkout.stripe.com/c/pay/reused",
+    expires_at: 2000000000
+  }), () => checkoutPayment(
+    new Request("https://panel.example.com/api/v1/user/order/checkout"),
+    { XBOARD_DB: d1, XBOARD_KV: emptyKv }, order, user, 1, async () => false
+  ));
+  assert.equal(created.status, 200);
+  class CancelBeforeRebindD1 extends SqlD1 {
+    canceled = false;
+    execute(statement) {
+      if (!this.canceled && /UPDATE v2_order SET payment_id=\?,handling_amount=\?,updated_at=\? WHERE id=\? AND status=0/.test(statement.sql)) {
+        this.canceled = true;
+        this.db.run("UPDATE v2_order SET status=2 WHERE id=9");
+      }
+      return super.execute(statement);
+    }
+  }
+  const response = await checkoutPayment(
+    new Request("https://panel.example.com/api/v1/user/order/checkout"),
+    { XBOARD_DB: new CancelBeforeRebindD1(raw), XBOARD_KV: emptyKv },
+    order, user, 1, async () => false
+  );
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).message, /订单状态已变化/);
+  assert.equal(raw.exec("SELECT status FROM v2_order WHERE id=9")[0].values[0][0], 2);
 });
 
 test("checkout refuses migrated channels without a callback UUID", async () => {
