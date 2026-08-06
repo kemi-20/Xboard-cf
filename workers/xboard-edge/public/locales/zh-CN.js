@@ -2009,7 +2009,10 @@ window.XBOARD_TRANSLATIONS['zh-CN'] = {
         "monthly": "每月重置",
         "next_at": "下次重置时间",
         "next_at_placeholder": "选择下次重置时间",
-        "next_at_required": "请选择下次重置时间"
+        "next_at_required": "请选择下次重置时间",
+        "preset_1month": "一个月",
+        "preset_3months": "三个月",
+        "preset_6months": "六个月"
       },
       "banned": {
         "label": "禁用节点",

@@ -2021,7 +2021,10 @@ window.XBOARD_TRANSLATIONS['en-US'] = {
         "monthly": "Reset monthly",
         "next_at": "Next reset time",
         "next_at_placeholder": "Select the next reset time",
-        "next_at_required": "Select the next reset time"
+        "next_at_required": "Select the next reset time",
+        "preset_1month": "One month",
+        "preset_3months": "Three months",
+        "preset_6months": "Six months"
       },
       "banned": {
         "label": "Disable Node",

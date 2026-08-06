@@ -1957,7 +1957,10 @@ window.XBOARD_TRANSLATIONS['ru-RU'] = {
         "monthly": "Ежемесячно",
         "next_at": "Следующее время сброса",
         "next_at_placeholder": "Выберите следующее время сброса",
-        "next_at_required": "Выберите следующее время сброса"
+        "next_at_required": "Выберите следующее время сброса",
+        "preset_1month": "Один месяц",
+        "preset_3months": "Три месяца",
+        "preset_6months": "Шесть месяцев"
       },
       "dynamic_rate": {
         "section_title": "Конфигурация динамического множителя",
