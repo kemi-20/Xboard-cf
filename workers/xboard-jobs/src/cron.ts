@@ -27,6 +27,17 @@ function daysInMonth(year: number, month: number) {
   return new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
 }
 
+function nextServerResetAt(previous: number, after = now()) {
+  let candidate = previous;
+  for (let attempts = 0; attempts < 120 && candidate <= after; attempts++) {
+    const current = shanghaiParts(candidate);
+    const month = current.month === 11 ? 0 : current.month + 1;
+    const year = current.year + (current.month === 11 ? 1 : 0);
+    candidate = shanghaiTimestamp(year, month, Math.min(current.day, daysInMonth(year, month)), current.hour, current.minute, current.second);
+  }
+  return candidate > after ? candidate : null;
+}
+
 function nextResetAt(user: any, systemMethod: number, from = now()) {
   if (user.expired_at === null || user.expired_at === undefined) return null;
   let method = user.reset_traffic_method === null || user.reset_traffic_method === undefined ? systemMethod : Number(user.reset_traffic_method);
@@ -201,6 +212,48 @@ async function resetTraffic(env: CronEnv, ts: number) {
     }
     await Promise.all(versionKeys.map(key => optionalKvPut(env, key, String(Date.now()))));
   }
+  await resetServerTraffic(env, ts);
+}
+
+async function resetServerTraffic(env: CronEnv, ts: number) {
+  let resetCount = 0;
+  while (true) {
+    let servers: { id: number; next_reset_at: number }[];
+    try {
+      const due = await env.XBOARD_DB.prepare(`SELECT id, next_reset_at FROM v2_server
+        WHERE transfer_enable > 0 AND next_reset_at IS NOT NULL AND next_reset_at <= ?
+        ORDER BY id ASC LIMIT 100`).bind(ts).all<{ id: number; next_reset_at: number }>();
+      servers = due.results || [];
+    } catch (error) {
+      // During a rolling deploy Jobs may run before Edge adds the optional column.
+      // Treat only that legacy-schema case as no scheduled server resets.
+      if (/no such column:\s*next_reset_at/i.test(String(error))) return 0;
+      throw error;
+    }
+    if (!servers.length) break;
+    const statements: D1PreparedStatement[] = [];
+    for (const server of servers) {
+      const next = nextServerResetAt(Number(server.next_reset_at), ts);
+      statements.push(env.XBOARD_DB.prepare(`UPDATE v2_server SET u = 0, d = 0, next_reset_at = ?, updated_at = ?
+        WHERE id = ? AND transfer_enable > 0 AND next_reset_at = ? AND next_reset_at <= ?`)
+        .bind(next, ts, server.id, server.next_reset_at, ts));
+    }
+    const results = await env.XBOARD_DB.batch(statements);
+    resetCount += results.reduce((total, result) => total + Number((result.meta as any)?.changes || 0), 0);
+  }
+  if (resetCount > 0) {
+    await optionalKvPut(env, "servers_version", String(Date.now()));
+    try {
+      await env.XBOARD_SERVER.fetch("https://xboard-server.internal/internal/sync", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...await internalAuthHeaders(env) },
+        body: JSON.stringify({ scope: "all" })
+      });
+    } catch {
+      // Polling and the versioned subscription cache remain the fallback.
+    }
+  }
+  return resetCount;
 }
 
 let nextResetBackfillDone = false;
@@ -528,7 +581,7 @@ async function run(env: CronEnv, replayOutbox: () => Promise<number>, task = "sc
   }
 }
 
-export const cronTest = { dayStart, nextResetAt, addOrderMonths, acquireTaskLock, releaseTaskLock, scheduledTasks, checkTrafficExceeded, cleanupOnlineStatus };
+export const cronTest = { dayStart, nextResetAt, nextServerResetAt, resetServerTraffic, addOrderMonths, acquireTaskLock, releaseTaskLock, scheduledTasks, checkTrafficExceeded, cleanupOnlineStatus };
 
 export async function runScheduled<T extends CronEnv>(env: T, replayOutbox: (sessionEnv: T) => Promise<number>) {
   const sessionEnv = { ...env, XBOARD_DB: primaryDatabase(env.XBOARD_DB) } as T;

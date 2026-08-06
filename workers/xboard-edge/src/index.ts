@@ -245,12 +245,12 @@ FINAL,Proxy
 
 async function ensureBootstrap(env: Env) {
   await ensureStorageOptimization(env);
-  const marker = await optionalKvGet(env, "bootstrap:edge:v21");
+  const marker = await optionalKvGet(env, "bootstrap:edge:v22");
   if (marker) return;
   try {
     const persisted = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = 'system_bootstrap_edge_version'").first<{ value: string }>();
-    if (persisted?.value === "v21") {
-      await optionalKvPut(env, "bootstrap:edge:v21", String(now()));
+    if (persisted?.value === "v22") {
+      await optionalKvPut(env, "bootstrap:edge:v22", String(now()));
       return;
     }
   } catch {
@@ -282,6 +282,7 @@ async function ensureBootstrap(env: Env) {
     "ALTER TABLE v2_server ADD COLUMN rate_time_ranges TEXT",
     "ALTER TABLE v2_server ADD COLUMN metrics TEXT",
     "ALTER TABLE v2_server ADD COLUMN transfer_enable INTEGER DEFAULT 0",
+    "ALTER TABLE v2_server ADD COLUMN next_reset_at INTEGER",
     "ALTER TABLE v2_server ADD COLUMN excludes TEXT",
     "ALTER TABLE v2_server ADD COLUMN ips TEXT",
     "ALTER TABLE v2_server ADD COLUMN code TEXT",
@@ -425,6 +426,7 @@ async function ensureBootstrap(env: Env) {
   await runSqlIgnore(env, "UPDATE v2_server SET last_check_at = NULL, last_push_at = NULL, online_user = 0, metrics = NULL");
   for (const sql of [
     "CREATE INDEX IF NOT EXISTS idx_v2_user_next_reset_at ON v2_user(next_reset_at)",
+    "CREATE INDEX IF NOT EXISTS idx_v2_server_next_reset_at ON v2_server(next_reset_at)",
     "CREATE INDEX IF NOT EXISTS idx_v2_user_online ON v2_user(last_online_at, online_count)",
     "CREATE INDEX IF NOT EXISTS idx_traffic_reset_user_time ON v2_traffic_reset_logs(user_id, reset_time)",
     "CREATE INDEX IF NOT EXISTS idx_notice_sort ON v2_notice(sort)",
@@ -539,9 +541,9 @@ async function ensureBootstrap(env: Env) {
     }
     await runSqlIgnore(env, "UPDATE v2_user SET transfer_enable = transfer_enable * 1073741824, updated_at = ? WHERE plan_id IS NOT NULL AND transfer_enable > 0 AND EXISTS (SELECT 1 FROM v2_plan WHERE v2_plan.id = v2_user.plan_id AND v2_plan.transfer_enable = v2_user.transfer_enable)", [ts]);
   }
-  await runSqlIgnore(env, "INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES ('system_bootstrap_edge_version', 'v21', ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at", [ts, ts]);
+  await runSqlIgnore(env, "INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES ('system_bootstrap_edge_version', 'v22', ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at", [ts, ts]);
   invalidateSettingsCache();
-  await optionalKvPut(env, "bootstrap:edge:v21", String(ts));
+  await optionalKvPut(env, "bootstrap:edge:v22", String(ts));
   await ensureStorageOptimization(env);
 }
 
@@ -1265,13 +1267,29 @@ function phpUrlEncode(value: string) {
   return encodeURIComponent(value).replace(/%20/g, "+").replace(/~/g, "%7E");
 }
 
-function normalizeServerInput(input: Record<string, any>) {
+function optionalTimestamp(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 0) return Math.floor(numeric > 1e12 ? numeric / 1000 : numeric);
+  const parsed = Date.parse(String(value));
+  return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : null;
+}
+
+function normalizeServerInput(input: Record<string, any>, existing?: Record<string, any> | null) {
   const protocolSettings = parseJsonObject(input.protocol_settings);
   const serverType = String(input.type || input.server_type || protocolSettings.type || "shadowsocks");
   // The public port may be an upstream-compatible dynamic range such as
   // "20000-30000". Keep its textual representation instead of coercing it.
   const port = normalizePublicPort(input.port);
   const serverPort = Number(input.server_port);
+  const transferEnable = input.transfer_enable !== undefined
+    ? Number(input.transfer_enable || 0)
+    : input.transfer_enable_gb !== undefined
+      ? Math.round(Number(input.transfer_enable_gb || 0) * 1073741824)
+      : Number(existing?.transfer_enable || 0);
+  const nextResetAt = transferEnable > 0
+    ? ("next_reset_at" in input ? optionalTimestamp(input.next_reset_at) : optionalTimestamp(existing?.next_reset_at))
+    : null;
   return {
     type: serverType,
     name: String(input.name || `${serverType} Node`),
@@ -1294,7 +1312,8 @@ function normalizeServerInput(input: Record<string, any>) {
     listen_address: String(input.listen_address || ""),
     rate_time_enable: boolNumber(input.rate_time_enable, 0),
     rate_time_ranges: JSON.stringify(parseJsonArray(input.rate_time_ranges)),
-    transfer_enable: input.transfer_enable ? Number(input.transfer_enable) : input.transfer_enable_gb ? Math.round(Number(input.transfer_enable_gb) * 1073741824) : 0,
+    transfer_enable: transferEnable,
+    next_reset_at: nextResetAt,
     excludes: JSON.stringify(parseJsonArray(input.excludes)),
     ips: JSON.stringify(parseJsonArray(input.ips)),
     code: input.code ? String(input.code) : null
@@ -1327,17 +1346,24 @@ function validateServerInput(input: Record<string, any>): Response | null {
 
 async function saveServer(request: Request, env: Env) {
   const input = await body<Record<string, any>>(request);
+  const id = nullableNumber(input.id);
   for (const field of ["type", "name", "host", "port", "server_port", "rate"]) {
     if (isNilLike(input[field])) return fail(`${field} 字段不能为空`, 422, 422);
   }
   if (![input.server_port, input.rate].every(value => Number.isFinite(Number(value)))) return fail("服务端口和倍率必须是数字", 422, 422);
+  if ("next_reset_at" in input && input.next_reset_at !== null && input.next_reset_at !== "" && optionalTimestamp(input.next_reset_at) === null) return fail("下次重置时间格式不正确", 422, 422);
+  const existing = id
+    ? await env.XBOARD_DB.prepare("SELECT transfer_enable, next_reset_at FROM v2_server WHERE id = ?").bind(id).first<Record<string, any>>()
+    : null;
+  if (id && !existing) return fail("服务器不存在", 400, 400202);
   const validation = validateServerInput(input);
   if (validation) return validation;
-  const data = normalizeServerInput(input);
+  const data = normalizeServerInput(input, existing);
+  if ("next_reset_at" in input && input.next_reset_at !== null && input.next_reset_at !== "" && data.transfer_enable <= 0) return fail("每月重置必须设置大于 0 的流量", 422, 422);
+  if ("next_reset_at" in input && data.next_reset_at !== null && data.next_reset_at <= now()) return fail("下次重置时间必须晚于当前时间", 422, 422);
   const columns = await tableColumns(env, "v2_server");
   const allowed = Object.entries(data).filter(([key]) => columns.has(key));
   const ts = now();
-  const id = nullableNumber(input.id);
   let saved = false;
   try {
     if (id) {
@@ -1366,7 +1392,9 @@ async function saveServer(request: Request, env: Env) {
         protocol_settings: data.protocol_settings,
         show: data.show,
         enabled: data.enabled,
-        sort: data.sort
+        sort: data.sort,
+        transfer_enable: data.transfer_enable,
+        next_reset_at: data.next_reset_at
       };
       const fallbackColumns = await tableColumns(env, "v2_server");
       const fallbackAllowed = Object.entries(minimal).filter(([key]) => fallbackColumns.has(key));

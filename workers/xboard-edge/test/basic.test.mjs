@@ -239,6 +239,26 @@ test("server validation keeps public and backend ports independent", () => {
   assert.doesNotMatch(source, /server\.name = `\$\{server\.name \|\| "Node"\} Copy`/);
 });
 
+test("node traffic reset scheduling stays backward compatible", () => {
+  const source = edgeSource();
+  const schema = fs.readFileSync("../../schema/d1.sql", "utf8");
+  const migration = fs.readFileSync("src/migration.ts", "utf8");
+  assert.match(schema, /CREATE TABLE IF NOT EXISTS v2_server[\s\S]*next_reset_at INTEGER/);
+  assert.match(source, /ALTER TABLE v2_server ADD COLUMN next_reset_at INTEGER/);
+  assert.match(source, /"next_reset_at" in input \? optionalTimestamp\(input\.next_reset_at\) : optionalTimestamp\(existing\?\.next_reset_at\)/);
+  assert.match(migration, /if \(row\.next_reset_at === undefined\) row\.next_reset_at = null/);
+  assert.match(migration, /format === "xboard"\) delete row\.next_reset_at/);
+  assert.match(source, /transfer_enable: data\.transfer_enable,[\s\S]*next_reset_at: data\.next_reset_at/);
+  for (const asset of ["public/assets/index-CF20260713.js", "public/assets/index-CEIYH7i8.js"]) {
+    const bundle = fs.readFileSync(asset, "utf8");
+    assert.match(bundle, /value:t\.value\?SS\(t\.value,"yyyy-MM-dd'T'HH:mm:ss"\):""/);
+    assert.match(bundle, /Math\.floor\(n\.getTime\(\)\/1e3\)/);
+    assert.match(bundle, /grid grid-cols-2 gap-3",children:\[Q\.jsx\(\$y,\{control:x\.control,name:"code"[\s\S]*name:"traffic_reset_mode"/);
+  }
+  const serverTable = schema.slice(schema.indexOf("CREATE TABLE IF NOT EXISTS v2_server ("), schema.indexOf("CREATE TABLE IF NOT EXISTS v2_notice"));
+  assert.doesNotMatch(serverTable, /traffic_reset_method/);
+});
+
 test("new installations generate a private node communication token", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   assert.match(source, /server_token: randomString\(32\)/);
@@ -660,7 +680,7 @@ test("login sessions fall back to D1 when KV writes fail", () => {
 test("bootstrap remains available when the KV daily write limit is exhausted", () => {
   const source = edgeSource();
   assert.match(source, /system_bootstrap_edge_version/);
-  assert.match(source, /await optionalKvPut\(env, "bootstrap:edge:v21"/);
+  assert.match(source, /await optionalKvPut\(env, "bootstrap:edge:v22"/);
   assert.doesNotMatch(source, /await env\.XBOARD_KV\.put\("bootstrap:edge:v12"/);
 });
 
@@ -1199,7 +1219,7 @@ test("migration page keeps the complete workflow in a responsive accessible shel
   const page = fs.readFileSync("public/migration/panel.html", "utf8");
   const style = fs.readFileSync("public/migration/styles.css", "utf8");
   const app = fs.readFileSync("public/migration/app.js", "utf8");
-  for (const id of ["export", "sqlite-file", "redis-file", "mode", "skip-backup", "inspect", "preflight", "migrate", "running", "progress", "log", "result", "rollback"]) {
+  for (const id of ["export", "export-format", "sqlite-file", "redis-file", "mode", "skip-backup", "inspect", "preflight", "migrate", "running", "progress", "log", "result", "rollback"]) {
     assert.match(page, new RegExp(`id="${id}"`));
   }
   assert.match(page, /href="\/migration\/styles\.css"/);
@@ -1211,6 +1231,8 @@ test("migration page keeps the complete workflow in a responsive accessible shel
   assert.match(style, /env\(safe-area-inset-bottom\)/);
   assert.match(app, /element\.setAttribute\("aria-current", "step"\)/);
   assert.match(app, /setAttribute\("aria-valuenow"/);
+  assert.match(app, /\/export\/manifest\?format=\$\{effectiveFormat\}/);
+  assert.match(app, /manifest\.template/);
 });
 
 test("system settings stay locked until their server values load", () => {

@@ -42,6 +42,13 @@ test("migrated boolean settings accept true/false and one/zero strings", () => {
   assert.match(source, /booleanSetting\(await setting\(env, "commission_auto_check_enable"/);
 });
 
+test("monthly node traffic resets advance their saved timestamp", () => {
+  const january31 = Date.UTC(2026, 0, 31, 8, 30) / 1000;
+  const february28 = Date.UTC(2026, 1, 28, 8, 30) / 1000;
+  assert.equal(__test.nextServerResetAt(january31, january31), february28);
+  assert.equal(__test.nextServerResetAt(january31, february28 + 1), Date.UTC(2026, 2, 28, 8, 30) / 1000);
+});
+
 test("every cron-controlled setting is included in the Jobs settings snapshot", () => {
   const db = fs.readFileSync("src/db.ts", "utf8");
   for (const name of [
@@ -90,6 +97,9 @@ test("cron implements the official order, ticket, commission and traffic checks"
   assert.doesNotMatch(source, /transfer_used = \?, transfer_used_total = \?/);
   for (const field of ["order_total", "paid_count", "paid_total", "commission_count", "commission_total", "register_count", "invite_count"]) assert.match(source, new RegExp(field));
   assert.match(source, /v2_traffic_reset_logs/);
+  assert.match(source, /SELECT id, next_reset_at FROM v2_server/);
+  assert.match(source, /SET u = 0, d = 0, next_reset_at = \?/);
+  assert.match(source, /no such column:\\s\*next_reset_at/);
   assert.match(source, /new_order_event_id/);
   assert.match(source, /renew_order_event_id/);
   assert.match(source, /change_order_event_id/);

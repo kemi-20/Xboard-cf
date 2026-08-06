@@ -2007,11 +2007,21 @@ window.XBOARD_TRANSLATIONS['en-US'] = {
         "child_node_note": "Child node rate inherited from parent"
       },
       "traffic_limit": {
-        "label": "Traffic Limit",
+        "label": "Traffic (GB)",
         "placeholder": "0 means no limit",
         "hint": "Set node traffic limit (unit: GB), 0 means no limit",
         "error_numeric": "Traffic limit must be a number",
         "error_gte_zero": "Traffic limit must be greater than or equal to 0"
+      },
+      "traffic_reset": {
+        "label": "Traffic reset method",
+        "placeholder": "Select a traffic reset method",
+        "none": "None",
+        "once": "One-time",
+        "monthly": "Reset monthly",
+        "next_at": "Next reset time",
+        "next_at_placeholder": "Select the next reset time",
+        "next_at_required": "Select the next reset time"
       },
       "banned": {
         "label": "Disable Node",

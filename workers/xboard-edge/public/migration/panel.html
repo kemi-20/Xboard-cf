@@ -57,9 +57,10 @@
             <p class="section-kicker">可逆操作</p>
             <h2 id="export-title">导出当前数据</h2>
           </div>
-          <span class="status-badge">原版兼容</span>
+          <span class="status-badge">双格式</span>
         </div>
-        <p class="muted">生成标准 SQLite3 数据库，表结构、字段和索引与原版 XBoard 一致，可直接用于迁回原版。邮件凭据为空，插件、插件配置、内部支付事务和服务器机器负载历史不导出，主题固定为 Xboard。支付渠道配置会原样导出，其中可能包含私钥、API Key 和 Webhook Secret，请将导出文件视为敏感凭据。</p>
+        <p class="muted">XBoard-CF 格式完整保留 CF 专属字段；原版 XBoard 格式会跳过这些字段，可直接迁回原版。邮件凭据为空，插件、内部支付事务和服务器机器负载历史不导出。支付渠道配置会原样导出，请将文件视为敏感凭据。</p>
+        <div class="grid export-options"><div class="field mode-field"><label for="export-format">导出格式</label><select id="export-format"><option value="cf">XBoard-CF SQLite3（完整数据）</option><option value="xboard">原版 XBoard SQLite3（兼容格式）</option></select><small id="export-format-note">保留节点每月流量重置时间等 CF 专属字段。</small></div></div>
         <div class="actions"><button class="button" id="export" type="button">手动导出 SQLite3</button><span id="export-status" class="muted status-text" aria-live="polite"></span></div>
       </section>
 

@@ -311,11 +311,12 @@ function downloadDatabase(db, prefix) {
   return { filename: anchor.download, size: blob.size };
 }
 
-async function exportCurrent({ runId = null, counts = null, tables = null, automatic = false } = {}) {
+async function exportCurrent({ runId = null, counts = null, tables = null, automatic = false, format = "xboard" } = {}) {
   const SQL = await loadSql();
-  const manifest = runId ? { tables: tables || state.tables, counts } : await api("/export/manifest");
-  const templateResponse = await fetch("/migration/xboard-template.db", { cache: "no-store" });
-  if (!templateResponse.ok) throw new Error(`无法读取原版 SQLite 模板：HTTP ${templateResponse.status}`);
+  const effectiveFormat = automatic ? "cf" : format === "cf" ? "cf" : "xboard";
+  const manifest = runId ? { tables: tables || state.tables, counts, template: "/migration/xboard-template.db" } : await api(`/export/manifest?format=${effectiveFormat}`);
+  const templateResponse = await fetch(manifest.template, { cache: "no-store" });
+  if (!templateResponse.ok) throw new Error(`无法读取 SQLite 模板：HTTP ${templateResponse.status}`);
   const db = new SQL.Database(new Uint8Array(await templateResponse.arrayBuffer()));
   const templateTables = new Set(db.exec("SELECT name FROM sqlite_master WHERE type='table'")[0]?.values.flat().map(String) || []);
   const exportTables = manifest.tables.filter(table => templateTables.has(table));
@@ -329,7 +330,7 @@ async function exportCurrent({ runId = null, counts = null, tables = null, autom
         state.phase = runId ? "snapshot" : "export"; state.table = table; state.offset = offset;
         const result = await api(runId ? "/snapshot/table" : "/export/table", {
           method: "POST",
-          body: JSON.stringify({ ...(runId ? { run_id: runId } : {}), table, offset, limit: 100 })
+          body: JSON.stringify({ ...(runId ? { run_id: runId } : {}), table, offset, limit: 100, format: effectiveFormat })
         });
         insertExportRows(db, table, result.rows || []);
         offset = Number(result.next_offset || offset + Number(result.source_rows || 0));
@@ -340,7 +341,7 @@ async function exportCurrent({ runId = null, counts = null, tables = null, autom
         if (result.done) break;
       } while (offset < expected || expected === 0);
     }
-    const downloaded = downloadDatabase(db, automatic ? "xboard-pre-migration" : "xboard-export");
+    const downloaded = downloadDatabase(db, automatic ? "xboard-cf-pre-migration" : effectiveFormat === "cf" ? "xboard-cf-export" : "xboard-export");
     if (runId) {
       state.phase = "snapshot_finish";
       await api("/snapshot/finish", { method: "POST", body: JSON.stringify({ run_id: runId }) });
@@ -351,10 +352,11 @@ async function exportCurrent({ runId = null, counts = null, tables = null, autom
 }
 
 async function manualExport() {
+  const format = $("#export-format").value;
   $("#export").disabled = true;
-  $("#export-status").textContent = "正在生成原版 SQLite3 数据库";
+  $("#export-status").textContent = format === "cf" ? "正在生成 XBoard-CF SQLite3 数据库" : "正在生成原版 XBoard SQLite3 数据库";
   try {
-    const result = await exportCurrent();
+    const result = await exportCurrent({ format });
     $("#export-status").textContent = `导出完成：${result.filename}（${(result.size / 1024 / 1024).toFixed(2)} MB）`;
   } catch (error) {
     $("#export-status").innerHTML = `<span class="error"></span>`;
@@ -515,6 +517,11 @@ async function rollback() {
 $("#inspect").addEventListener("click", () => inspect().catch(error => { $("#file-status").innerHTML = ""; const span = document.createElement("span"); span.className = "error"; span.textContent = error.message; $("#file-status").append(span); }));
 $("#migrate").addEventListener("click", migrate);
 $("#export").addEventListener("click", manualExport);
+$("#export-format").addEventListener("change", event => {
+  $("#export-format-note").textContent = event.target.value === "cf"
+    ? "保留节点每月流量重置时间等 CF 专属字段。"
+    : "跳过 CF 专属字段，保持原版 XBoard 表结构兼容。";
+});
 $("#rollback").addEventListener("click", rollback);
 for (const id of ["#sqlite-file", "#redis-file"]) $(id).addEventListener("change", () => { $("#preflight").hidden = true; });
 $("#mode").addEventListener("change", () => { updateModeNote(); $("#preflight").hidden = true; });

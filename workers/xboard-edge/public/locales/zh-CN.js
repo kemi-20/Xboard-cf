@@ -1995,11 +1995,21 @@ window.XBOARD_TRANSLATIONS['zh-CN'] = {
         "child_node_note": "子节点倍率继承自父节点"
       },
       "traffic_limit": {
-        "label": "流量限制",
+        "label": "流量（GB）",
         "placeholder": "0 表示不限制",
         "hint": "设置节点流量上限（单位：GB），0 表示不限制",
         "error_numeric": "流量限制必须是数字",
         "error_gte_zero": "流量限制必须大于或等于0"
+      },
+      "traffic_reset": {
+        "label": "流量重置方式",
+        "placeholder": "选择流量重置方式",
+        "none": "无",
+        "once": "一次性",
+        "monthly": "每月重置",
+        "next_at": "下次重置时间",
+        "next_at_placeholder": "选择下次重置时间",
+        "next_at_required": "请选择下次重置时间"
       },
       "banned": {
         "label": "禁用节点",

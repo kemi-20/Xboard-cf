@@ -20,6 +20,28 @@ async function templateDatabase() {
   return new SQL.Database(fs.readFileSync("public/migration/xboard-template.db"));
 }
 
+async function databaseFromTemplate(name) {
+  const SQL = await initSqlJs({ locateFile: file => fileURLToPath(new URL(`../node_modules/sql.js/dist/${file}`, import.meta.url)) });
+  return new SQL.Database(fs.readFileSync(`public/migration/${name}`));
+}
+
+test("SQLite export offers complete CF and original-compatible schemas", async () => {
+  const cf = await databaseFromTemplate("xboard-template.db");
+  const upstream = await databaseFromTemplate("xboard-upstream-template.db");
+  try {
+    const columns = db => new Set(sqliteTableColumns(db, "v2_server").map(column => column.name));
+    assert.equal(columns(cf).has("next_reset_at"), true);
+    assert.equal(columns(upstream).has("next_reset_at"), false);
+    insertExportRows(cf, "v2_server", [{ id: 990003, type: "vless", name: "CF", next_reset_at: 1786003200 }]);
+    insertExportRows(upstream, "v2_server", [{ id: 990003, type: "vless", name: "upstream", next_reset_at: 1786003200 }]);
+    assert.equal(cf.exec("SELECT next_reset_at FROM v2_server WHERE id = 990003")[0].values[0][0], 1786003200);
+    assert.equal(upstream.exec("PRAGMA integrity_check")[0].values[0][0], "ok");
+  } finally {
+    cf.close();
+    upstream.close();
+  }
+});
+
 test("SQLite export fills every required template column instead of aborting", async () => {
   const db = await templateDatabase();
   try {

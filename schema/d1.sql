@@ -145,6 +145,7 @@ CREATE TABLE IF NOT EXISTS v2_server (
   rate_time_enable INTEGER DEFAULT 0,
   rate_time_ranges TEXT,
   transfer_enable INTEGER DEFAULT 0,
+  next_reset_at INTEGER,
   excludes TEXT,
   ips TEXT,
   code TEXT,
@@ -568,6 +569,7 @@ CREATE INDEX IF NOT EXISTS idx_gift_usage_template_stats ON v2_gift_card_usage(t
 CREATE INDEX IF NOT EXISTS idx_personal_access_tokens_tokenable ON personal_access_tokens(tokenable_type, tokenable_id);
 CREATE INDEX IF NOT EXISTS idx_v2_user_token ON v2_user(token);
 CREATE INDEX IF NOT EXISTS idx_v2_user_next_reset_at ON v2_user(next_reset_at);
+CREATE INDEX IF NOT EXISTS idx_v2_server_next_reset_at ON v2_server(next_reset_at);
 CREATE INDEX IF NOT EXISTS idx_v2_user_online ON v2_user(last_online_at, online_count);
 CREATE INDEX IF NOT EXISTS idx_traffic_reset_user_time ON v2_traffic_reset_logs(user_id, reset_time);
 CREATE INDEX IF NOT EXISTS idx_notice_sort ON v2_notice(sort);

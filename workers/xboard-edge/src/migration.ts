@@ -147,7 +147,7 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error || "未知错误");
 }
 
-function exportRow(table: string, source: MigrationRow): MigrationRow | null {
+function exportRow(table: string, source: MigrationRow, format: "xboard" | "cf" = "cf"): MigrationRow | null {
   if (NON_MIGRATABLE_SERVICE_TABLES.has(table)) return null;
   const row = { ...source };
   if (table === "v2_settings") {
@@ -186,6 +186,8 @@ function exportRow(table: string, source: MigrationRow): MigrationRow | null {
     row.last_push_at = null;
     row.online_user = 0;
     row.metrics = null;
+    if (row.next_reset_at === undefined) row.next_reset_at = null;
+    if (format === "xboard") delete row.next_reset_at;
   }
   if (table === "v2_subscribe_templates" && row.content === undefined) row.content = row.template ?? "";
   if (table === "v2_commission_log") {
@@ -261,6 +263,7 @@ function normalizedSourceRow(table: string, source: MigrationRow): MigrationRow 
     row.last_push_at = null;
     row.online_user = 0;
     row.metrics = null;
+    if (row.next_reset_at === undefined) row.next_reset_at = null;
   }
   if (table === "v2_subscribe_templates") {
     if (row.type === undefined) row.type = row.name || "clash";
@@ -397,11 +400,13 @@ async function startMigration(request: Request, env: MigrationEnv, adminId: numb
   return ok({ run_id: runId, migration_token: migrationToken, mode: normalizeMode(input.mode), tables: MIGRATION_TABLES, backup_tables: backupTables, backup_counts: snapshotCounts, skip_backup: skipBackup });
 }
 
-async function exportManifest(env: MigrationEnv) {
+async function exportManifest(request: Request, env: MigrationEnv) {
   await refreshTrafficStats(env, "materialize");
+  const requested = new URL(request.url).searchParams.get("format");
+  const format = requested === "cf" ? "cf" : "xboard";
   return ok({
-    format: "xboard-sqlite3",
-    template: "/migration/xboard-template.db",
+    format: format === "cf" ? "xboard-cf-sqlite3" : "xboard-sqlite3",
+    template: format === "cf" ? "/migration/xboard-template.db" : "/migration/xboard-upstream-template.db",
     tables: MIGRATION_TABLES,
     counts: await allTableCounts(env.XBOARD_DB),
     excluded: ["邮件服务商与 API 凭据会导出为空值", "所有插件及插件配置不会导出", "内部支付事务不会导出", "服务器机器负载历史不会导出", "主题固定为 Xboard 默认主题"],
@@ -414,9 +419,10 @@ async function exportTable(request: Request, env: MigrationEnv) {
   const table = String(input.table || "");
   const limit = Math.min(100, Math.max(1, Number(input.limit || 100)));
   const offset = Math.max(0, Number(input.offset || 0));
+  const format = input.format === "cf" ? "cf" : "xboard";
   if (!tableSet.has(table)) return fail("不允许导出该数据表", 422, 422);
   const sourceRows = await readTableRows(env.XBOARD_DB, table, limit, offset);
-  const rows = sourceRows.map(row => exportRow(table, row)).filter((row): row is MigrationRow => row !== null);
+  const rows = sourceRows.map(row => exportRow(table, row, format)).filter((row): row is MigrationRow => row !== null);
   return ok({ table, rows, source_rows: sourceRows.length, next_offset: offset + sourceRows.length, done: sourceRows.length < limit });
 }
 
@@ -961,7 +967,7 @@ async function finishMigration(request: Request, env: MigrationEnv) {
 export async function handleAdminMigration(request: Request, env: MigrationEnv, route: string, adminId: number) {
   await ensureMigrationSchema(env);
   if (route === "/migration/status" && request.method === "GET") return migrationStatus(env);
-  if (route === "/migration/export/manifest" && request.method === "GET") return exportManifest(env);
+  if (route === "/migration/export/manifest" && request.method === "GET") return exportManifest(request, env);
   if (route === "/migration/export/table" && request.method === "POST") return exportTable(request, env);
   if (route === "/migration/start" && request.method === "POST") return startMigration(request, env, adminId);
   if (route === "/migration/snapshot/table" && request.method === "POST") return snapshotTable(request, env);
