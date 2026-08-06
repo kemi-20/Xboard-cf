@@ -251,6 +251,7 @@ test("node traffic reset scheduling stays backward compatible", () => {
   assert.match(source, /transfer_enable: data\.transfer_enable,[\s\S]*next_reset_at: data\.next_reset_at/);
   for (const asset of ["public/assets/index-CF20260713.js", "public/assets/index-CEIYH7i8.js"]) {
     const bundle = fs.readFileSync(asset, "utf8");
+    const resetBlock = bundle.slice(bundle.indexOf('name:"next_reset_at"'), bundle.indexOf('name:"tags"', bundle.indexOf('name:"next_reset_at"')));
     assert.match(bundle, /value:t\.value\?SS\(t\.value,"yyyy-MM-dd'T'HH:mm:ss"\):""/);
     assert.match(bundle, /Math\.floor\(n\.getTime\(\)\/1e3\)/);
     assert.match(bundle, /grid grid-cols-2 gap-3",children:\[Q\.jsx\(\$y,\{control:x\.control,name:"code"[\s\S]*name:"traffic_reset_mode"/);
@@ -261,7 +262,10 @@ test("node traffic reset scheduling stays backward compatible", () => {
     assert.match(bundle, /name:"next_reset_at"[\s\S]*e\("form\.traffic_reset\.preset_6months"\)/);
     assert.match(bundle, /name:"next_reset_at"[\s\S]*e\("form\.traffic_reset\.next_at_placeholder"\)/);
     assert.match(bundle, /name:"next_reset_at"[\s\S]*resetDateT\("edit\.form\.expire_time_specific"\)/);
-    assert.match(bundle, /name:"next_reset_at"[\s\S]*scrollIntoView\(\{block:"start"\}\)/);
+    assert.doesNotMatch(resetBlock, /scrollIntoView/);
+    assert.match(resetBlock, /side:"top",sideOffset:-48/);
+    assert.match(resetBlock, /onOpenAutoFocus:e=>e\.preventDefault\(\)/);
+    assert.doesNotMatch(resetBlock, /initialFocus/);
     assert.match(bundle, /disabled:"monthly"!==x\.watch\("traffic_reset_mode"\)/);
   }
   const serverTable = schema.slice(schema.indexOf("CREATE TABLE IF NOT EXISTS v2_server ("), schema.indexOf("CREATE TABLE IF NOT EXISTS v2_notice"));
