@@ -179,7 +179,10 @@ test("node management and user lists bypass a stale KV server version", async ()
     machineHistory: async () => []
   };
 
-  assert.equal((await adminServerRows(env, deps))[0].show, true);
+  const firstNode = (await adminServerRows(env, deps))[0];
+  assert.equal(firstNode.show, true);
+  assert.deepEqual(firstNode.group_ids, ["1"]);
+  assert.deepEqual(firstNode.groups, [{ id: 1, name: "Default" }]);
   show = 0;
   assert.equal((await adminServerRows(env, deps))[0].show, true);
   assert.equal((await adminServerRows(env, deps, { freshAll: true }))[0].show, false);

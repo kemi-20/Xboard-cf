@@ -118,7 +118,13 @@ export async function adminServerRows<E extends ServerEnv>(
     const metrics = rawMetrics && typeof rawMetrics === "object" && !Array.isArray(rawMetrics)
       ? rawMetrics as Record<string, unknown>
       : null;
-    const groupIds = deps.parseJsonArray(server.group_ids);
+    // The official admin selector stores option values as strings and uses
+    // strict equality when restoring an edited node. Keep this read model in
+    // that shape even though D1 and subscription checks use numeric IDs.
+    const groupIds = deps.parseJsonArray(server.group_ids)
+      .map(Number)
+      .filter(id => Number.isInteger(id) && id > 0)
+      .map(String);
     const groups = groupIds.map(id => groupMap.get(Number(id))).filter(Boolean);
     out.push({
       ...server,
