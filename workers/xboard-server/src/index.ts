@@ -207,14 +207,7 @@ async function routeRows(env: Env, node: Row): Promise<Row[]> {
   return result.results || [];
 }
 
-async function nodeConfig(env: Env, node: Row) {
-  let version = "0";
-  try { version = await env.XBOARD_KV.get("servers_version") || "0"; } catch {}
-  const [pushInterval, pullInterval] = await Promise.all([
-    setting(env, "server_push_interval", "300"),
-    setting(env, "server_pull_interval", "300")
-  ]);
-  return cachedData(`node-config:${node.id}:${node.updated_at || 0}:${version}:${pushInterval}:${pullInterval}`, 300, async () => {
+async function loadNodeConfig(env: Env, node: Row, pushInterval: unknown, pullInterval: unknown) {
   const parent = Number(node.parent_id) > 0
     ? await env.XBOARD_DB.prepare("SELECT created_at FROM v2_server WHERE id = ?").bind(Number(node.parent_id)).first<{ created_at: number }>()
     : null;
@@ -224,18 +217,35 @@ async function nodeConfig(env: Env, node: Row) {
     pull_interval: Number(pullInterval)
   };
   return config;
+}
+
+async function nodeConfig(env: Env, node: Row, fresh = false) {
+  const [pushInterval, pullInterval] = await Promise.all([
+    setting(env, "server_push_interval", "300"),
+    setting(env, "server_pull_interval", "300")
+  ]);
+  if (fresh) return loadNodeConfig(env, node, pushInterval, pullInterval);
+  let version = "0";
+  try { version = await env.XBOARD_KV.get("servers_version") || "0"; } catch {}
+  return cachedData(`node-config:${node.id}:${node.updated_at || 0}:${version}:${pushInterval}:${pullInterval}`, 300, async () => {
+    return loadNodeConfig(env, node, pushInterval, pullInterval);
   }, 900);
 }
 
-async function nodeUsers(env: Env, node: Row): Promise<Row[]> {
-  const bucket = Math.floor(now() / 30);
-  return cachedData(`node-users:${node.id}:${node.updated_at || 0}:${bucket}`, 30, async () => {
+async function loadNodeUsers(env: Env, node: Row): Promise<Row[]> {
   const groupIds = parseJson<any[]>(node.group_ids, []).map(Number).filter(Number.isFinite);
   if (!groupIds.length) return [];
   const marks = groupIds.map(() => "?").join(",");
   const result = await env.XBOARD_DB.prepare(`SELECT id, uuid, speed_limit, device_limit FROM v2_user WHERE group_id IN (${marks}) AND (u + d) < transfer_enable AND (expired_at >= ? OR expired_at IS NULL) AND banned = 0`)
     .bind(...groupIds, now()).all<Row>();
   return (result.results || []).map(availableUser);
+}
+
+async function nodeUsers(env: Env, node: Row, fresh = false): Promise<Row[]> {
+  if (fresh) return loadNodeUsers(env, node);
+  const bucket = Math.floor(now() / 30);
+  return cachedData(`node-users:${node.id}:${node.updated_at || 0}:${bucket}`, 30, async () => {
+    return loadNodeUsers(env, node);
   }, 30);
 }
 
@@ -553,10 +563,10 @@ function websocketError(message: string) {
   return new Response(null, { status: 101, webSocket: client } as any);
 }
 
-async function syncNode(env: Env, node: Row) {
+async function syncNode(env: Env, node: Row, fresh = false) {
   if (!Number(node.enabled ?? 1)) return;
-  await pushNodeEvent(env, node, "sync.config", { config: await nodeConfig(env, node) });
-  await pushNodeEvent(env, node, "sync.users", { users: await nodeUsers(env, node) });
+  await pushNodeEvent(env, node, "sync.config", { config: await nodeConfig(env, node, fresh) });
+  await pushNodeEvent(env, node, "sync.users", { users: await nodeUsers(env, node, fresh) });
 }
 
 function userIsAvailable(user: Row | null): user is Row {
@@ -1228,9 +1238,9 @@ export default {
       } else if (input.scope === "users" && Array.isArray(input.user_ids)) {
         const sent = await syncUsersChange(env, input.user_ids.map(Number));
         return json({ data: true, sent });
-      } else if (input.node_id) {
+      } else if (input.scope === "node" && Number(input.node_id) > 0) {
         const node = await getNode(env, input.node_id);
-        if (node) await syncNode(env, node);
+        if (node) await syncNode(env, node, true);
       } else {
         ctx.waitUntil(syncAll(env));
       }

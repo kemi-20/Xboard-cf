@@ -6,7 +6,7 @@ import { internalAuthHeaders, internalSyncToken, invalidateInternalTokenCache } 
 import { resetStatusClientMemoryForTest, statusSnapshot } from "../src/internal/status-client.ts";
 import { adminServerRows, nodeAvailableStatus, statusTimeout } from "../src/admin/servers.ts";
 import { freshSettings, settings } from "../src/db.ts";
-import { shouldNotifyNodeSync } from "../src/internal/sync-client.ts";
+import { nodeSyncIntent, shouldNotifyNodeSync } from "../src/internal/sync-client.ts";
 
 function settingsDatabase(initial) {
   const values = new Map(Object.entries(initial));
@@ -119,6 +119,23 @@ test("node synchronization only follows the audited exact route suffixes", () =>
   assert.equal(shouldNotifyNodeSync("/api/v1/admin/server/manage/save-extra", "POST"), false);
   assert.equal(shouldNotifyNodeSync("/api/v1/admin/user/update", "GET"), false);
   assert.equal(shouldNotifyNodeSync("/api/v1/admin/unrelated/user/update-preview", "POST"), false);
+});
+
+test("node edits request a targeted cache-bypassing synchronization", async () => {
+  const env = { XBOARD_DB: { prepare() { throw new Error("node edits must not need a pre-save D1 read"); } } };
+  const save = new Request("https://edge.test/api/v2/admin/server/manage/save", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id: 4, name: "updated node" })
+  });
+  assert.deepEqual(await nodeSyncIntent(save, new URL(save.url).pathname, env), { scope: "node", node_id: 4 });
+
+  const create = new Request("https://edge.test/api/v2/admin/server/manage/save", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: "new node" })
+  });
+  assert.deepEqual(await nodeSyncIntent(create, new URL(create.url).pathname, env), { scope: "all" });
 });
 
 test("node management and user lists bypass a stale KV server version", async () => {

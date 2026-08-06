@@ -80,6 +80,9 @@ test("node configuration and user snapshots use Cache API after authentication",
   assert.match(source, /node-users:\$\{node\.id\}/);
   assert.match(cache, /await cache\.match\(request\)/);
   assert.match(cache, /const pending = new Map/);
+  assert.match(source, /syncNode\(env, node, true\)/);
+  assert.match(source, /if \(fresh\) return loadNodeConfig\(env, node, pushInterval, pullInterval\)/);
+  assert.match(source, /if \(fresh\) return loadNodeUsers\(env, node\)/);
 });
 
 test("independent node and machine fanout is concurrent but capped", () => {

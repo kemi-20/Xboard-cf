@@ -7,7 +7,10 @@ type SyncEnv = InternalAuthEnv & {
   XBOARD_SERVER: Fetcher;
 };
 
-export type NodeSyncIntent = { scope: "all" } | { scope: "user"; user_id: number; old_group_id?: number };
+export type NodeSyncIntent =
+  | { scope: "all" }
+  | { scope: "node"; node_id: number }
+  | { scope: "user"; user_id: number; old_group_id?: number };
 
 export async function invalidateServerSettings(env: SyncEnv) {
   try {
@@ -46,8 +49,12 @@ export function shouldNotifyNodeSync(pathname: string, method: string) {
 
 export async function nodeSyncIntent(request: Request, pathname: string, env: SyncEnv): Promise<NodeSyncIntent | null> {
   if (!shouldNotifyNodeSync(pathname, request.method)) return null;
-  if (!pathname.includes("/user/")) return { scope: "all" };
   const input = await body<Record<string, unknown>>(request);
+  if (pathname.endsWith("/server/manage/save") || pathname.endsWith("/server/manage/update")) {
+    const nodeId = Number(input.id || 0);
+    return nodeId > 0 ? { scope: "node", node_id: nodeId } : { scope: "all" };
+  }
+  if (!pathname.includes("/user/")) return { scope: "all" };
   const rawId = input.id ?? (Array.isArray(input.ids) && input.ids.length === 1 ? input.ids[0] : undefined);
   const userId = Number(rawId || 0);
   if (!userId) return { scope: "all" };
