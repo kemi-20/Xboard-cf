@@ -252,6 +252,7 @@ test("node traffic reset scheduling stays backward compatible", () => {
   for (const asset of ["public/assets/index-CF20260713.js", "public/assets/index-CEIYH7i8.js"]) {
     const bundle = fs.readFileSync(asset, "utf8");
     const resetBlock = bundle.slice(bundle.indexOf('name:"next_reset_at"'), bundle.indexOf('name:"tags"', bundle.indexOf('name:"next_reset_at"')));
+    const codeBlock = bundle.slice(bundle.indexOf('name:"code"'), bundle.indexOf('name:"traffic_reset_mode"', bundle.indexOf('name:"code"')));
     assert.match(bundle, /value:t\.value\?SS\(t\.value,"yyyy-MM-dd'T'HH:mm:ss"\):""/);
     assert.match(bundle, /Math\.floor\(n\.getTime\(\)\/1e3\)/);
     assert.match(bundle, /grid grid-cols-2 gap-3",children:\[Q\.jsx\(\$y,\{control:x\.control,name:"code"[\s\S]*name:"traffic_reset_mode"/);
@@ -266,6 +267,10 @@ test("node traffic reset scheduling stays backward compatible", () => {
     assert.match(resetBlock, /side:"top",sideOffset:-48/);
     assert.match(resetBlock, /onOpenAutoFocus:e=>e\.preventDefault\(\)/);
     assert.doesNotMatch(resetBlock, /initialFocus/);
+    assert.doesNotMatch(resetBlock, /onInteractOutside/);
+    assert.doesNotMatch(resetBlock, /onEscapeKeyDown/);
+    assert.match(codeBlock, /children:e\("form\.code\.optional"\)/);
+    assert.doesNotMatch(codeBlock, /children:\["\(",e\("form\.code\.optional"\),"\)"\]/);
     assert.match(bundle, /disabled:"monthly"!==x\.watch\("traffic_reset_mode"\)/);
   }
   const serverTable = schema.slice(schema.indexOf("CREATE TABLE IF NOT EXISTS v2_server ("), schema.indexOf("CREATE TABLE IF NOT EXISTS v2_notice"));
