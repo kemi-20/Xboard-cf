@@ -1226,6 +1226,26 @@ test("statistics and mail templates preserve the upstream contracts", () => {
   assert.match(jobsClient, /template_name: options\.templateName/);
 });
 
+test("node management and node traffic rankings use raw server traffic without rate multiplication", () => {
+  const source = edgeSource();
+  const servers = fs.readFileSync("src/admin/servers.ts", "utf8");
+  const lastRank = source.slice(
+    source.indexOf('if (request.method === "GET" && (route === "/stat/getServerLastRank"'),
+    source.indexOf('if ((request.method === "GET" || request.method === "POST") && route === "/stat/getStatUser"')
+  );
+  const ranking = source.slice(
+    source.indexOf('if (request.method === "GET" && route === "/stat/getRanking")'),
+    source.indexOf('if (request.method === "GET" && route === "/stat/getStats")')
+  );
+
+  assert.match(servers, /out\.push\(\{\s*\.\.\.server,/);
+  assert.doesNotMatch(servers, /\bu\s*:\s*[^,\n]*\brate\b|\bd\s*:\s*[^,\n]*\brate\b/);
+  assert.match(lastRank, /COALESCE\(SUM\(stat\.u\), 0\) AS u, COALESCE\(SUM\(stat\.d\), 0\) AS d/);
+  assert.doesNotMatch(lastRank, /stat\.(?:u|d)\s*\*|\brate\s*\*/);
+  assert.match(ranking, /COALESCE\(SUM\(u\+d\),0\) AS total FROM v2_stat_server/);
+  assert.doesNotMatch(ranking, /(?:u|d)\s*\*\s*(?:server_)?rate|(?:server_)?rate\s*\*\s*(?:u|d)/);
+});
+
 test("read-only list metadata and migration validation stay batched", () => {
   const source = edgeSource();
   const orders = fs.readFileSync("src/user/orders.ts", "utf8");

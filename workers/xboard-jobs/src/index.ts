@@ -324,6 +324,7 @@ function aggregateTrafficEvents(events: any[]) {
       if (serverId) {
         const serverKey = `${serverId}:${serverType}`;
         const server = servers.get(serverKey) || { serverId, serverType, u: 0, d: 0 };
+        // Server usage and node rankings measure physical traffic; billing rates apply only to users.
         server.u += rawU; server.d += rawD;
         servers.set(serverKey, server);
       }
