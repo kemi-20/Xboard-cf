@@ -451,10 +451,9 @@ test("unused Worker-local KV helpers stay deleted", () => {
   assert.equal(fs.existsSync("../xboard-server/src/kv.ts"), false);
 });
 
-test("backend settings use memory, versioned KV snapshots and D1 fallback", () => {
+test("high-frequency backend settings use memory, versioned KV snapshots and D1 fallback", () => {
   for (const file of [
     "../xboard-server/src/db.ts",
-    "src/subscription/db.ts",
     "../xboard-jobs/src/db.ts"
   ]) {
     const source = fs.readFileSync(file, "utf8");
@@ -470,9 +469,8 @@ test("backend settings use memory, versioned KV snapshots and D1 fallback", () =
 
 test("missing settings version bypasses stale version-zero snapshots in cached backend readers", async () => {
   for (const [index, file] of [
-    [0, "../src/subscription/db.ts"],
-    [1, "../../xboard-server/src/db.ts"],
-    [2, "../../xboard-jobs/src/db.ts"]
+    [0, "../../xboard-server/src/db.ts"],
+    [1, "../../xboard-jobs/src/db.ts"]
   ]) {
     const module = await import(`${file}?missing-version=${Date.now()}-${index}`);
     module.invalidateSettingsCache?.();
@@ -501,6 +499,16 @@ test("missing settings version bypasses stale version-zero snapshots in cached b
     assert.deepEqual(requestedKeys, ["settings_version"]);
     module.invalidateSettingsCache?.();
   }
+});
+
+test("subscription content bypasses memory, KV and Cache API while reading a D1 replica", () => {
+  const source = fs.readFileSync("src/subscription/index.ts", "utf8");
+  const db = fs.readFileSync("src/subscription/db.ts", "utf8");
+  assert.match(source, /const result = await build\(request, env, token, configured\)/);
+  assert.doesNotMatch(source, /subscribe:v\d|optionalKvVersion|cached\(/);
+  assert.doesNotMatch(db, /settingsCache|settingsPromise|settings:snapshot|availableKv\.(?:get|put)/);
+  assert.match(db, /db\.withSession\("first-unconstrained"\)/);
+  assert.equal(fs.existsSync("src/subscription/kv.ts"), false);
 });
 
 test("settings saves invalidate the xboard-server instance cache", () => {

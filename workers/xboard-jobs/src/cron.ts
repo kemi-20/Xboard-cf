@@ -250,7 +250,7 @@ async function resetServerTraffic(env: CronEnv, ts: number) {
         body: JSON.stringify({ scope: "all" })
       });
     } catch {
-      // Polling and the versioned subscription cache remain the fallback.
+      // Node polling remains the fallback when the targeted synchronization fails.
     }
   }
   return resetCount;

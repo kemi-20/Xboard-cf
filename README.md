@@ -214,7 +214,7 @@ flowchart TB
 - **D1**：用户、套餐、权限组、节点配置、订单、余额、最终流量、统计和系统设置的权威数据。业务请求默认使用 `first-primary` Session，确保同一请求内顺序一致且能够读取自己的写入；Edge 内部订阅模块和两个经过审计的匿名展示接口从可用读取副本开始。
 - **KV**：Session、验证码、限流、版本号和可重建缓存；不是 Redis 数据的逐键永久替代品。
 - **Worker isolate 内存缓存**：每个 Worker 实例独立保存设置和读取模型热缓存，并用 single-flight 合并同一缓存键的并发回源。实例回收后缓存自然消失，不能保存权威数据。
-- **Cloudflare Cache API**：三个 Worker 均启用运行时 Cache API。Edge 和 Server 用它保存后台统计、节点与机器基础快照、套餐、权限组、路由、公告、知识库、订阅正文、节点配置、节点用户列表及 StatusHub 读取结果；Jobs 当前只启用能力，不缓存 Queue、Cron、流量幂等或权威写入结果。缓存键包含现有版本号，后台修改后自动切换到新键；Cache API 不可用、内容过期或读取失败时直接回到 D1/StatusHub。订阅正文不再写入 KV。
+- **Cloudflare Cache API**：三个 Worker 均启用运行时 Cache API。Edge 和 Server 用它保存后台统计、节点与机器基础快照、套餐、权限组、路由、公告、知识库、节点配置、节点用户列表及 StatusHub 读取结果；Jobs 当前只启用能力，不缓存 Queue、Cron、流量幂等或权威写入结果。缓存键包含现有版本号，后台修改后自动切换到新键；Cache API 不可用、内容过期或读取失败时直接回到 D1/StatusHub。订阅正文及其生成所需的用户、节点、模板和设置不使用内存、KV 或 Cache API 缓存，每次通过 `first-unconstrained` Session 从 D1 可用读取副本重新生成。
 - **NodeHub**：维护节点或机器的 WebSocket 连接及配置、用户热同步。
 - **StatusHub**：保存高频在线状态、设备状态和机器心跳；运行状态最多每 60 秒持久化一次，设备成员最多每 240 秒持久化一次。机器负载每 300 秒追加一个样本，并持续裁剪为最近 24 小时、最多 1440 点。
 - **TrafficStatsHub**：单个全局 DO 按 `batch_id` 去重，将用户日状态按 `user_id % 16` 分片，服务器日状态单独聚合；每小时把绝对累计值覆盖回原版 `v2_stat*` 表，不保存分析副本。

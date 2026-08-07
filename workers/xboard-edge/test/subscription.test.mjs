@@ -21,14 +21,9 @@ test("saved subscription paths are enforced instead of accepting arbitrary alias
   assert.equal(__test.matchesConfiguredSubscribePath("/s/token", ""), true);
 });
 
-test("subscription version keys degrade cleanly when KV is unavailable", async () => {
-  const kv = { async get() { throw new Error("KV unavailable"); } };
-  assert.equal(await __test.optionalKvVersion(kv, "settings_version"), "0");
-});
-
 test("subscription output reads saved settings and templates", () => {
   const source = fs.readFileSync("src/subscription/index.ts", "utf8");
-  assert.match(source, /await loadSettings\(env\.XBOARD_DB, env\.XBOARD_KV\)/);
+  assert.match(source, /loadSettings\(env\.XBOARD_DB\)/);
   assert.match(source, /FROM v2_subscribe_templates/);
   assert.match(source, /show_info_to_server_enable/);
   assert.match(source, /show_protocol_to_server_enable/);
@@ -119,13 +114,12 @@ test("Surge template subscription domain preserves a non-standard port", () => {
   assert.equal(output, "panel.example:8443");
 });
 
-test("subscription cache varies by filters and hostname", () => {
+test("subscription filters and hostname remain part of each freshly generated response", () => {
   const source = fs.readFileSync("src/subscription/index.ts", "utf8");
   assert.match(source, /searchParams\.get\("types"\)/);
   assert.match(source, /searchParams\.get\("filter"\)/);
-  assert.match(source, /url\.hostname/);
-  assert.match(source, /subscribe:v3:\$\{token\}:\$\{client\}:\$\{variant\}/);
-  assert.match(source, /templatesVersion/);
+  assert.match(source, /subscriptionUrl\(request, config, token/);
+  assert.doesNotMatch(source, /subscribe:v\d|templatesVersion|serversVersion|userVersion/);
 });
 
 test("plain browser subscriptions display inline like upstream General", () => {
@@ -255,18 +249,13 @@ test("invalid type filters behave like upstream and do not hide all nodes", () =
   assert.match(source, /requestedTypes\.length && !requestedTypes\.includes\(server\.type\)/);
 });
 
-test("subscription generation uses Cache API without writing payloads to KV", () => {
-  const source = fs.readFileSync("src/subscription/kv.ts", "utf8");
-  const compat = fs.readFileSync("src/subscription/compat.ts", "utf8");
-  assert.match(source, /import \{ sha256Hex \} from "\.\/compat\.ts"/);
-  assert.match(compat, /crypto\.subtle\.digest\("SHA-256"/);
-  assert.match(source, /await cache\.match\(request\)/);
-  assert.match(source, /const value = await load\(\)/);
-  assert.match(source, /await cache\.put\(request/);
-  assert.match(source, /freshUntil/);
-  assert.match(source, /staleUntil/);
-  assert.match(source, /catch \(error\)[\s\S]*stale\.staleUntil > Date\.now\(\)[\s\S]*return stale\.value/);
-  assert.doesNotMatch(source, /_kv\.(?:get|put)\(/);
+test("subscription generation reads D1 directly without payload or settings caches", () => {
+  const source = fs.readFileSync("src/subscription/index.ts", "utf8");
+  const db = fs.readFileSync("src/subscription/db.ts", "utf8");
+  assert.match(source, /const result = await build\(request, env, token, configured\)/);
+  assert.doesNotMatch(source, /cached\(|optionalKvVersion|subscribe:v\d/);
+  assert.doesNotMatch(db, /settingsCache|settingsPromise|settings:snapshot|\.get\("settings_version"\)/);
+  assert.equal(fs.existsSync("src/subscription/kv.ts"), false);
 });
 
 test("subscription settings decorate server names like upstream", () => {
@@ -305,7 +294,7 @@ test("saved Surge template placeholders are replaced", () => {
   assert.doesNotMatch(rendered, /\$(app_name|subs_link|proxies|proxy_group|subscribe_info)/);
 });
 
-test("subscription URL patterns, compatibility filters and cache headers follow upstream", () => {
+test("subscription URL patterns, compatibility filters and revalidation follow upstream", () => {
   assert.match(__test.replaceByPattern("https://sub[1-3].example/[uuid]"), /^https:\/\/sub[1-3]\.example\/[0-9a-f-]{36}$/);
   const configured = __test.subscriptionUrl(new Request("https://worker.example/s/token"), { subscribe_url: "https://one.example,https://two.example", subscribe_path: "s" }, "token");
   assert.match(configured, /^https:\/\/(one|two)\.example\/s\/token$/);
@@ -313,7 +302,7 @@ test("subscription URL patterns, compatibility filters and cache headers follow 
   const unsupported = [{ type: "vmess", name: "Upgrade", host: "example.com", port: 443, protocol_settings: { network: "httpupgrade" } }];
   assert.doesNotMatch(__test.output("clash", {}, { clash: "proxies: []\nproxy-groups: []\nrules: []\n" }, user, unsupported, new Request("https://sub.example/s/token"), "token"), /Upgrade/);
   const source = fs.readFileSync("src/subscription/index.ts", "utf8");
-  assert.match(source, /value => value\.status < 400/);
+  assert.match(source, /cache-control", "no-store, no-cache, must-revalidate"/);
   assert.match(source, /if-none-match/);
   assert.match(source, /status: 304/);
 });

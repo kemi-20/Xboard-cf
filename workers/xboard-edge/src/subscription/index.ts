@@ -1,10 +1,9 @@
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import type { D1Database, KVNamespace } from "./types.ts";
+import type { D1Database } from "./types.ts";
 import { fail, now, sha256Hex } from "./compat.ts";
-import { cached } from "./kv.ts";
 import { replicaDatabase, settings as loadSettings } from "./db.ts";
 
-export interface Env { XBOARD_DB: D1Database; XBOARD_KV: KVNamespace; SUBSCRIPTION_DB?: D1Database; }
+export interface Env { XBOARD_DB: D1Database; SUBSCRIPTION_DB?: D1Database; }
 
 type Client = "plain" | "shadowrocket" | "shadowsocks" | "clash" | "clashmeta" | "stash" | "surge" | "surfboard" | "singbox" | "quantumultx" | "loon";
 type Config = Record<string, any>;
@@ -1122,7 +1121,7 @@ function responseHeaders(client: Client, config: Config, user: any) {
   return { "content-type": "text/plain", "subscription-userinfo": userInfo };
 }
 
-async function build(request: Request, env: Env, token: string) {
+async function build(request: Request, env: Env, token: string, loadedConfig?: Config) {
   const user = await env.XBOARD_DB.prepare(`SELECT u.*, p.reset_traffic_method AS plan_reset_traffic_method
     FROM v2_user u LEFT JOIN v2_plan p ON p.id = u.plan_id WHERE u.token = ?`).bind(token).first<any>();
   if (!user || Number(user.banned) === 1) return { status: 403, body: "Forbidden", headers: {} };
@@ -1130,7 +1129,7 @@ async function build(request: Request, env: Env, token: string) {
   if (Number(user.transfer_enable || 0) <= 0) return { status: 403, body: "", headers: { "content-type": "text/plain" } };
 
   const [config, templateMap] = await Promise.all([
-    loadSettings(env.XBOARD_DB, env.XBOARD_KV),
+    loadedConfig || loadSettings(env.XBOARD_DB),
     templates(env)
   ]);
   const url = new URL(request.url);
@@ -1172,39 +1171,26 @@ function matchesConfiguredSubscribePath(pathname: string, configuredPath: unknow
   return token.length > 0 && !token.includes("/");
 }
 
-async function optionalKvVersion(kv: KVNamespace, key: string) {
-  try { return await kv.get(key) || "0"; }
-  catch { return "0"; }
-}
-
-export const __test = { clientOf, clientDetails, versionAtLeast, filterByClientCompatibility, regexValue, protocolPrefix, traffic, nextResetAt, decorateServers, general, generalUri, yamlProfile, clashProxy, singboxOutbound, singboxProfile, singboxCoreVersion, adaptSingboxConfig, shadowsocksProfile, textTemplateProfile, proxyLine, shadowrocketLine, quantumultXLine, loonLine, md5, serverPassword, randomizedPort, replaceByPattern, subscriptionUrl, output, responseHeaders, matchesConfiguredSubscribePath, optionalKvVersion };
+export const __test = { clientOf, clientDetails, versionAtLeast, filterByClientCompatibility, regexValue, protocolPrefix, traffic, nextResetAt, decorateServers, general, generalUri, yamlProfile, clashProxy, singboxOutbound, singboxProfile, singboxCoreVersion, adaptSingboxConfig, shadowsocksProfile, textTemplateProfile, proxyLine, shadowrocketLine, quantumultXLine, loonLine, md5, serverPassword, randomizedPort, replaceByPattern, subscriptionUrl, output, responseHeaders, matchesConfiguredSubscribePath };
 
 export async function handleSubscriptionRequest(request: Request, env: Env): Promise<Response> {
     env = { ...env, XBOARD_DB: replicaDatabase(env.SUBSCRIPTION_DB || env.XBOARD_DB) };
     const url = new URL(request.url);
+    let configured: Config | undefined;
     if (url.pathname !== "/api/v1/client/subscribe") {
-      const configured = await loadSettings(env.XBOARD_DB, env.XBOARD_KV);
+      configured = await loadSettings(env.XBOARD_DB);
       if (!matchesConfiguredSubscribePath(url.pathname, configured.subscribe_path)) return fail("Not Found", 404);
     }
     const token = url.pathname === "/api/v1/client/subscribe"
       ? url.searchParams.get("token") || ""
       : url.pathname.split("/").filter(Boolean).pop() || url.searchParams.get("token") || "";
     if (!token) return fail("Token required", 400);
-    const user = await env.XBOARD_DB.prepare("SELECT id FROM v2_user WHERE token = ?").bind(token).first<any>();
-    if (!user) return new Response("Forbidden", { status: 403 });
-    const [settingsVersion, serversVersion, userVersion, templatesVersion] = await Promise.all([
-      optionalKvVersion(env.XBOARD_KV, "settings_version"),
-      optionalKvVersion(env.XBOARD_KV, "servers_version"),
-      optionalKvVersion(env.XBOARD_KV, `user_version:${user.id}`),
-      optionalKvVersion(env.XBOARD_KV, "templates_version")
-    ]);
-    const client = clientOf(request);
-    const variant = b64url(`${url.searchParams.get("types") || "all"}|${url.searchParams.get("filter") || ""}|${url.hostname}`);
-    const cacheKey = `subscribe:v3:${token}:${client}:${variant}:${settingsVersion}:${serversVersion}:${templatesVersion}:${userVersion}`;
-    const result = await cached(env.XBOARD_KV, cacheKey, 60, () => build(request, env, token), value => value.status < 400);
+    const result = await build(request, env, token, configured);
     const etag = await bodyEtag(result.body);
     const headers = new Headers(result.headers as HeadersInit);
     headers.set("etag", etag);
+    headers.set("cache-control", "no-store, no-cache, must-revalidate");
+    headers.set("pragma", "no-cache");
     if ((request.headers.get("if-none-match") || "").split(",").map(value => value.trim()).includes(etag)) return new Response(null, { status: 304, headers });
     return new Response(result.body, { status: result.status, headers });
 }
