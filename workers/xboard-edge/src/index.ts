@@ -63,6 +63,7 @@ import { sendTestMail } from "./internal/jobs-client";
 import { invalidateServerSettings, nodeSyncIntent, notifyNodeSync } from "./internal/sync-client";
 import { handleAdminPayment, handlePaymentCallback } from "./payment/index.ts";
 import { settleOrder as settlePaymentOrder } from "./payment/settlement.ts";
+import { decodeObfuscatedApiRequest, decorateObfuscatedApiResponse, type ObfuscatedApiRequest } from "./api-obfuscation.ts";
 
 export interface Env {
   XBOARD_DB: D1Database;
@@ -3862,6 +3863,10 @@ function corsResponse(response: Response) {
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const decodedRoute = decodeObfuscatedApiRequest(request);
+    if (decodedRoute instanceof Response) return corsResponse(decodedRoute);
+    const obfuscatedRoute: ObfuscatedApiRequest | null = decodedRoute;
+    if (obfuscatedRoute) request = obfuscatedRoute.request;
     const apiRequest = new URL(request.url).pathname.startsWith("/api/");
     if (apiRequest && request.method === "OPTIONS") return corsResponse(new Response(null, { status: 204 }));
     const sessionEnv = {
@@ -3869,7 +3874,8 @@ export default {
       XBOARD_DB: primaryDatabase(env.XBOARD_DB),
       SUBSCRIPTION_DB: env.XBOARD_DB
     };
-    const response = await edgeFetch(request, sessionEnv, ctx);
+    let response = await edgeFetch(request, sessionEnv, ctx);
+    if (obfuscatedRoute) response = decorateObfuscatedApiResponse(response, obfuscatedRoute);
     return apiRequest ? corsResponse(response) : response;
   }
 };

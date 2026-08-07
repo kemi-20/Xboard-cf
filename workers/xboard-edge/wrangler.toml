@@ -14,7 +14,7 @@ binding = "XBOARD_KV"
 [assets]
 directory = "./public"
 binding = "ASSETS"
-run_worker_first = ["/", "/health", "/admin", "/admin/*", "/api/*", "/ws"]
+run_worker_first = ["/", "/health", "/admin", "/admin/*", "/api/*", "/ws", "/*/*"]
 
 [[services]]
 binding = "XBOARD_SERVER"
