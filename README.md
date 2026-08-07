@@ -16,7 +16,9 @@ XBoard CF 是基于 Cloudflare Workers、D1、KV、Queues、Durable Objects 和 
 - Xboard-Node 单节点模式、机器模式和 WebSocket 热同步
 - 节点在线状态、机器负载、负载历史折线图和网络速率展示
 - D1 持久化业务数据，KV 缓存临时状态
-- Queue 异步处理流量，Cron Worker 执行周期任务
+- Queue 异步处理流量与通知，`xboard-jobs` 内置 Cron 执行周期任务
+- 可选的时间戳 + Base64URL API 路径混淆入口，原始 `/api/v1/*` 接口保持兼容
+- 节点一次性流量上限与按月自动重置，后台修改节点后立即失效相关配置缓存
 - 后台联合导入原版 SQLite3 与 Redis RDB，平滑切换到 D1 + KV
 - 导出完整 XBoard-CF 或原版兼容 SQLite3，并支持迁移失败后按快照一键还原
 - 后台全局搜索仅展示当前可用功能，并可直接打开数据迁移
@@ -43,7 +45,7 @@ https://你的域名/admin
 /admin#/user/manage
 ```
 
-后台路径可在“系统管理 -> 系统配置 -> 安全设置”中修改。修改后应使用新的安全路径访问后台；菜单中的“数据迁移”和全局搜索结果会自动使用当前路径。
+后台路径可在“系统管理 -> 系统配置 -> 安全设置”中修改。修改后应使用新的安全路径访问后台；“系统管理 -> 系统设置”中的“数据迁移”和全局搜索结果会自动使用当前路径。
 
 主题配置和任意 PHP 插件管理不兼容 Cloudflare-native 运行时，因此对应菜单及全局搜索结果仍隐藏。支付配置已使用固定的原生 Provider Registry 恢复，后台“支付配置”菜单可直接管理 AlipayF2F、BTCPay、Coinbase Commerce、Coinbase Business、CoinPayments、EPay、MGate 和 Stripe。
 
@@ -62,7 +64,7 @@ https://你的域名/admin
 
 | Worker | 根目录 | 职责 |
 | --- | --- | --- |
-| `xboard-edge` | `workers/xboard-edge` | 后台 WebUI、后台 API、用户 API、订阅校验与格式生成、节点接口代理 |
+| `xboard-edge` | `workers/xboard-edge` | 后台 WebUI、后台与用户 API、支付、迁移、订阅生成、API 路径混淆和节点接口代理 |
 | `xboard-server` | `workers/xboard-server` | 节点 HTTP、机器模式、状态上报和 WebSocket |
 | `xboard-jobs` | `workers/xboard-jobs` | Queue 消费、权威流量写入、Outbox、TrafficStatsHub、通知发送和定时维护 |
 
@@ -74,7 +76,7 @@ Worker 之间没有依赖仓库根目录的共享运行时代码，因此 Cloudf
 
 | 资源 | 名称或绑定 | 用途 |
 | --- | --- | --- |
-| D1 | `xboard-db` / `XBOARD_DB` | 用户、套餐、节点、订单、设置、流量和统计等正式业务数据；新建数据库默认位于 APAC 并开启读取复制 |
+| D1 | `xboard-db` / `XBOARD_DB` | 用户、套餐、节点、订单、设置、流量和统计等正式业务数据；新建数据库默认使用 APAC 位置提示并尝试开启读取复制 |
 | KV | `xboard-kv` / `XBOARD_KV` | Session、验证码、限流、缓存和版本标记 |
 | Queue | `traffic-events` | 节点流量异步入库，由 `xboard-jobs` 消费 |
 | Queue | `notification-events` | 邮件与 Telegram 通知任务，由 `xboard-jobs` 按消息类型消费 |
@@ -105,7 +107,7 @@ flowchart TB
   end
 
   subgraph Entry["主入口与静态资源"]
-    Edge["xboard-edge<br/>后台 WebUI + 后台 API + 用户 API<br/>订阅生成 / 认证 / 支付 / 设置 / 迁移 / 节点协议代理"]
+    Edge["xboard-edge<br/>后台 WebUI + 后台 API + 用户 API<br/>订阅生成 / 路径混淆 / 支付 / 设置 / 迁移 / 节点协议代理"]
     Assets["Cloudflare Static Assets<br/>官方后台构建产物 / 语言包 / 图片"]
   end
 
@@ -151,7 +153,7 @@ flowchart TB
 
   subgraph Data["数据与缓存层"]
     Memory["Worker isolate 内存缓存<br/>设置与读取模型热缓存<br/>同键并发请求合并"]
-    CacheAPI["Cloudflare Cache API<br/>统计 / 配置 / 内容 / 订阅<br/>StatusHub 读取结果"]
+    CacheAPI["Cloudflare Cache API<br/>统计 / 配置 / 公告 / 知识库<br/>节点快照 / StatusHub 读取结果"]
     KV["KV: xboard-kv<br/>Session / 验证码 / 限流<br/>版本号 / 设置快照"]
     D1["D1: xboard-db<br/>用户 / 套餐 / 节点 / 订单 / 余额<br/>设置 / 最终流量 / 统计 / 审计"]
     PaymentTx["v2_payment_transactions<br/>Provider 会话 / 事件幂等<br/>不保存完整 webhook"]
@@ -163,7 +165,7 @@ flowchart TB
   Server -. "内存 -> KV -> D1" .-> Memory
   Jobs -. "内存 -> KV -> D1" .-> Memory
   Memory -. "版本快照；失败时跳过" .-> KV
-  Edge -. "统计、配置、内容与订阅" .-> CacheAPI
+  Edge -. "统计、配置与公开内容" .-> CacheAPI
   Server -. "节点配置与用户快照" .-> CacheAPI
   CacheAPI -. "未命中、过期或不可用" .-> D1
   CacheAPI -. "状态缓存未命中" .-> StatusHub
@@ -225,6 +227,32 @@ flowchart TB
 原版 `v2_stat_user`、`v2_stat_server` 和 `v2_stat` 继续保留。TrafficStatsHub 使用绝对值 `ON CONFLICT ... DO UPDATE SET value = excluded.value` 物化，重复执行不会叠加；`v2_stat` 只覆盖 `transfer_used`，不会改写收入、订单、佣金或注册统计。SQLite 导出前会强制补投 Outbox 和物化，失败时导出中断；完整迁移、覆盖导入和回滚会清空 Outbox 与 DO 状态，再从切换后的原版统计表建立当日基线。
 
 后台概览缓存 15–30 秒，Queue 统计和流量排行缓存 60 秒，历史排行与内容快照缓存 5–10 分钟；机器负载趋势缓存 60 秒。节点配置按 `servers_version` 缓存 300 秒，节点用户列表仅缓存 30 秒，认证、流量上报、设备报告、余额和限额判断从不缓存。Cron 只有一个每分钟 Trigger，并使用一个共享 D1 所有权锁；健康心跳 `schedule:last_check_at` 最多每 300 秒刷新一次。WebSocket 在线路由 KV 只在连接变化、断开或持续在线满 6 小时时刷新，不随每次 `pong` 写入。
+
+## API 路径混淆
+
+`xboard-edge` 保留全部原始 `/api/v1/*` 路由，同时支持可选的时间戳混淆入口：
+
+```text
+/<base64url(Unix 秒时间戳)>/<base64url(api/v1 后的路径)>[/剩余路径]
+```
+
+例如客户端要请求 `/api/v1/guest/comm/config`，第二段只编码 `guest/comm/config`。时间戳必须是请求发出时的 Unix 秒，服务端接受前后 300 秒误差。HTTP 方法、Authorization、请求体和外层查询参数都会原样交给现有业务处理器；如果编码路径自身已经包含查询字符串，则以编码路径中的查询参数为准。合法响应会附带 `x-original-path`、`x-proxy-server` 和 `x-param-handler` 诊断 Header。
+
+这只是降低固定 API 路径特征的传输层混淆，不是加密、签名或新的鉴权方式。TLS、登录 Token、节点 Token、权限校验和限流仍由原接口负责；过期时间戳、非法 Base64URL、控制字符和路径穿越会被拒绝。普通后台、订阅、静态资源及原始 API 路径不会被改写。
+
+Static Assets 配置中的 `run_worker_first` 必须保留 `"/*/*"`，否则随机的双段混淆路径会先被静态资源层处理，无法进入 Worker。该通配规则只负责把请求交给 Edge，业务层仍只接受解码后位于 `/api/v1/` 下的路径。
+
+## 节点流量限制与重置
+
+节点表的 `transfer_enable` 保存节点可用流量字节数，`0` 表示不限制；节点累计上行与下行达到该值后，现有节点限制逻辑会生效。它统计的是面板收到的 `u + d`，不会根据服务器厂商的单向或双向计费规则自动折算。若服务商按进出方向都计费，应由管理员按服务商口径换算后填写额度。
+
+`v2_server.next_reset_at` 控制节点月度重置：
+
+- `transfer_enable = 0`：不限制，不执行月度重置。
+- `transfer_enable > 0` 且 `next_reset_at` 为空：一次性额度，不自动重置。
+- `transfer_enable > 0` 且 `next_reset_at` 有未来时间：到期后清零节点 `u/d`，记录重置日志，并把下次时间自动顺延一个月。
+
+时间以 Unix 秒保存在 D1，后台输入和显示沿用用户到期时间选择器的时区与格式。旧数据库没有 `next_reset_at` 时会自动补列；原有只设置了 `transfer_enable` 的节点自然保持一次性额度。后台保存、启停或删除节点后会递增对应版本并通知 Server，使面板读取立即看到 D1 新值，同时节点侧短缓存被主动失效；通知失败时仍有最长 20 秒的认证上下文兜底过期。
 
 ## 邮件服务
 
@@ -337,9 +365,26 @@ workflow 的运行摘要会生成三个 Worker 的 Builds 设置直达链接和�
 
 Cloudflare 官方说明：[Workers Builds](https://developers.cloudflare.com/workers/ci-cd/builds/) 和 [GitHub integration](https://developers.cloudflare.com/workers/ci-cd/builds/git-integration/github-integration/)。
 
+### Secret 与公开仓库
+
+仓库中的 `wrangler.toml` 只能保存 Worker 名称、公开绑定名称和资源逻辑名称。以下内容不得提交到 Git：
+
+```text
+Cloudflare Account ID
+D1 Database ID
+KV Namespace ID
+Cloudflare API Token
+支付 Provider 私钥、API Key 与 Webhook Secret
+邮件服务 API Key
+INTERNAL_SYNC_TOKEN
+节点 server_token 的生产值
+```
+
+首次部署脚本只在 Action 的临时工作区填入资源 ID。生产 Secret 应使用 GitHub Actions Secret、Cloudflare Dashboard 或 `wrangler secret put` 注入。完整 SQLite 导出是唯一有意包含支付 Provider 凭据的文件，因此它不是可公开分享的普通数据备份。
+
 ## 从原版迁移
 
-登录后台后打开“系统管理 -> 数据迁移”，也可以在顶部全局搜索中搜索“数据迁移”，或直接打开：
+登录后台后打开“系统管理 -> 系统设置 -> 数据迁移”（位于订阅模板下方），也可以在顶部全局搜索中搜索“数据迁移”，或直接打开：
 
 ```text
 https://你的域名/admin/migration
@@ -379,6 +424,7 @@ framework/schedule 锁
 npm install
 npm run typecheck
 npm test
+npm run deploy:dry-run
 ```
 
 检查单个 Worker：
@@ -392,6 +438,8 @@ npx wrangler deploy --dry-run --outdir ../../.tmp/xboard-edge-dry-run
 ```
 
 所有临时脚本、上游仓库和 dry-run 产物应放在 `.tmp/`，不得提交。
+
+测试和 dry-run 默认只验证本地代码与打包结果，不应连接生产 D1、KV、Queue 或 Durable Object。支付协议测试使用本地 mock Provider 和签名夹具，不会创建真实交易；真实商户权限、风控和正式环境回调仍需部署者用支付方测试环境或小额订单最终验收。
 
 ## 兼容基线
 
@@ -416,6 +464,8 @@ Cloudflare 内部可以使用 D1、KV、Queues 和 Durable Objects 替代 Larave
 4. `xboard-jobs` 是否绑定 `traffic-events`、`notification-events` 及其 DLQ，并拥有唯一的每分钟 Cron Trigger。
 5. Cloudflare Worker 当前的 `XBOARD_DB` 和 `XBOARD_KV` 绑定是否仍指向首次部署创建的资源。
 6. 修改系统设置后短暂等待缓存版本传播；KV 故障时系统应自动回源 D1。
+7. 混淆 API 返回静态资源 404 时，确认 Edge 的 Static Assets `run_worker_first` 仍包含 `"/*/*"`，且客户端时间与标准时间相差不超过 300 秒。
+8. 后台节点修改已经保存但节点仍使用旧配置时，检查 `XBOARD_SERVER` Service Binding、内部同步鉴权和 Server 日志；主动失效失败时最多等待 20 秒，不应等待完整的 300 秒节点配置 TTL。
 
 ## 暂未启用的功能
 

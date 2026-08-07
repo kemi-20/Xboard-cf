@@ -2,6 +2,10 @@
 
 Independent Cloudflare Worker implementing the XBoard node protocol on D1, KV, Queues, and Durable Objects.
 
+`NodeHub` owns hibernating WebSocket connections and ordered configuration/user synchronization. The global `StatusHub` owns live node, machine, and device state plus the rolling 24-hour machine-load series. Traffic reports are split into bounded events and published to `traffic-events`; this Worker does not perform final traffic accounting itself.
+
+Successful node, machine, and machine-node authentication lookups use a bounded 20-second isolate cache with concurrent-load coalescing. Admin changes invalidate it through internal sync; misses and authorization failures are not cached. Config/user responses may use Cache API, but authentication, traffic reports, device reports, and WebSocket health decisions remain uncached. D1 or Cache API failure must not turn an invalid credential into an accepted one.
+
 Compatibility baseline:
 
 ```text
