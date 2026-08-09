@@ -21,7 +21,7 @@ export async function planById(env: PlanEnv, id: unknown) {
 export async function adminPlanRows<E extends PlanEnv>(env: E, deps: PlanDeps<E>) {
   const current = now();
   const [planResult, groupResult, countResult] = await Promise.all([
-    env.XBOARD_DB.prepare("SELECT * FROM v2_plan ORDER BY sort DESC, id DESC LIMIT 1000").all<Record<string, any>>(),
+    env.XBOARD_DB.prepare("SELECT * FROM v2_plan ORDER BY sort ASC, id ASC LIMIT 1000").all<Record<string, any>>(),
     env.XBOARD_DB.prepare("SELECT id, name FROM v2_server_group").all<{ id: number; name: string }>(),
     env.XBOARD_DB.prepare(`SELECT plan_id, COUNT(*) AS users_count,
         SUM(CASE WHEN expired_at IS NULL OR expired_at > ? THEN 1 ELSE 0 END) AS active_users_count

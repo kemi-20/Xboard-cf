@@ -1186,6 +1186,14 @@ test("audited notice, ranking and migration edge cases match upstream", () => {
   assert.match(migration, /adminUsers\.has\(Number\(row\.user_id/);
 });
 
+test("plan sorting persists and reads the same ascending order as upstream", () => {
+  const source = edgeSource();
+  const plans = fs.readFileSync("src/admin/plans.ts", "utf8");
+  assert.match(source, /UPDATE \$\{table\} SET sort = \?, updated_at = \? WHERE id = \?/);
+  assert.match(plans, /SELECT \* FROM v2_plan ORDER BY sort ASC, id ASC LIMIT 1000/);
+  assert.doesNotMatch(plans, /SELECT \* FROM v2_plan ORDER BY sort DESC/);
+});
+
 test("D1 keeps upstream lookup indexes used by tokens and gift cards", () => {
   const schema = fs.readFileSync("../../schema/d1.sql", "utf8");
   assert.match(schema, /idx_personal_access_tokens_tokenable ON personal_access_tokens\(tokenable_type, tokenable_id\)/);
