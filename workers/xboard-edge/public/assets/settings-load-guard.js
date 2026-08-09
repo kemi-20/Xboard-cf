@@ -11,6 +11,7 @@
     ["/config/system/subscribe-template", "subscribe_template"]
   ]);
   const readyKeys = new Set();
+  const composingControls = new WeakSet();
   const emailCredentialNames = new Set(["email_username", "email_password", "email_from_address"]);
   const controlSelector = "input,textarea,select,button[role=\"switch\"],button[role=\"combobox\"]";
 
@@ -135,7 +136,31 @@
       event.stopImmediatePropagation();
     }
   };
+
+  const settingsControlFromEvent = event => {
+    const control = event.target instanceof Element ? event.target.closest(controlSelector) : null;
+    return control && isSettingsControl(control) ? control : null;
+  };
+
+  document.addEventListener("compositionstart", event => {
+    const control = settingsControlFromEvent(event);
+    if (control) composingControls.add(control);
+  }, true);
+  document.addEventListener("compositionend", event => {
+    const control = settingsControlFromEvent(event);
+    if (!control) return;
+    composingControls.delete(control);
+    queueMicrotask(() => {
+      if (document.contains(control)) control.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }, true);
+
+  const blockComposingChange = event => {
+    const control = settingsControlFromEvent(event);
+    if (control && composingControls.has(control)) event.stopImmediatePropagation();
+  };
   for (const eventName of ["beforeinput", "input", "change", "click"]) {
+    document.addEventListener(eventName, blockComposingChange, true);
     document.addEventListener(eventName, blockPrematureChange, true);
   }
 

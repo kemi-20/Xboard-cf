@@ -2581,6 +2581,12 @@ async function adminApi(request: Request, env: Env, path: string) {
       input.email_driver = String(input.email_driver || "").toLowerCase();
       if (!["maileroo", "brevo"].includes(input.email_driver)) return fail("邮件服务商只能是 Maileroo 或 Brevo", 422, 422);
     }
+    if (Object.prototype.hasOwnProperty.call(input, "currency_symbol")) {
+      const symbol = String(input.currency_symbol ?? "").trim();
+      if (!symbol) return fail("货币符号不能为空", 422, 422);
+      if (Array.from(symbol).length > 4) return fail("货币符号最多为4个字符", 422, 422);
+      input.currency_symbol = symbol;
+    }
     const ts = now();
     const emailAliases: Record<string, string> = {
       email_username: "resend_from_name", resend_from_name: "email_username",

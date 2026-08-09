@@ -1299,6 +1299,15 @@ test("system settings stay locked until their server values load", () => {
   assert.match(guard, /email_from_address/);
   assert.match(guard, /section-xboard-mail new-password/);
   assert.match(guard, /xboardRequiresUserUnlock/);
+  assert.match(guard, /composingControls = new WeakSet/);
+  assert.match(guard, /compositionstart/);
+  assert.match(guard, /compositionend/);
+  assert.match(guard, /blockComposingChange/);
+  assert.match(guard, /composingControls\.has\(control\)/);
+  assert.match(guard, /dispatchEvent\(new Event\("input", \{ bubbles: true \}\)\)/);
+  assert.match(source, /hasOwnProperty\.call\(input, "currency_symbol"\)/);
+  assert.match(source, /货币符号不能为空/);
+  assert.match(source, /Array\.from\(symbol\)\.length > 4/);
 });
 
 test("admin monetary displays follow the configured currency symbol", () => {
