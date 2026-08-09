@@ -346,6 +346,7 @@ test("Stripe creates hosted Checkout and only accepts a paid, re-read Session", 
   const sessionId = "cs_test_local";
   const result = await withFetch(async (input, init = {}) => {
     const url = new URL(input);
+    assert.equal(init.redirect, "manual");
     assert.equal(new Headers(init.headers).get("stripe-version"), providerTest.STRIPE_API_VERSION);
     if (init.method === "POST") {
       const params = new URLSearchParams(String(init.body));

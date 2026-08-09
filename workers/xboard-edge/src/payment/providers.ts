@@ -133,7 +133,7 @@ async function providerFetch(input: RequestInfo | URL, init: RequestInit = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), PROVIDER_TIMEOUT_MS);
   try {
-    const response = await fetch(input, { ...init, signal: controller.signal, redirect: "error" });
+    const response = await fetch(input, { ...init, signal: controller.signal, redirect: "manual" });
     const declaredLength = Number(response.headers.get("content-length") || 0);
     if (declaredLength > MAX_PROVIDER_RESPONSE_BYTES) throw new PaymentError("支付服务响应过大", 502);
     let raw = "";
