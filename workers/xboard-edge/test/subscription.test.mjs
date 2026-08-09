@@ -363,6 +363,15 @@ test("general URI credentials follow upstream formats", () => {
   assert.match(tuic, new RegExp(`^tuic://${user.uuid}:${user.uuid}@node\\.example\\.com:443\\?`));
 });
 
+test("General VLESS URI uses RFC 3986 encoding for the node name", () => {
+  const uri = __test.generalUri(
+    { uuid: "00000000-0000-4000-8000-000000000000" },
+    { type: "vless", name: "US 2 + ~!*()", host: "node.example.com", port: 443, protocol_settings: { tls: 0 } }
+  );
+  assert.match(uri, /#US%202%20%2B%20~%21%2A%28%29$/);
+  assert.doesNotMatch(uri, /#US\+2/);
+});
+
 test("ClashMeta VLESS output includes Reality, transport and multiplex settings", () => {
   const proxy = __test.clashProxy({ uuid: "00000000-0000-4000-8000-000000000000" }, realityVless);
   assert.equal(proxy.tls, true);

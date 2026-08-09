@@ -42,10 +42,6 @@ function rawUrlEncode(value: unknown) {
   return encodeURIComponent(String(value)).replace(/[!'()*]/g, character => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
 }
 
-function formUrlEncode(value: unknown) {
-  return rawUrlEncode(value).replace(/%20/g, "+").replace(/~/g, "%7E");
-}
-
 function leftRotate(value: number, amount: number) {
   return (value << amount) | (value >>> (32 - amount));
 }
@@ -363,7 +359,7 @@ function trojanNetworkFields(ps: Config, fallbackHost: string) {
 function generalUri(user: any, server: any) {
   const ps = server.protocol_settings || {};
   const password = server.password || user.uuid;
-  const name = server.type === "vless" ? formUrlEncode(server.name) : rawUrlEncode(server.name);
+  const name = rawUrlEncode(server.name);
   const fingerprint = tlsFingerprint(ps);
   const address = hostOf(server);
   if (server.type === "shadowsocks") {
