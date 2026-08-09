@@ -909,6 +909,8 @@ async function guestApi(request: Request, env: Env, path: string) {
       app_description: pickSetting(all, "app_description", ""),
       app_url: pickSetting(all, "app_url", ""),
       logo: pickSetting(all, "logo", ""),
+      currency: pickSetting(all, "currency", "CNY"),
+      currency_symbol: pickSetting(all, "currency_symbol", "¥"),
       is_recaptcha: Number(Boolean(pickSetting(all, "captcha_enable", 0)))
     });
   }
@@ -3652,6 +3654,7 @@ async function adminUi(securePath: string) {
     <script src="/locales/zh-CN.js"></script>
     <script src="/locales/ru-RU.js"></script>
     <script src="/assets/settings-load-guard.js"></script>
+    <script src="/assets/currency-symbol.js"></script>
     <script type="module" crossorigin src="/assets/index-CF20260713.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-DiYa-_z_.css">
     <link rel="stylesheet" href="/assets/mobile-node-dialog-fix.css">

@@ -1301,6 +1301,26 @@ test("system settings stay locked until their server values load", () => {
   assert.match(guard, /xboardRequiresUserUnlock/);
 });
 
+test("admin monetary displays follow the configured currency symbol", () => {
+  const source = fs.readFileSync("src/index.ts", "utf8");
+  const html = fs.readFileSync("public/index.html", "utf8");
+  const adapter = fs.readFileSync("public/assets/currency-symbol.js", "utf8");
+  for (const document of [source, html]) {
+    assert.match(document, /<script src="\/assets\/currency-symbol\.js"><\/script>/);
+    assert.ok(document.indexOf("currency-symbol.js") < document.indexOf("index-CF20260713.js"));
+  }
+  assert.match(adapter, /fetch\("\/api\/v1\/guest\/comm\/config"/);
+  assert.match(adapter, /payload\?\.data\?\.currency_symbol/);
+  assert.match(adapter, /input\.name === "currency_symbol"/);
+  assert.match(adapter, /NodeFilter\.SHOW_TEXT/);
+  assert.match(adapter, /script,style,textarea,input,pre,code/);
+  assert.match(adapter, /cache: "no-store"/);
+  const guestConfigStart = source.indexOf('path === "/api/v1/guest/comm/config"');
+  const guestConfig = source.slice(guestConfigStart, source.indexOf("return json", guestConfigStart));
+  assert.match(guestConfig, /currency: pickSetting\(all, "currency", "CNY"\)/);
+  assert.match(guestConfig, /currency_symbol: pickSetting\(all, "currency_symbol", "¥"\)/);
+});
+
 test("system settings skip subscription template reads unless that section is requested", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
   const start = source.indexOf("async function adminConfig");
