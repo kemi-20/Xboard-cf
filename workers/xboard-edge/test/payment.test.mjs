@@ -832,25 +832,19 @@ test("enabled payment channels reject credential and callback-domain changes bef
   assert.deepEqual(raw.exec("SELECT enable,notify_domain FROM v2_payment WHERE id=1")[0].values[0], [0, "https://payments.example.com"]);
 });
 
-test("payment configuration update stays atomic when a checkout transaction appears after the precheck", async () => {
+test("disabled payment channels can rotate credentials without losing paid history", async () => {
   invalidateSettingsCache();
-  const { raw } = await paymentDatabase();
+  const { raw, d1 } = await paymentDatabase();
   raw.run("UPDATE v2_payment SET enable=0 WHERE id=1");
-  class RacingSqlD1 extends SqlD1 {
-    inserted = false;
-    query(statement) {
-      const result = super.query(statement);
-      if (!this.inserted && /SELECT 1 AS found FROM v2_payment_transactions/.test(statement.sql)) {
-        this.inserted = true;
-        this.db.run(`INSERT INTO v2_payment_transactions(
-          order_id,trade_no,payment_id,provider,expected_amount,currency,idempotency_key,status,created_at,updated_at
-        ) VALUES (9,'ORDER-20260729',1,'Stripe:1',1100,'CNY','race-key','pending',1,1)`);
-      }
-      return result;
-    }
-  }
-  paymentTest.resetPaymentSchema();
-  const env = { XBOARD_DB: new RacingSqlD1(raw), XBOARD_KV: emptyKv };
+  const env = { XBOARD_DB: d1, XBOARD_KV: emptyKv };
+  await paymentTest.ensurePaymentSchema(env);
+  raw.run("UPDATE v2_order SET payment_id=1,handling_amount=100 WHERE id=9");
+  raw.run("INSERT INTO v2_order VALUES (10,7,'ORDER-PAID',3,1000,1,100,0)");
+  raw.run(`INSERT INTO v2_payment_transactions(
+    order_id,trade_no,payment_id,provider,expected_amount,currency,idempotency_key,status,created_at,updated_at
+  ) VALUES
+    (9,'ORDER-20260729',1,'Stripe:1',1100,'CNY','pending-key','ready',1,1),
+    (10,'ORDER-PAID',1,'Stripe:1',1100,'CNY','paid-key','paid',1,1)`);
   const response = await handleAdminPayment(new Request("https://panel.example.com/api/v1/admin/payment/save", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -863,8 +857,11 @@ test("payment configuration update stays atomic when a checkout transaction appe
       handling_fee_percent: 0
     })
   }), env, "/payment/save");
-  assert.equal(response.status, 409);
-  assert.equal(JSON.parse(raw.exec("SELECT config FROM v2_payment WHERE id=1")[0].values[0][0]).stripe_secret_key, "sk_test_local");
+  assert.equal(response.status, 200);
+  assert.equal(JSON.parse(raw.exec("SELECT config FROM v2_payment WHERE id=1")[0].values[0][0]).stripe_secret_key, "sk_test_race");
+  assert.deepEqual(raw.exec("SELECT payment_id,handling_amount FROM v2_order WHERE id=9")[0].values[0], [null, 0]);
+  assert.deepEqual(raw.exec("SELECT payment_id,handling_amount FROM v2_order WHERE id=10")[0].values[0], [1, 100]);
+  assert.deepEqual(raw.exec("SELECT trade_no,status FROM v2_payment_transactions")[0].values, [["ORDER-PAID", "paid"]]);
 });
 
 test("checkout detects a channel change before provider I/O and removes its unused claim", async () => {

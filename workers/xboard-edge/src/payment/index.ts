@@ -266,20 +266,32 @@ export async function handleAdminPayment(request: Request, env: PaymentEnv, rout
       if (changesTransport && Number(existing.enable)) {
         return fail("请先停用支付渠道再修改网关密钥或通知域名", 409, 409);
       }
-      if (changesTransport && await hasPaymentReferences(env, paymentId)) {
-        return fail("该渠道已有支付记录，网关密钥和通知域名不可修改；请新建渠道", 409, 409);
-      }
-      const result = await env.XBOARD_DB.prepare(`UPDATE v2_payment
+      if (changesTransport) await ensurePaymentSchema(env);
+      const updatePayment = env.XBOARD_DB.prepare(`UPDATE v2_payment
         SET name=?,payment=?,config=?,icon=?,handling_fee_fixed=?,handling_fee_percent=?,notify_domain=?,updated_at=?
         WHERE id=?
-          AND (?=0 OR (enable=0
-            AND NOT EXISTS (SELECT 1 FROM v2_payment_transactions WHERE payment_id=v2_payment.id)
-            AND NOT EXISTS (SELECT 1 FROM v2_order WHERE payment_id=v2_payment.id)))`)
+          AND (?=0 OR enable=0)`)
         .bind(name, method, JSON.stringify(config), String(input.icon || provider.icon), fixed, percent, notifyDomain,
-          timestamp, paymentId, changesTransport ? 1 : 0).run();
+          timestamp, paymentId, changesTransport ? 1 : 0);
+      const statements = [updatePayment];
+      if (changesTransport) {
+        statements.push(
+          env.XBOARD_DB.prepare(`UPDATE v2_order
+            SET payment_id=NULL,handling_amount=0,updated_at=?
+            WHERE payment_id=? AND status=0
+              AND EXISTS (SELECT 1 FROM v2_payment WHERE id=? AND enable=0)
+              AND NOT EXISTS (SELECT 1 FROM v2_payment_transactions
+                WHERE order_id=v2_order.id AND payment_id=? AND status IN ('paid','paid_unapplied'))`)
+            .bind(timestamp, paymentId, paymentId, paymentId),
+          env.XBOARD_DB.prepare(`DELETE FROM v2_payment_transactions
+            WHERE payment_id=? AND status NOT IN ('paid','paid_unapplied')
+              AND EXISTS (SELECT 1 FROM v2_payment WHERE id=? AND enable=0)`).bind(paymentId, paymentId)
+        );
+      }
+      const [result] = await env.XBOARD_DB.batch(statements);
       if (Number((result.meta as any)?.changes || 0) !== 1) {
         return changesTransport
-          ? fail("支付渠道状态或交易记录已变化，请刷新后重试", 409, 409)
+          ? fail("支付渠道状态已变化，请刷新后重试", 409, 409)
           : fail("支付方式不存在", 400, 400202);
       }
     } else {
@@ -623,5 +635,6 @@ export const __test = {
   validatePaymentActivation,
   transactionProvider,
   transactionProviderMatches,
+  ensurePaymentSchema,
   resetPaymentSchema() { paymentSchemaPromise = null; }
 };
