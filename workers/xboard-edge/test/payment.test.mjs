@@ -24,6 +24,8 @@ const context = {
   userId: 7,
   userEmail: "user@example.com",
   appName: "XBoard",
+  planName: "Smart",
+  period: "yearly",
   notifyUrl: "https://panel.example.com/api/v1/guest/payment/notify/Test/uuid",
   returnUrl: "https://panel.example.com/#/order/ORDER-20260729",
   idempotencyKey: "9f12cf5a-9e7e-4b20-8e65-c5daac5bc0f9"
@@ -352,6 +354,7 @@ test("Stripe creates hosted Checkout and only accepts a paid, re-read Session", 
       const params = new URLSearchParams(String(init.body));
       assert.equal(params.get("mode"), "payment");
       assert.equal(params.get("line_items[0][price_data][unit_amount]"), "12345");
+      assert.equal(params.get("line_items[0][price_data][product_data][name]"), "XBoard - 订阅 - Smart（1年）");
       assert.equal(params.get("payment_intent_data[statement_descriptor_suffix]"), "XBOARD SERVICE");
       assert.equal(new Headers(init.headers).get("idempotency-key"), context.idempotencyKey);
       return Response.json({ id: sessionId, url: "https://checkout.stripe.com/c/pay/local", expires_at: 1_800_000_000 });

@@ -505,6 +505,8 @@ export async function checkoutPayment(
       userId: Number(user.id),
       userEmail: String(user.email || ""),
       appName: String(all.app_name || "XBoard"),
+      planName: String(order.plan_name || ""),
+      period: String(order.period || ""),
       notifyUrl: `${notifyBase}${callbackPath}`,
       returnUrl,
       idempotencyKey: String(transaction.idempotency_key)

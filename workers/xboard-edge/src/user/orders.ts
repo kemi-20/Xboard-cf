@@ -193,7 +193,10 @@ export async function handleUserOrders<E extends OrderEnv>(
       return ok(tradeNo);
     }
     if (request.method === "POST" && route === "/order/checkout") {
-      const order = await env.XBOARD_DB.prepare("SELECT * FROM v2_order WHERE user_id = ? AND trade_no = ? AND status = 0").bind(userId, String(input.trade_no || "")).first<Record<string, any>>();
+      const order = await env.XBOARD_DB.prepare(`SELECT o.*,p.name AS plan_name
+        FROM v2_order o LEFT JOIN v2_plan p ON p.id=o.plan_id
+        WHERE o.user_id=? AND o.trade_no=? AND o.status=0`)
+        .bind(userId, String(input.trade_no || "")).first<Record<string, any>>();
       if (!order) return fail("订单不存在或已支付", 400, 400);
       return checkoutPayment(request, env, order, user, input.method, (paidOrder, callbackNo) => deps.settleOrder(env, paidOrder, callbackNo));
     }

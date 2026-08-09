@@ -25,6 +25,8 @@ export type CheckoutContext = {
   userId: number;
   userEmail: string;
   appName: string;
+  planName?: string;
+  period?: string;
   notifyUrl: string;
   returnUrl: string;
   idempotencyKey: string;

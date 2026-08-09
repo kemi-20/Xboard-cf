@@ -764,6 +764,26 @@ async function verifyStripeSignature(raw: string, header: string, secret: string
   return signatures.some(signature => constantTimeEqual(signature.toLowerCase(), expected));
 }
 
+const stripePeriodLabels: Record<string, string> = {
+  monthly: "1个月",
+  quarterly: "3个月",
+  half_yearly: "6个月",
+  yearly: "1年",
+  two_yearly: "2年",
+  three_yearly: "3年",
+  onetime: "一次性",
+  reset_traffic: "流量重置"
+};
+
+function stripeProductName(context: CheckoutContext) {
+  const base = `${context.appName} - 订阅`;
+  const planName = String(context.planName || "").trim();
+  if (!planName) return base;
+  const period = stripePeriodLabels[String(context.period || "")] || String(context.period || "").trim();
+  const title = `${base} - ${planName}${period ? `（${period}）` : ""}`;
+  return Array.from(title).slice(0, 250).join("");
+}
+
 const stripe: PaymentProvider = {
   method: "Stripe",
   name: "Stripe",
@@ -798,7 +818,7 @@ const stripe: PaymentProvider = {
       "line_items[0][quantity]": "1",
       "line_items[0][price_data][currency]": context.currency.toLowerCase(),
       "line_items[0][price_data][unit_amount]": String(stripeMinorAmount(context.amount, context.currency)),
-      "line_items[0][price_data][product_data][name]": `${context.appName} - 订阅`
+      "line_items[0][price_data][product_data][name]": stripeProductName(context)
     });
     const descriptor = text(context.config, "stripe_statement_descriptor");
     if (descriptor) params.set("payment_intent_data[statement_descriptor_suffix]", descriptor);
