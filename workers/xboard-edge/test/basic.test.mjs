@@ -350,6 +350,17 @@ test("cache version bumps cannot turn successful D1 saves into API errors", () =
   assert.doesNotMatch(source, /export async function cached/);
 });
 
+test("repeated seed execution never resets an existing administrator", () => {
+  const seed = fs.readFileSync("../../schema/seed.sql", "utf8");
+  const script = fs.readFileSync("../../scripts/seed-admin.ts", "utf8");
+  const adminSeed = seed.slice(seed.indexOf("INSERT INTO v2_user"), seed.indexOf("INSERT INTO v2_notice"));
+  assert.match(adminSeed, /ON CONFLICT\(email\) DO NOTHING/);
+  assert.doesNotMatch(adminSeed, /DO UPDATE SET/);
+  assert.doesNotMatch(adminSeed, /password = excluded\.password/);
+  assert.match(script, /ON CONFLICT\(email\) DO NOTHING/);
+  assert.doesNotMatch(script, /DO UPDATE SET password/);
+});
+
 test("high-traffic admin statistics use aggregate and batched D1 reads", () => {
   const source = edgeSource();
   const statistics = fs.readFileSync("src/admin/statistics.ts", "utf8");

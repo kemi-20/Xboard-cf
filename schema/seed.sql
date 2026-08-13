@@ -91,17 +91,7 @@ ON CONFLICT(id) DO NOTHING;
 
 INSERT INTO v2_user(email, password, password_algo, password_salt, uuid, token, transfer_enable, u, d, is_admin, is_staff, plan_id, group_id, remind_expire, remind_traffic, created_at, updated_at)
 VALUES ('admin@admin.com', 'pbkdf2$sha256$100000$xboard-cloudflare-admin$8abd89496c7d7b0cfdc7b786fd49da099859e1167bbcf9f945c38415d6d56268', 'pbkdf2', 'xboard-cloudflare-admin', '00000000-0000-4000-8000-000000000001', 'admin-default-token-change-me', 1099511627776, 0, 0, 1, 1, 1, 1, 1, 1, unixepoch(), unixepoch())
-ON CONFLICT(email) DO UPDATE SET
-  password = excluded.password,
-  password_algo = excluded.password_algo,
-  password_salt = excluded.password_salt,
-  is_admin = 1,
-  is_staff = 1,
-  plan_id = COALESCE(v2_user.plan_id, excluded.plan_id),
-  group_id = COALESCE(v2_user.group_id, excluded.group_id),
-  remind_expire = 1,
-  remind_traffic = 1,
-  updated_at = unixepoch();
+ON CONFLICT(email) DO NOTHING;
 
 INSERT INTO v2_notice(id, title, content, show, sort, created_at, updated_at) VALUES
 (1, 'Welcome to XBoard CF', 'The Cloudflare-native XBoard panel is ready.', 1, 1, unixepoch(), unixepoch())
