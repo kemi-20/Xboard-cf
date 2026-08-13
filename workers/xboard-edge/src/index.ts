@@ -1,6 +1,6 @@
 import type { D1Database, D1PreparedStatement, ExecutionContext, Fetcher, KVNamespace, Queue } from "./types";
-import { body, fail, json, now, ok, ONLINE_RETENTION_SECONDS, randomString, token, uuid } from "./compat";
-import { createSession, currentUser, hashPassword, sessionTokenDigest, verifyPassword } from "./auth";
+import { body, fail, json, MAX_REQUEST_BODY_BYTES, now, ok, ONLINE_RETENTION_SECONDS, randomString, RequestBodyTooLargeError, token, uuid } from "./compat";
+import { createSession, currentUser, hashPassword, passwordNeedsUpgrade, sessionTokenDigest, verifyPassword } from "./auth";
 import { freshSettings, invalidateSettingsCache, list, primaryDatabase, rows, settings } from "./db";
 import { bump } from "./kv";
 import { handleAdminGiftCard, handleUserGiftCard } from "./gift-card";
@@ -246,12 +246,12 @@ FINAL,Proxy
 
 async function ensureBootstrap(env: Env) {
   await ensureStorageOptimization(env);
-  const marker = await optionalKvGet(env, "bootstrap:edge:v22");
+  const marker = await optionalKvGet(env, "bootstrap:edge:v23");
   if (marker) return;
   try {
     const persisted = await env.XBOARD_DB.prepare("SELECT value FROM v2_settings WHERE name = 'system_bootstrap_edge_version'").first<{ value: string }>();
-    if (persisted?.value === "v22") {
-      await optionalKvPut(env, "bootstrap:edge:v22", String(now()));
+    if (persisted?.value === "v23") {
+      await optionalKvPut(env, "bootstrap:edge:v23", String(now()));
       return;
     }
   } catch {
@@ -470,6 +470,7 @@ async function ensureBootstrap(env: Env) {
     "CREATE TABLE IF NOT EXISTS failed_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, connection TEXT NOT NULL, queue TEXT NOT NULL, payload TEXT NOT NULL, exception TEXT NOT NULL, failed_at INTEGER NOT NULL)",
     "CREATE TABLE IF NOT EXISTS v2_traffic_dedup (event_id TEXT PRIMARY KEY, created_at INTEGER NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS v2_traffic_stats_outbox (batch_id TEXT PRIMARY KEY, event_ids TEXT NOT NULL, user_aggregates TEXT NOT NULL, server_aggregates TEXT NOT NULL, transfer_used INTEGER NOT NULL DEFAULT 0, record_at INTEGER NOT NULL, created_at INTEGER NOT NULL) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS v2_login_attempts (id TEXT PRIMARY KEY, attempts INTEGER NOT NULL DEFAULT 0, expires_at INTEGER NOT NULL, updated_at INTEGER NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS v2_log (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, level TEXT, host TEXT, uri TEXT NOT NULL, method TEXT NOT NULL, data TEXT, ip TEXT, context TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"
     , "CREATE TABLE IF NOT EXISTS v2_migration_runs (id TEXT PRIMARY KEY, source_type TEXT NOT NULL, source_name TEXT, source_size INTEGER NOT NULL DEFAULT 0, mode TEXT NOT NULL DEFAULT 'merge', status TEXT NOT NULL DEFAULT 'running', source_counts TEXT, progress TEXT, report TEXT, error TEXT, access_token_hash TEXT, admin_id INTEGER, snapshot_counts TEXT, snapshot_complete INTEGER NOT NULL DEFAULT 0, skip_backup INTEGER NOT NULL DEFAULT 0, prepared_at INTEGER, rollback_progress TEXT, started_at INTEGER NOT NULL, finished_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"
     , "CREATE TABLE IF NOT EXISTS v2_migration_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, level TEXT NOT NULL DEFAULT 'info', table_name TEXT, message TEXT NOT NULL, details TEXT, created_at INTEGER NOT NULL)"
@@ -542,9 +543,9 @@ async function ensureBootstrap(env: Env) {
     }
     await runSqlIgnore(env, "UPDATE v2_user SET transfer_enable = transfer_enable * 1073741824, updated_at = ? WHERE plan_id IS NOT NULL AND transfer_enable > 0 AND EXISTS (SELECT 1 FROM v2_plan WHERE v2_plan.id = v2_user.plan_id AND v2_plan.transfer_enable = v2_user.transfer_enable)", [ts]);
   }
-  await runSqlIgnore(env, "INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES ('system_bootstrap_edge_version', 'v22', ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at", [ts, ts]);
+  await runSqlIgnore(env, "INSERT INTO v2_settings(name, value, created_at, updated_at) VALUES ('system_bootstrap_edge_version', 'v23', ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at", [ts, ts]);
   invalidateSettingsCache();
-  await optionalKvPut(env, "bootstrap:edge:v22", String(ts));
+  await optionalKvPut(env, "bootstrap:edge:v23", String(ts));
   await ensureStorageOptimization(env);
 }
 
@@ -1798,14 +1799,30 @@ async function login(request: Request, env: Env, admin = false) {
   const password = String(input.password || "");
   const all = await settings(env.XBOARD_DB, env.XBOARD_KV); const limitEnabled = !!pickSetting(all, "password_limit_enable", 1);
   const limit = Math.max(1, Number(pickSetting(all, "password_limit_count", 5))); const windowSeconds = Math.max(0, Number(pickSetting(all, "password_limit_expire", 60)) * 60);
-  const rateKey = `rate:login:${email}`; const attempts = Number(await optionalKvGet(env, rateKey) || 0);
-  if (limitEnabled && windowSeconds > 0 && attempts >= limit) return fail("登录尝试次数过多，请稍后再试", 429, 429);
+  const rateKey = `rate:login:${email}`;
+  const rateId = await sessionTokenDigest(`${admin ? "admin" : "user"}:${requestIp(request)}:${email}`);
+  const ts = now();
+  const attempts = limitEnabled && windowSeconds > 0
+    ? Number((await env.XBOARD_DB.prepare("SELECT attempts FROM v2_login_attempts WHERE id = ? AND expires_at > ?").bind(rateId, ts).first<{ attempts: number }>())?.attempts || 0)
+    : 0;
+  if (attempts >= limit) return fail("登录尝试次数过多，请稍后再试", 429, 429);
   const user = await env.XBOARD_DB.prepare("SELECT * FROM v2_user WHERE email = ?").bind(email).first<any>();
   if (!user || (admin && Number(user.is_admin) !== 1) || !(await verifyPassword(password, String(user?.password || ""), user?.password_algo, user?.password_salt))) {
-    if (user && limitEnabled && windowSeconds > 0) await optionalKvPutTtl(env, rateKey, String(attempts + 1), windowSeconds);
+    if (limitEnabled && windowSeconds > 0) {
+      await env.XBOARD_DB.prepare(`INSERT INTO v2_login_attempts(id, attempts, expires_at, updated_at) VALUES (?, 1, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET attempts = CASE WHEN expires_at <= excluded.updated_at THEN 1 ELSE attempts + 1 END,
+          expires_at = excluded.expires_at, updated_at = excluded.updated_at`)
+        .bind(rateId, ts + windowSeconds, ts).run();
+    }
     return fail("账号或密码错误", 401, 401);
   }
   if (Number(user.banned || 0) === 1) return fail("账号已被封禁", 400, 400);
+  if (passwordNeedsUpgrade(String(user.password || ""), user.password_algo)) {
+    const upgraded = await hashPassword(password);
+    await env.XBOARD_DB.prepare("UPDATE v2_user SET password = ?, password_algo = 'bcrypt', password_salt = NULL, updated_at = ? WHERE id = ? AND password = ?")
+      .bind(upgraded, ts, user.id, user.password).run();
+  }
+  await env.XBOARD_DB.prepare("DELETE FROM v2_login_attempts WHERE id = ?").bind(rateId).run();
   try { await env.XBOARD_KV.delete(rateKey); } catch {}
   const accessToken = await createSession(env.XBOARD_DB, env.XBOARD_KV, user, admin);
   await env.XBOARD_DB.prepare("UPDATE v2_user SET last_login_at = ?, last_login_ip = ?, updated_at = ? WHERE id = ?").bind(now(), requestIp(request), now(), user.id).run();
@@ -3872,6 +3889,10 @@ function corsResponse(response: Response) {
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const declaredLength = Number(request.headers.get("content-length") || 0);
+    if (Number.isFinite(declaredLength) && declaredLength > MAX_REQUEST_BODY_BYTES) {
+      return corsResponse(fail("Request body is too large", 413, 413));
+    }
     const decodedRoute = decodeObfuscatedApiRequest(request);
     if (decodedRoute instanceof Response) return corsResponse(decodedRoute);
     const obfuscatedRoute: ObfuscatedApiRequest | null = decodedRoute;
@@ -3883,7 +3904,13 @@ export default {
       XBOARD_DB: primaryDatabase(env.XBOARD_DB),
       SUBSCRIPTION_DB: env.XBOARD_DB
     };
-    let response = await edgeFetch(request, sessionEnv, ctx);
+    let response: Response;
+    try {
+      response = await edgeFetch(request, sessionEnv, ctx);
+    } catch (error) {
+      if (error instanceof RequestBodyTooLargeError) response = fail(error.message, 413, 413);
+      else throw error;
+    }
     if (obfuscatedRoute) response = decorateObfuscatedApiResponse(response, obfuscatedRoute);
     return apiRequest ? corsResponse(response) : response;
   }

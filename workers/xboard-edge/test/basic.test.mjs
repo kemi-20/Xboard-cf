@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { body, MAX_REQUEST_BODY_BYTES, RequestBodyTooLargeError } from "../src/compat.ts";
+import { passwordNeedsUpgrade } from "../src/auth.ts";
 
 const edgeSource = () => [
   "src/index.ts",
@@ -706,7 +708,7 @@ test("login sessions fall back to D1 when KV writes fail", () => {
 test("bootstrap remains available when the KV daily write limit is exhausted", () => {
   const source = edgeSource();
   assert.match(source, /system_bootstrap_edge_version/);
-  assert.match(source, /await optionalKvPut\(env, "bootstrap:edge:v22"/);
+  assert.match(source, /await optionalKvPut\(env, "bootstrap:edge:v23"/);
   assert.doesNotMatch(source, /await env\.XBOARD_KV\.put\("bootstrap:edge:v12"/);
 });
 
@@ -831,7 +833,7 @@ test("complete migration deletes old business data before strict replacement", (
   const source = fs.readFileSync("src/migration.ts", "utf8");
   const page = fs.readFileSync("public/migration/panel.html", "utf8");
   const app = fs.readFileSync("public/migration/app.js", "utf8");
-  assert.match(source, /COMPLETE_RESET_TABLES = \["v2_log", "v2_server_machine_load_history", "v2_job_logs", "v2_traffic_pending_check", "v2_traffic_dedup", "v2_traffic_stats_outbox", "v2_payment_transactions"\]/);
+  assert.match(source, /COMPLETE_RESET_TABLES = \["v2_log", "v2_server_machine_load_history", "v2_job_logs", "v2_traffic_pending_check", "v2_traffic_dedup", "v2_traffic_stats_outbox", "v2_payment_transactions", "v2_login_attempts"\]/);
   assert.match(source, /DELETE FROM sqlite_sequence WHERE name IN/);
   assert.match(source, /COMPLETE_RESET_TABLES\.map\(\(\) => "\?"\)/);
   assert.match(source, /rollback_progress = \?[\s\S]*DELETE FROM sqlite_sequence WHERE name IN/);
@@ -1121,7 +1123,31 @@ test("request bodies preserve repeated form keys and urlencoded payloads", () =>
   const source = fs.readFileSync("src/compat.ts", "utf8");
   assert.match(source, /application\/x-www-form-urlencoded/);
   assert.match(source, /Array\.isArray\(out\[key\]\)/);
-  assert.match(source, /new URLSearchParams\(await request\.text\(\)\)/);
+  assert.match(source, /new URLSearchParams\(text\)/);
+});
+
+test("request body parsing enforces the declared and streamed size limits", async () => {
+  await assert.rejects(() => body(new Request("https://panel.example/api", {
+    method: "POST",
+    headers: { "content-type": "application/json", "content-length": String(MAX_REQUEST_BODY_BYTES + 1) },
+    body: "{}"
+  })), RequestBodyTooLargeError);
+  const oversized = new Uint8Array(MAX_REQUEST_BODY_BYTES + 1);
+  await assert.rejects(() => body(new Request("https://panel.example/api", {
+    method: "POST",
+    headers: { "content-type": "application/octet-stream" },
+    body: oversized
+  })), RequestBodyTooLargeError);
+});
+
+test("legacy password formats are upgraded after successful authentication", () => {
+  assert.equal(passwordNeedsUpgrade("plain-password", null), true);
+  assert.equal(passwordNeedsUpgrade("098f6bcd4621d373cade4e832627b4f6", "md5"), true);
+  assert.equal(passwordNeedsUpgrade("$2b$10$abcdefghijklmnopqrstuuuuuuuuuuuuuuuuuuuuuuuuuuu", "bcrypt"), false);
+  const source = edgeSource();
+  assert.match(source, /INSERT INTO v2_login_attempts/);
+  assert.match(source, /passwordNeedsUpgrade/);
+  assert.match(source, /DELETE FROM v2_login_attempts WHERE id = \?/);
 });
 
 test("V1 app config merges supported nodes into the official Clash app profile", () => {
@@ -1435,7 +1461,7 @@ test("GLM compatibility audit fixes preserve upstream mutations and envelopes", 
   assert.match(source, /url\.searchParams\.get\("current"\)/);
   assert.match(source, /const nextResetAt = plan \? edgeNextResetAt/);
   assert.match(source, /const hasPlan = \(user as any\)\.plan_id !== null/);
-  assert.match(source, /user && limitEnabled/);
+  assert.match(source, /INSERT INTO v2_login_attempts/);
   assert.match(source, /timestamp: new Date\(\)\.toISOString\(\), data: await trafficRank/);
   assert.match(schema, /CREATE TABLE IF NOT EXISTS v2_stat_server[\s\S]*record_type TEXT NOT NULL DEFAULT 'd'/);
 });

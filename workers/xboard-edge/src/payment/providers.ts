@@ -11,6 +11,7 @@ import type {
 const MAX_PROVIDER_RESPONSE_BYTES = 512 * 1024;
 const PROVIDER_TIMEOUT_MS = 12_000;
 const STRIPE_API_VERSION = "2026-02-25.clover";
+const DNS_QUERY_TIMEOUT_MS = 3_000;
 
 export class PaymentError extends Error {
   status: number;
@@ -120,6 +121,36 @@ function validGatewayUrl(value: string) {
   return url;
 }
 
+async function assertPublicGatewayHost(url: URL) {
+  if (isPrivateNetworkHost(url.hostname)) throw new PaymentError("支付网关不能指向本地或私有地址", 422);
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(url.hostname) || url.hostname.includes(":")) return;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), DNS_QUERY_TIMEOUT_MS);
+  try {
+    const answers = await Promise.all(["A", "AAAA"].map(async type => {
+      const endpoint = new URL("https://cloudflare-dns.com/dns-query");
+      endpoint.search = new URLSearchParams({ name: url.hostname, type }).toString();
+      const response = await fetch(endpoint, {
+        headers: { accept: "application/dns-json" },
+        signal: controller.signal,
+        redirect: "error"
+      });
+      if (!response.ok) throw new PaymentError("无法验证支付网关地址", 502);
+      const payload = await response.json() as { Status?: number; Answer?: Array<{ type?: number; data?: string }> };
+      if (payload.Status !== 0 && payload.Status !== 3) throw new PaymentError("无法验证支付网关地址", 502);
+      return (payload.Answer || []).filter(answer => answer.type === 1 || answer.type === 28).map(answer => String(answer.data || ""));
+    }));
+    const addresses = answers.flat();
+    if (!addresses.length) throw new PaymentError("支付网关域名没有可用的公共地址", 422);
+    if (addresses.some(isPrivateNetworkHost)) throw new PaymentError("支付网关域名解析到了本地或私有地址", 422);
+  } catch (error) {
+    if (error instanceof PaymentError) throw error;
+    throw new PaymentError("无法验证支付网关地址", 502);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function joinUrl(base: string, path: string) {
   const url = validGatewayUrl(base.endsWith("/") ? base : `${base}/`);
   const basePath = url.pathname.endsWith("/") ? url.pathname : `${url.pathname}/`;
@@ -130,6 +161,8 @@ function joinUrl(base: string, path: string) {
 }
 
 async function providerFetch(input: RequestInfo | URL, init: RequestInit = {}) {
+  const target = input instanceof Request ? new URL(input.url) : new URL(String(input));
+  await assertPublicGatewayHost(target);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), PROVIDER_TIMEOUT_MS);
   try {
@@ -890,5 +923,6 @@ export const __test = {
   stripeXboardAmount,
   expiryTimestamp,
   validGatewayUrl,
+  assertPublicGatewayHost,
   STRIPE_API_VERSION
 };

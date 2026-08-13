@@ -32,7 +32,7 @@ const SKIPPED_SOURCE_TABLES = ["v2_log", "v2_server_machine_load_history"] as co
 
 const tableSet = new Set<string>(MIGRATION_TABLES);
 const DELETE_TABLES = [...MIGRATION_TABLES].reverse();
-const COMPLETE_RESET_TABLES = ["v2_log", "v2_server_machine_load_history", "v2_job_logs", "v2_traffic_pending_check", "v2_traffic_dedup", "v2_traffic_stats_outbox", "v2_payment_transactions"] as const;
+const COMPLETE_RESET_TABLES = ["v2_log", "v2_server_machine_load_history", "v2_job_logs", "v2_traffic_pending_check", "v2_traffic_dedup", "v2_traffic_stats_outbox", "v2_payment_transactions", "v2_login_attempts"] as const;
 const PAYMENT_TRANSACTION_TABLE = "v2_payment_transactions";
 
 const NON_MIGRATABLE_SERVICE_TABLES = new Set(["v2_plugins"]);

@@ -23,9 +23,18 @@ async function internalRequestAuthorized(env: Env, request: Request) {
     request.headers.get("x-xboard-internal-token-fallback") || ""
   ].filter(Boolean);
   const secret = String(env.INTERNAL_SYNC_TOKEN || "").trim();
-  if (secret && supplied.includes(secret)) return true;
+  if (secret && supplied.some(value => equalText(value, secret))) return true;
   const databaseToken = await databaseInternalSyncToken(env, false);
-  return Boolean(databaseToken && supplied.includes(databaseToken));
+  return Boolean(databaseToken && supplied.some(value => equalText(value, databaseToken)));
+}
+
+function equalText(actual: string, expected: string) {
+  const a = new TextEncoder().encode(actual);
+  const b = new TextEncoder().encode(expected);
+  let different = a.length ^ b.length;
+  const length = Math.max(a.length, b.length);
+  for (let index = 0; index < length; index++) different |= (a[index] || 0) ^ (b[index] || 0);
+  return different === 0;
 }
 
 const SHANGHAI_OFFSET = 8 * 3600;

@@ -20,6 +20,7 @@ export interface Env {
 
 type AuthContext = { input: Row; node?: Row; machine?: Row };
 const ONLINE_RETENTION_SECONDS = 900;
+const MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024;
 const RATE_TIME_FORMATTER = new Intl.DateTimeFormat("en-GB", {
   timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", hourCycle: "h23"
 });
@@ -46,15 +47,41 @@ async function readInput(request: Request): Promise<Row> {
   const input: Row = {};
   url.searchParams.forEach((value, key) => { input[key] = value; });
   if (["GET", "HEAD"].includes(request.method)) return input;
+  const declaredLength = Number(request.headers.get("content-length") || 0);
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_REQUEST_BODY_BYTES) {
+    input.__body_too_large = true;
+    return input;
+  }
   const type = request.headers.get("content-type") || "";
   try {
+    const reader = request.body?.getReader();
+    const chunks: Uint8Array[] = [];
+    let received = 0;
+    while (reader) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      received += chunk.value.byteLength;
+      if (received > MAX_REQUEST_BODY_BYTES) {
+        await reader.cancel();
+        input.__body_too_large = true;
+        return input;
+      }
+      chunks.push(chunk.value);
+    }
+    const bytes = new Uint8Array(received);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
     if (type.includes("application/json")) {
-      const value = await request.json();
+      const text = new TextDecoder().decode(bytes);
+      const value = text ? JSON.parse(text) : {};
       input.__raw = value;
       if (value && typeof value === "object" && !Array.isArray(value)) Object.assign(input, value);
       else if (!Array.isArray(value)) input.__invalid_json = true;
     } else {
-      const form = await request.formData();
+      const form = await new Request(request.url, { method: "POST", headers: request.headers, body: bytes }).formData();
       form.forEach((value, key) => { input[key] = value; });
       input.__invalid_json = true;
     }
@@ -88,10 +115,10 @@ async function internalRequestAuthorized(env: Env, request: Request) {
     request.headers.get("x-xboard-internal-token-fallback") || ""
   ].filter(Boolean);
   const secret = String(env.INTERNAL_SYNC_TOKEN || "").trim();
-  if (secret && supplied.includes(secret)) return true;
+  if (secret && supplied.some(value => equalText(value, secret))) return true;
   let databaseToken = await databaseInternalToken(env);
-  if (supplied.length && !supplied.includes(String(databaseToken || ""))) databaseToken = await databaseInternalToken(env, true);
-  return Boolean(databaseToken && supplied.includes(databaseToken));
+  if (supplied.length && !supplied.some(value => equalText(value, String(databaseToken || "")))) databaseToken = await databaseInternalToken(env, true);
+  return Boolean(databaseToken && supplied.some(value => equalText(value, databaseToken)));
 }
 
 async function reportStatus(env: Env, kind: "machine" | "node", id: number, state: Row, history = false) {
@@ -963,6 +990,7 @@ export class NodeHub {
     }
     if (url.pathname === "/push") {
       const input = await readInput(request);
+      if (input.__body_too_large) return json({ message: "Request body is too large" }, 413);
       const event = String(input.event || "");
       const data = input.data && typeof input.data === "object" ? input.data as Row : {};
       let sent = 0;
@@ -1192,6 +1220,8 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     env = { ...env, XBOARD_DB: primaryDatabase(env.XBOARD_DB) };
     const url = new URL(request.url);
+    const declaredLength = Number(request.headers.get("content-length") || 0);
+    if (Number.isFinite(declaredLength) && declaredLength > MAX_REQUEST_BODY_BYTES) return json({ message: "Request body is too large" }, 413);
     if (url.pathname === "/health") return json({ data: { service: "xboard-server", time: now() } });
     if (url.pathname === "/internal/settings/invalidate" && request.method === "POST") {
       if (!await internalRequestAuthorized(env, request)) return json({ message: "Unauthorized" }, 401);
@@ -1232,6 +1262,7 @@ export default {
       if (!await internalRequestAuthorized(env, request)) return json({ message: "Unauthorized" }, 401);
       invalidateAuthCache();
       const input = await readInput(request);
+      if (input.__body_too_large) return json({ message: "Request body is too large" }, 413);
       if (input.scope === "user" && Number(input.user_id) > 0) {
         const sent = await syncUserChange(env, Number(input.user_id), Number(input.old_group_id || 0));
         return json({ data: true, sent });
@@ -1248,6 +1279,8 @@ export default {
     }
     const handler = routes.get(`${request.method} ${url.pathname}`);
     if (!handler) return json({ message: "Not Found" }, 404);
-    return handler(request, env, await readInput(request));
+    const input = await readInput(request);
+    if (input.__body_too_large) return json({ message: "Request body is too large" }, 413);
+    return handler(request, env, input);
   }
 };

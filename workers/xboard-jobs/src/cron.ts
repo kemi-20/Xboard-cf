@@ -464,6 +464,7 @@ async function checkTrafficExceeded(env: CronEnv) {
 }
 
 async function resetLogs(env: CronEnv, ts: number) {
+  await env.XBOARD_DB.prepare("CREATE TABLE IF NOT EXISTS v2_login_attempts (id TEXT PRIMARY KEY, attempts INTEGER NOT NULL DEFAULT 0, expires_at INTEGER NOT NULL, updated_at INTEGER NOT NULL) WITHOUT ROWID").run();
   const monthThreshold = (months: number) => {
     const date = new Date((ts + SHANGHAI_OFFSET) * 1000);
     date.setUTCMonth(date.getUTCMonth() - months);
@@ -475,7 +476,8 @@ async function resetLogs(env: CronEnv, ts: number) {
     env.XBOARD_DB.prepare("DELETE FROM v2_admin_audit_log WHERE created_at < ?").bind(monthThreshold(3)),
     env.XBOARD_DB.prepare("DELETE FROM failed_jobs WHERE failed_at < ?").bind(ts - 7 * 86400),
     env.XBOARD_DB.prepare("DELETE FROM v2_job_logs WHERE COALESCE(updated_at, created_at) < ?").bind(ts - 7 * 86400),
-    env.XBOARD_DB.prepare("DELETE FROM v2_traffic_dedup WHERE created_at < ?").bind(ts - 7 * 86400)
+    env.XBOARD_DB.prepare("DELETE FROM v2_traffic_dedup WHERE created_at < ?").bind(ts - 7 * 86400),
+    env.XBOARD_DB.prepare("DELETE FROM v2_login_attempts WHERE expires_at <= ?").bind(ts)
   ]);
 }
 

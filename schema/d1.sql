@@ -460,6 +460,13 @@ CREATE TABLE IF NOT EXISTS v2_payment_transactions (
   UNIQUE(provider, event_id),
   UNIQUE(idempotency_key)
 );
+
+CREATE TABLE IF NOT EXISTS v2_login_attempts (
+  id TEXT PRIMARY KEY,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  expires_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_payment_transactions_trade ON v2_payment_transactions(trade_no, payment_id);
 CREATE INDEX IF NOT EXISTS idx_payment_transactions_status ON v2_payment_transactions(status, updated_at);
 CREATE TABLE IF NOT EXISTS v2_coupon (

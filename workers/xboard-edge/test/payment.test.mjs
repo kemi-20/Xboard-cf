@@ -37,7 +37,16 @@ function base64UrlBytes(value) {
 
 function withFetch(mock, run) {
   const original = globalThis.fetch;
-  globalThis.fetch = mock;
+  globalThis.fetch = (input, init) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (url.hostname === "cloudflare-dns.com") {
+      return Promise.resolve(new Response(JSON.stringify({
+        Status: 0,
+        Answer: [{ type: 1, data: "203.0.113.10" }]
+      }), { headers: { "content-type": "application/dns-json" } }));
+    }
+    return mock(input, init);
+  };
   return Promise.resolve(run()).finally(() => { globalThis.fetch = original; });
 }
 
@@ -47,6 +56,22 @@ test("the fixed registry exposes only the eight native payment providers", () =>
     "CoinPayments", "EPay", "MGate", "Stripe"
   ]);
   assert.equal(paymentProviders.has("Creem"), false);
+});
+
+test("payment gateways fail closed when DNS resolves to a private address", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async input => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    assert.equal(url.hostname, "cloudflare-dns.com");
+    return new Response(JSON.stringify({ Status: 0, Answer: [{ type: 1, data: "127.0.0.1" }] }), {
+      headers: { "content-type": "application/dns-json" }
+    });
+  };
+  try {
+    await assert.rejects(() => providerTest.assertPublicGatewayHost(new URL("https://pay.example.test")), /私有地址/);
+  } finally {
+    globalThis.fetch = original;
+  }
 });
 
 test("disabling a payment method blocks new checkout without discarding an in-flight callback", () => {

@@ -11,9 +11,48 @@ export const ok = (data: unknown = true) => json({
   error: null
 });
 export const fail = (message = "Error", status = 400, code = 400) => json({ message, errors: message, code }, status);
+export const MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024;
+
+export class RequestBodyTooLargeError extends Error {
+  status = 413;
+
+  constructor() {
+    super("Request body is too large");
+    this.name = "RequestBodyTooLargeError";
+  }
+}
+
+async function boundedBody(request: Request) {
+  const declared = Number(request.headers.get("content-length") || 0);
+  if (Number.isFinite(declared) && declared > MAX_REQUEST_BODY_BYTES) throw new RequestBodyTooLargeError();
+  if (!request.body) return new Uint8Array();
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  while (true) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    received += chunk.value.byteLength;
+    if (received > MAX_REQUEST_BODY_BYTES) {
+      await reader.cancel();
+      throw new RequestBodyTooLargeError();
+    }
+    chunks.push(chunk.value);
+  }
+  const value = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    value.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return value;
+}
+
 export async function body<T = Record<string, unknown>>(request: Request): Promise<T> {
   const type = (request.headers.get("content-type") || "").toLowerCase();
-  if (type.includes("application/json")) return await request.json() as T;
+  const bytes = await boundedBody(request);
+  const text = new TextDecoder().decode(bytes);
+  if (type.includes("application/json")) return (text ? JSON.parse(text) : {}) as T;
   const out: Record<string, unknown> = {};
   const append = (key: string, value: unknown) => {
     if (!(key in out)) out[key] = value;
@@ -21,16 +60,15 @@ export async function body<T = Record<string, unknown>>(request: Request): Promi
     else out[key] = [out[key], value];
   };
   if (type.includes("application/x-www-form-urlencoded")) {
-    new URLSearchParams(await request.text()).forEach((value, key) => append(key, value));
+    new URLSearchParams(text).forEach((value, key) => append(key, value));
     return out as T;
   }
   if (type.includes("multipart/form-data")) {
-    const form = await request.formData();
+    const form = await new Request(request.url, { method: "POST", headers: request.headers, body: bytes }).formData();
     form.forEach((value, key) => append(key, value));
     return out as T;
   }
-  const raw = await request.text();
-  if (raw) new URLSearchParams(raw).forEach((value, key) => append(key, value));
+  if (text) new URLSearchParams(text).forEach((value, key) => append(key, value));
   return out as T;
 }
 export function uuid(): string {

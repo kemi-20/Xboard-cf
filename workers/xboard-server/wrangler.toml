@@ -5,6 +5,18 @@ compatibility_date = "2026-06-26"
 [cache]
 enabled = true
 
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+invocation_logs = false
+head_sampling_rate = 1
+
+[observability.traces]
+enabled = true
+head_sampling_rate = 0.01
+
 [[d1_databases]]
 binding = "XBOARD_DB"
 database_name = "xboard-db"

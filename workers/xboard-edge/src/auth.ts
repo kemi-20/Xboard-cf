@@ -38,6 +38,10 @@ export async function hashPassword(password: string): Promise<string> {
   return bcrypt.hash(password, 10);
 }
 
+export function passwordNeedsUpgrade(encoded: string, algorithm?: string | null) {
+  return !/^\$2[aby]\$/.test(encoded) || String(algorithm || "").toLowerCase() !== "bcrypt";
+}
+
 export async function createSession(db: D1Database, kv: KVNamespace, user: { id: number; email: string; is_admin?: number }, admin = false) {
   const value = token(32);
   const issuedAt = now();
