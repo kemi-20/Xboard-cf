@@ -12,6 +12,12 @@ const MAX_PROVIDER_RESPONSE_BYTES = 512 * 1024;
 const PROVIDER_TIMEOUT_MS = 12_000;
 const STRIPE_API_VERSION = "2026-02-25.clover";
 const DNS_QUERY_TIMEOUT_MS = 3_000;
+const TRUSTED_PROVIDER_HOSTS = new Set([
+  "api.stripe.com",
+  "openapi.alipay.com",
+  "api.commerce.coinbase.com",
+  "business.coinbase.com"
+]);
 
 export class PaymentError extends Error {
   status: number;
@@ -123,6 +129,7 @@ function validGatewayUrl(value: string) {
 
 async function assertPublicGatewayHost(url: URL) {
   if (isPrivateNetworkHost(url.hostname)) throw new PaymentError("支付网关不能指向本地或私有地址", 422);
+  if (TRUSTED_PROVIDER_HOSTS.has(url.hostname.toLowerCase().replace(/\.$/, ""))) return;
   if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(url.hostname) || url.hostname.includes(":")) return;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), DNS_QUERY_TIMEOUT_MS);

@@ -74,6 +74,32 @@ test("payment gateways fail closed when DNS resolves to a private address", asyn
   }
 });
 
+test("fixed official payment APIs do not depend on the external DNS preflight", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => { throw new Error("DNS preflight must not run"); };
+  try {
+    await providerTest.assertPublicGatewayHost(new URL("https://api.stripe.com/v1/checkout/sessions"));
+    await providerTest.assertPublicGatewayHost(new URL("https://openapi.alipay.com/gateway.do"));
+    await providerTest.assertPublicGatewayHost(new URL("https://api.commerce.coinbase.com/charges"));
+    await providerTest.assertPublicGatewayHost(new URL("https://business.coinbase.com/api/v1/checkouts"));
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("custom payment gateways still fail closed when DNS verification is unavailable", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => { throw new Error("resolver unavailable"); };
+  try {
+    await assert.rejects(
+      () => providerTest.assertPublicGatewayHost(new URL("https://merchant-gateway.example.test/pay")),
+      /无法验证支付网关地址/
+    );
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
 test("disabling a payment method blocks new checkout without discarding an in-flight callback", () => {
   const source = readFileSync(new URL("../src/payment/index.ts", import.meta.url), "utf8");
   const edgeSource = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
