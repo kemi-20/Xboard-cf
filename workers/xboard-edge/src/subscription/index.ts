@@ -577,6 +577,19 @@ function regexValue(value: unknown) {
   try { return new RegExp(value.slice(1, end), flags); } catch { return null; }
 }
 
+// Mihomo/Clash.Meta proxy-group `filter` is a Go/RE2 pattern; support leading (?i)/(?is) inline flags for JS.
+function clashFilterRegex(filter: unknown): RegExp | null {
+  if (typeof filter !== "string" || !filter.length) return null;
+  let source = filter;
+  let flags = "";
+  const inline = source.match(/^\(\?([imsU]+)\)/);
+  if (inline) {
+    flags = inline[1].replaceAll("U", "");
+    source = source.slice(inline[0].length);
+  }
+  try { return new RegExp(source, flags); } catch { return null; }
+}
+
 function yamlProfile(client: Client, template: string, config: Config, user: any, servers: any[], request: Request) {
   let document: Config;
   try { document = parseYaml(template || "") || {}; } catch { document = {}; }
@@ -587,9 +600,19 @@ function yamlProfile(client: Client, template: string, config: Config, user: any
   for (const group of groups) {
     const configured = Array.isArray(group.proxies) ? group.proxies : [];
     const patterns = configured.map(regexValue).filter(Boolean) as RegExp[];
-    group.proxies = patterns.length
-      ? [...configured.filter((item: unknown) => !regexValue(item)), ...names.filter(name => patterns.some(pattern => pattern.test(name)))]
-      : [...configured, ...names];
+    const filterPattern = clashFilterRegex(group.filter);
+    if (filterPattern) {
+      group.proxies = [
+        ...configured.filter((item: unknown) => !regexValue(item)),
+        ...names.filter(name => filterPattern.test(name)),
+      ];
+      delete group.filter;
+      delete group["include-all"];
+    } else {
+      group.proxies = patterns.length
+        ? [...configured.filter((item: unknown) => !regexValue(item)), ...names.filter(name => patterns.some(pattern => pattern.test(name)))]
+        : [...configured, ...names];
+    }
   }
   document["proxy-groups"] = groups.filter((group: any) => Array.isArray(group.proxies) && group.proxies.length);
   document.rules = Array.isArray(document.rules) ? document.rules : [];
@@ -1167,7 +1190,7 @@ function matchesConfiguredSubscribePath(pathname: string, configuredPath: unknow
   return token.length > 0 && !token.includes("/");
 }
 
-export const __test = { clientOf, clientDetails, versionAtLeast, filterByClientCompatibility, regexValue, protocolPrefix, traffic, nextResetAt, decorateServers, general, generalUri, yamlProfile, clashProxy, singboxOutbound, singboxProfile, singboxCoreVersion, adaptSingboxConfig, shadowsocksProfile, textTemplateProfile, proxyLine, shadowrocketLine, quantumultXLine, loonLine, md5, serverPassword, randomizedPort, replaceByPattern, subscriptionUrl, output, responseHeaders, matchesConfiguredSubscribePath };
+export const __test = { clientOf, clientDetails, versionAtLeast, filterByClientCompatibility, regexValue, clashFilterRegex, protocolPrefix, traffic, nextResetAt, decorateServers, general, generalUri, yamlProfile, clashProxy, singboxOutbound, singboxProfile, singboxCoreVersion, adaptSingboxConfig, shadowsocksProfile, textTemplateProfile, proxyLine, shadowrocketLine, quantumultXLine, loonLine, md5, serverPassword, randomizedPort, replaceByPattern, subscriptionUrl, output, responseHeaders, matchesConfiguredSubscribePath };
 
 export async function handleSubscriptionRequest(request: Request, env: Env): Promise<Response> {
     env = { ...env, XBOARD_DB: replicaDatabase(env.SUBSCRIPTION_DB || env.XBOARD_DB) };

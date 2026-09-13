@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { createHash } from "node:crypto";
+import { parse as parseYaml } from "yaml";
 import { __test } from "../src/subscription/index.ts";
 
 test("xboard-edge contains the subscription handler", () => {
@@ -284,6 +285,45 @@ test("saved Clash template controls rendered subscription", () => {
   assert.match(rendered, /Custom Board/);
   assert.match(rendered, /custom\.example/);
   assert.match(rendered, /Node A/);
+});
+
+test("Clash proxy-group filter selects matching nodes instead of dumping all", () => {
+  assert.ok(__test.clashFilterRegex("(?i)(移动|cmcc)"));
+  assert.equal(__test.clashFilterRegex("(?i)移动").flags.includes("i"), true);
+  assert.equal(__test.clashFilterRegex("(?i)移动").test("HK-移动01"), true);
+  assert.equal(__test.clashFilterRegex("(?i)移动").test("US-01"), false);
+
+  const user = { uuid: "00000000-0000-4000-8000-000000000000" };
+  const servers = [
+    { type: "vless", name: "🇭🇰 HK-移动", host: "hk.example", port: 443, protocol_settings: { tls: 1, network: "tcp" } },
+    { type: "vless", name: "🇺🇸 US-电信", host: "us.example", port: 443, protocol_settings: { tls: 1, network: "tcp" } },
+    { type: "vless", name: "🇯🇵 JP-联通", host: "jp.example", port: 443, protocol_settings: { tls: 1, network: "tcp" } },
+  ];
+  const template = `proxy-groups:
+  - name: "所有节点"
+    type: url-test
+    proxies: []
+    include-all: true
+  - name: "中国移动"
+    type: select
+    proxies: []
+    include-all: true
+    filter: "(?i)(移动|三网|cmcc)"
+rules:
+  - MATCH,DIRECT
+`;
+  const rendered = __test.yamlProfile("clashmeta", template, { app_name: "Board" }, user, servers, new Request("https://sub.example/s/token"));
+  const document = parseYaml(rendered);
+  const allGroup = document["proxy-groups"].find(group => group.name === "所有节点");
+  const cmccGroup = document["proxy-groups"].find(group => group.name === "中国移动");
+  assert.ok(allGroup.proxies.includes("🇭🇰 HK-移动"));
+  assert.ok(allGroup.proxies.includes("🇺🇸 US-电信"));
+  assert.ok(allGroup.proxies.includes("🇯🇵 JP-联通"));
+  assert.ok(cmccGroup.proxies.includes("🇭🇰 HK-移动"));
+  assert.ok(!cmccGroup.proxies.includes("🇺🇸 US-电信"));
+  assert.ok(!cmccGroup.proxies.includes("🇯🇵 JP-联通"));
+  assert.equal(cmccGroup.filter, undefined);
+  assert.equal(cmccGroup["include-all"], undefined);
 });
 
 test("saved Surge template placeholders are replaced", () => {
