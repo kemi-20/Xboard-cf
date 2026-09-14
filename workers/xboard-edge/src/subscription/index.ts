@@ -1178,8 +1178,10 @@ async function build(request: Request, env: Env, token: string, loadedConfig?: C
   return { status: 200, body, headers: responseHeaders(client, config, user) };
 }
 
-async function bodyEtag(body: string) {
-  return `"${await sha256Hex(body)}"`;
+async function bodyEtag(body: string, userInfo = "") {
+  // Traffic lives in Subscription-Userinfo, not the YAML body. Clash clients often
+  // ignore header updates on 304, so fold userinfo into the validator.
+  return `"${await sha256Hex(`${body}\n${userInfo}`)}"`;
 }
 
 function matchesConfiguredSubscribePath(pathname: string, configuredPath: unknown) {
@@ -1205,8 +1207,8 @@ export async function handleSubscriptionRequest(request: Request, env: Env): Pro
       : url.pathname.split("/").filter(Boolean).pop() || url.searchParams.get("token") || "";
     if (!token) return fail("Token required", 400);
     const result = await build(request, env, token, configured);
-    const etag = await bodyEtag(result.body);
     const headers = new Headers(result.headers as HeadersInit);
+    const etag = await bodyEtag(result.body, headers.get("subscription-userinfo") || "");
     headers.set("etag", etag);
     headers.set("cache-control", "no-store, no-cache, must-revalidate");
     headers.set("pragma", "no-cache");

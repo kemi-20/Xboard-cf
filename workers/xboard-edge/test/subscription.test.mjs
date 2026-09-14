@@ -345,6 +345,7 @@ test("subscription URL patterns, compatibility filters and revalidation follow u
   assert.match(source, /cache-control", "no-store, no-cache, must-revalidate"/);
   assert.match(source, /if-none-match/);
   assert.match(source, /status: 304/);
+  assert.match(source, /bodyEtag\(result\.body, headers\.get\("subscription-userinfo"\)/);
 });
 
 const realityVless = {
