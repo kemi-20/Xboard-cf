@@ -131,6 +131,20 @@ test("plain browser subscriptions display inline like upstream General", () => {
   assert.equal(headers["subscription-userinfo"], "upload=1; download=2; total=3; expire=4");
 });
 
+test("subscription byte headers remain integer-parseable with historical fractional usage", () => {
+  const user = { u: 1322349779281.259, d: 5285707875900.639, transfer_enable: 1073740750258176.5, expired_at: null };
+  for (const client of ["clash", "clashmeta", "stash", "singbox", "plain"]) {
+    const header = __test.responseHeaders(client, {}, user)["subscription-userinfo"];
+    assert.equal(header, "upload=1322349779281; download=5285707875900; total=1073740750258176; expire=");
+    const counts = header.split("; ").slice(0, 3).map(field => BigInt(field.split("=")[1]));
+    assert.equal(counts[0] + counts[1], 6608057655181n);
+  }
+  assert.equal(user.u, 1322349779281.259);
+  assert.equal(user.d, 5285707875900.639);
+  const invalid = { u: -1.5, d: Infinity, transfer_enable: "invalid", expired_at: 1802269533 };
+  assert.equal(__test.responseHeaders("clashmeta", {}, invalid)["subscription-userinfo"], "upload=0; download=0; total=0; expire=1802269533");
+});
+
 test("subscription response headers follow each upstream protocol", () => {
   const user = { u: 1, d: 2, transfer_enable: 3, expired_at: 4 };
   const config = { app_name: "Board Name", app_url: "https://panel.example" };

@@ -1104,7 +1104,12 @@ function output(client: Client, config: Config, templateMap: Config, user: any, 
 
 function responseHeaders(client: Client, config: Config, user: any) {
   const appName = String(config.app_name || "XBoard");
-  const userInfo = `upload=${Number(user.u || 0)}; download=${Number(user.d || 0)}; total=${Number(user.transfer_enable || 0)}; expire=${user.expired_at === null || user.expired_at === undefined ? "" : Number(user.expired_at)}`;
+  // Clash clients parse byte counts as integers; historical fractional usage otherwise becomes zero.
+  const bytes = (value: unknown) => {
+    const amount = Number(value || 0);
+    return Number.isFinite(amount) ? Math.max(0, Math.trunc(amount)) : 0;
+  };
+  const userInfo = `upload=${bytes(user.u)}; download=${bytes(user.d)}; total=${bytes(user.transfer_enable)}; expire=${user.expired_at === null || user.expired_at === undefined ? "" : Number(user.expired_at)}`;
   const headers: Config = {};
 
   if (["clash", "clashmeta", "stash"].includes(client)) {
