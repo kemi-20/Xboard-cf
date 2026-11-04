@@ -3810,7 +3810,7 @@ async function edgeFetch(request: Request, env: Env, ctx: ExecutionContext): Pro
     const url = new URL(request.url);
     if (isNodeProtocolPath(url.pathname, request.method)) return env.XBOARD_SERVER.fetch(request);
     if (url.pathname === "/api/v1/client/subscribe") return handleSubscriptionRequest(request, env);
-    const staticAsset = url.pathname === "/settings.local.js" || url.pathname === "/manifest.json" || url.pathname.startsWith("/assets/") || url.pathname.startsWith("/locales/") || url.pathname.startsWith("/images/");
+    const staticAsset = url.pathname === "/settings.local.js" || url.pathname === "/manifest.json" || url.pathname.startsWith("/assets/") || url.pathname.startsWith("/locales/") || url.pathname.startsWith("/images/") || url.pathname.startsWith("/migration/");
     if (!staticAsset) {
       await ensureBootstrap(env);
     }
