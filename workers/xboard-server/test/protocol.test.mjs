@@ -128,3 +128,28 @@ test("empty certificate configuration is omitted like upstream", () => {
   assert.equal(buildNodeConfig({ ...base, cert_config: { mode: "none" } }).cert_config, undefined);
   assert.deepEqual(buildNodeConfig({ ...base, cert_config: { mode: "file", cert: "/cert.pem" } }).cert_config, { cert_mode: "file", cert: "/cert.pem" });
 });
+
+test("node config sends existing panel ACME ports as JSON integers", () => {
+  const base = { type: "hysteria", server_port: 443, protocol_settings: { version: 2 } };
+  const cert = { mode: "http", domain: "node.example", http_port: "52096" };
+  const config = buildNodeConfig({ ...base, cert_config: JSON.stringify(cert) });
+  assert.deepEqual(JSON.parse(JSON.stringify(config)).cert_config, {
+    cert_mode: "http", domain: "node.example", http_port: 52096
+  });
+  assert.equal(config.server_port, 443);
+  assert.deepEqual(buildNodeConfig({
+    ...base,
+    cert_config: { cert_mode: "http", http_port: 52096 }
+  }).cert_config, { cert_mode: "http", http_port: 52096 });
+  assert.equal(buildNodeConfig({
+    ...base,
+    cert_config: { cert_mode: "http" }
+  }).cert_config.http_port, undefined);
+});
+
+test("ACME port normalization does not turn invalid values into a listening port", () => {
+  for (const port of ["", "0", "80.5", "0x50", "8e1", "-1", "65536", false]) {
+    const cert = { cert_mode: "http", http_port: port };
+    assert.equal(buildNodeConfig({ type: "hysteria", cert_config: cert }).cert_config.http_port, port);
+  }
+});

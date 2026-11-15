@@ -182,9 +182,13 @@ export function buildNodeConfig(node: Row, routeRows: Row[] = []): Row {
   const customRoutes = arrayAt(node.custom_routes);
   if (outbounds.length) response.custom_outbounds = outbounds;
   if (customRoutes.length) response.custom_routes = customRoutes;
-  const cert = objectAt(node.cert_config);
+  const cert = { ...objectAt(node.cert_config) };
   if (Object.keys(cert).length) {
     if (cert.mode !== null && cert.mode !== undefined && cert.cert_mode === undefined) { cert.cert_mode = cert.mode; delete cert.mode; }
+    if (typeof cert.http_port === "string" && /^[0-9]{1,5}$/.test(cert.http_port)) {
+      const port = Number(cert.http_port);
+      if (port >= 1 && port <= 65535) cert.http_port = port;
+    }
     if (cert.cert_mode !== "none") response.cert_config = cert;
   }
   return response;

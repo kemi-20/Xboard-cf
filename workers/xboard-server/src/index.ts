@@ -254,7 +254,8 @@ async function nodeConfig(env: Env, node: Row, fresh = false) {
   if (fresh) return loadNodeConfig(env, node, pushInterval, pullInterval);
   let version = "0";
   try { version = await env.XBOARD_KV.get("servers_version") || "0"; } catch {}
-  return cachedData(`node-config:${node.id}:${node.updated_at || 0}:${version}:${pushInterval}:${pullInterval}`, 300, async () => {
+  // Skip cached configs that may still contain string ACME ports.
+  return cachedData(`node-config:${node.id}:${node.updated_at || 0}:${version}:${pushInterval}:${pullInterval}:v2`, 300, async () => {
     return loadNodeConfig(env, node, pushInterval, pullInterval);
   }, 900);
 }
