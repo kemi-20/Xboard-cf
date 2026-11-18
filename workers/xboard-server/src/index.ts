@@ -103,6 +103,8 @@ function booleanSetting(value: unknown, fallback = false) {
 }
 
 const STATUS_HUB_ID = "global";
+const WS_NODE_STATUS_INTERVAL_SECONDS = 60;
+const WS_NODE_STATUS_MAX_TRACKED_NODES = 64;
 let lastStatusWarningAt = 0;
 
 function statusHub(env: Env) {
@@ -973,6 +975,22 @@ export class NodeHub {
     try { return (socket as any).deserializeAttachment?.() || {}; } catch { return {}; }
   }
 
+  private shouldForwardNodeStatus(socket: WebSocket, identity: Row, nodeIds: number[], nodeId: number, timestamp: number) {
+    if (nodeIds.length > WS_NODE_STATUS_MAX_TRACKED_NODES) return true;
+    const previous = identity.node_status_at as Record<number, number> | undefined;
+    const last = previous?.[nodeId] || 0;
+    if (last > 0 && timestamp - last < WS_NODE_STATUS_INTERVAL_SECONDS) return false;
+    const recent: Record<number, number> = {};
+    for (const id of nodeIds) {
+      const seenAt = previous?.[id] || 0;
+      if (seenAt > 0 && timestamp - seenAt < WS_NODE_STATUS_INTERVAL_SECONDS) recent[id] = seenAt;
+    }
+    recent[nodeId] = timestamp;
+    // The per-connection interval must survive WebSocket hibernation.
+    try { (socket as any).serializeAttachment?.({ ...identity, node_status_at: recent }); } catch { /* Continue reporting if the attachment cannot be updated. */ }
+    return true;
+  }
+
   private async fullSync(env: Env, socket: WebSocket, node: Row, machineMode = false) {
     const suffix = machineMode ? { node_id: Number(node.id) } : {};
     const [config, users] = await Promise.all([nodeConfig(env, node), nodeUsers(env, node)]);
@@ -1075,12 +1093,14 @@ export class NodeHub {
     }
     const nodeId = identity.mode === "machine" ? Number(data.node_id) : Number(identity.node_id);
     if (!nodeId || !nodeIds.includes(nodeId)) return;
+    const timestamp = now();
+    if (event === "node.status" && !this.shouldForwardNodeStatus(socket, identity, nodeIds, nodeId, timestamp)) return;
     const node = await getNode(env, nodeId);
     if (!node) return;
     if (event === "node.status") {
       const status = data.status ?? (data.mem && data.disk ? data : null);
       const metrics = data.metrics ?? data;
-      const runtime: Row = { machine_id: Number(node.machine_id || 0) || null, last_check_at: now() };
+      const runtime: Row = { machine_id: Number(node.machine_id || 0) || null, last_check_at: timestamp };
       const load = statusState(status);
       const metricValues = metricsState(metrics);
       if (load) runtime.load_status = load;
@@ -1170,33 +1190,39 @@ routes.set("POST /api/v2/server/report", async (_request, env, input) => {
   if (auth instanceof Response) return auth;
   const node = auth.node!;
   const nonEmptyArrayLike = (value: unknown) => Boolean(value && typeof value === "object" && Object.keys(value as Row).length);
-  await touchNode(env, node);
-  const traffic = nonEmptyArrayLike(input.traffic)
-    ? await enqueueTraffic(env, node, input.traffic, false)
-    : { count: 0, connections: {} as Record<string, number> };
-  if (nonEmptyArrayLike(input.alive)) await processAlive(env, Number(node.id), input.alive);
-  const runtime: Row = { machine_id: Number(node.machine_id || 0) || null };
-  if (traffic.count > 0) {
-    runtime.last_push_at = now();
-    runtime.online = traffic.count;
+  let runtime: Row | undefined;
+  try {
+    const traffic = nonEmptyArrayLike(input.traffic)
+      ? await enqueueTraffic(env, node, input.traffic, false)
+      : { count: 0, connections: {} as Record<string, number> };
+    if (nonEmptyArrayLike(input.alive)) await processAlive(env, Number(node.id), input.alive);
+    const status: Row = {};
+    if (traffic.count > 0) {
+      status.last_push_at = now();
+      status.online = traffic.count;
+    }
+    const onlineCounts = normalizeOnlineCounts(input.online);
+    if (input.online && typeof input.online === "object" && !Array.isArray(input.online)) {
+      const reportedAt = now();
+      status.connections = onlineCounts;
+      status.connections_at = reportedAt;
+      await refreshOnlineUsers(env, onlineCounts, reportedAt);
+    } else if (traffic.count > 0) {
+      status.connections = traffic.connections;
+      status.connections_at = now();
+    }
+    const load = nonEmptyArrayLike(input.status) ? statusState(input.status) : null;
+    const metricValues = nonEmptyArrayLike(input.metrics) ? metricsState(input.metrics) : null;
+    if (load) status.load_status = load;
+    if (metricValues) status.metrics = metricValues;
+    runtime = status;
+    return json({ data: true });
+  } finally {
+    // A failed traffic or device update still proves the node reached the panel.
+    await reportStatus(env, "node", Number(node.id), {
+      ...runtime, machine_id: Number(node.machine_id || 0) || null, last_check_at: now()
+    });
   }
-  const onlineCounts = normalizeOnlineCounts(input.online);
-  if (input.online && typeof input.online === "object" && !Array.isArray(input.online)) {
-    const reportedAt = now();
-    runtime.connections = onlineCounts;
-    runtime.connections_at = reportedAt;
-    await refreshOnlineUsers(env, onlineCounts, reportedAt);
-  } else if (traffic.count > 0) {
-    const reportedAt = now();
-    runtime.connections = traffic.connections;
-    runtime.connections_at = reportedAt;
-  }
-  const load = nonEmptyArrayLike(input.status) ? statusState(input.status) : null;
-  const metricValues = nonEmptyArrayLike(input.metrics) ? metricsState(input.metrics) : null;
-  if (load) runtime.load_status = load;
-  if (metricValues) runtime.metrics = metricValues;
-  await reportStatus(env, "node", Number(node.id), runtime);
-  return json({ data: true });
 });
 
 routes.set("POST /api/v2/server/machine/nodes", async (_request, env, input) => {

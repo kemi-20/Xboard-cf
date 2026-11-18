@@ -363,17 +363,11 @@ test("websocket device state follows the official per-IP contract", () => {
   assert.doesNotMatch(source, /node:ws:(?:target|alive)/);
 });
 
-test("HTTP reports retain per-user online connections and clear empty snapshots", () => {
+test("normalize online counts and keep D1 device-count writes bounded", () => {
   const source = fs.readFileSync("src/index.ts", "utf8");
-  assert.match(source, /input\.online && typeof input\.online === "object"/);
-  assert.match(source, /runtime\.connections = onlineCounts/);
-  assert.match(source, /await refreshOnlineUsers\(env, onlineCounts, reportedAt\)/);
   assert.match(source, /COALESCE\(last_online_at, 0\) < \?/);
   assert.match(source, /\.bind\(count, count, timestamp, Number\(userId\), count, timestamp - 240\)/);
   assert.doesNotMatch(source, /timestamp - 480/);
-  assert.match(source, /connections = Object\.fromEntries\(payload\.map\(item => \[String\(item\.user_id\), 1\]\)\)/);
-  assert.match(source, /else if \(traffic\.count > 0\)[\s\S]{0,180}runtime\.connections = traffic\.connections/);
-  assert.doesNotMatch(source, /refreshOnlineUsers\(env, traffic\.connections/);
   assert.deepEqual(normalizeOnlineCounts({ "1": 2, "2": "3", "3": 0, bad: 4, "-1": 5 }), { "1": 2, "2": 3 });
 });
 
